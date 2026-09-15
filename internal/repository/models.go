@@ -62,11 +62,11 @@ type Entry struct {
 }
 
 type User struct {
-	ID               ULID
-	Username         string
-	IsAdmin          bool
-	PasswordHash     string
-	IsServiceAccount bool
+	ID           ULID
+	Username     string
+	IsAdmin      bool
+	PasswordHash string
+	AccountType  AccountType
 }
 
 type APIKey struct {

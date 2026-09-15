@@ -106,3 +106,28 @@ func TestServeCommand_FlagBinding(t *testing.T) {
 		t.Errorf("expected Auth.OIDC.RedirectURL 'https://app.example.com/callback', got %q", cfg.Auth.OIDC.RedirectURL)
 	}
 }
+
+func TestServeCommand_DisableLoginPageFlag(t *testing.T) {
+	viper.Reset()
+
+	globalOptions := &cli.GlobalOptions{}
+	cmd := cli.NewServeCommand(globalOptions, nil)
+
+	args := []string{
+		"--auth-oidc-disable-login-page=true",
+	}
+
+	if err := cmd.ParseFlags(args); err != nil {
+		t.Fatalf("ParseFlags failed: %v", err)
+	}
+
+	var cfg config.Config
+	if err := viper.Unmarshal(&cfg); err != nil {
+		t.Fatalf("viper.Unmarshal failed: %v", err)
+	}
+
+	if cfg.Auth.OIDC.DisableLoginPage != true {
+		t.Errorf("expected Auth.OIDC.DisableLoginPage true when using --auth-oidc-disable-login-page, got false")
+	}
+}
+

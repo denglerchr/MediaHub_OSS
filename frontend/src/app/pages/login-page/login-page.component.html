@@ -11,7 +11,11 @@
         <p>Welcome back! Please log in to continue.</p>
     </div>
     
-    <div *ngIf="appInfo?.oidc?.enabled" class="mb-4">
+    <div *ngIf="isExchangingCode" class="text-center my-4">
+      <p>Completing Single Sign-On, please wait...</p>
+    </div>
+
+    <div *ngIf="!isExchangingCode && appInfo?.oidc?.enabled" class="mb-4">
       <button 
         type="button" 
         class="btn btn-secondary sso-btn" 
@@ -27,7 +31,7 @@
       </div>
     </div>
 
-    <form *ngIf="!appInfo?.oidc?.login_page_disabled" [formGroup]="loginForm" (ngSubmit)="onSubmit()">
+    <form *ngIf="!isExchangingCode && !appInfo?.oidc?.login_page_disabled" [formGroup]="loginForm" (ngSubmit)="onSubmit()">
       <div class="form-group">
         <label for="username" class="form-label">Username</label>
         <input

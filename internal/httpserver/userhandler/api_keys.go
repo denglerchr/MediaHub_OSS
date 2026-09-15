@@ -39,10 +39,10 @@ type APIKeyCreatedResponse struct {
 }
 
 type UserSubResponse struct {
-	ID               string `json:"id"`
-	Username         string `json:"username"`
-	IsAdmin          bool   `json:"is_admin"`
-	IsServiceAccount bool   `json:"is_service_account"`
+	ID          string           `json:"id"`
+	Username    string           `json:"username"`
+	IsAdmin     bool             `json:"is_admin"`
+	AccountType repo.AccountType `json:"account_type"`
 }
 
 type CreateAPIKeyPayload struct {
@@ -135,10 +135,10 @@ func (h *UserHandler) GetAllAPIKeys(w http.ResponseWriter, r *http.Request) {
 		}
 		apiKeyResp := mapToAPIKeyResponse(key)
 		apiKeyResp.User = &UserSubResponse{
-			ID:               string(u.ID),
-			Username:         u.Username,
-			IsAdmin:          u.IsAdmin,
-			IsServiceAccount: u.IsServiceAccount,
+			ID:          string(u.ID),
+			Username:    u.Username,
+			IsAdmin:     u.IsAdmin,
+			AccountType: u.AccountType,
 		}
 		resp = append(resp, apiKeyResp)
 	}

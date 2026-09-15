@@ -38,8 +38,8 @@
                 {{ key.user?.username || 'Unknown User' }}
               </td>
               <td>
-                <span class="badge" [ngClass]="key.user?.is_service_account ? 'badge-sa' : 'badge-user'">
-                  {{ key.user?.is_service_account ? 'Service Account' : 'Standard User' }}
+                <span class="badge" [ngClass]="key.user?.account_type === 'service_account' ? 'badge-sa' : 'badge-user'">
+                  {{ key.user?.account_type === 'service_account' ? 'Service Account' : (key.user?.account_type === 'oidc' ? 'SSO User' : 'Standard User') }}
                 </span>
               </td>
               <td style="font-weight: 500;">{{ key.name }}</td>

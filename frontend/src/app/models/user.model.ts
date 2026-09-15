@@ -8,12 +8,14 @@ export interface Permission {
   can_admin: boolean;
 }
 
+export type AccountType = 'local' | 'service_account' | 'oidc';
+
 // Update the User interface to perfectly match the backend JSON
 export interface User {
-  id: string; // Changed from number to string for ULID
+  id: string; // ULID
   username: string;
   is_admin: boolean;
-  is_service_account: boolean;
+  account_type: AccountType;
   permissions: Permission[]; 
   
   // Optional tracking fields (if your backend still returns them)

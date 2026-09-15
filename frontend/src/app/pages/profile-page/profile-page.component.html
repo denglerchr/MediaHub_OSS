@@ -32,6 +32,12 @@
                 {{ user.is_admin ? 'Global Administrator' : 'Standard User' }}
               </span>
             </div>
+            <div class="info-row">
+              <span class="info-label">Account Type:</span>
+              <span class="info-value badge" [ngClass]="user.account_type === 'oidc' ? 'badge-primary' : 'badge-secondary'">
+                {{ user.account_type === 'oidc' ? 'Single Sign-On (OIDC)' : (user.account_type === 'service_account' ? 'Service Account' : 'Local User') }}
+              </span>
+            </div>
             
             <div class="permissions-details" style="margin-top: 1.5rem;">
               <h4>Authorized Databases</h4>
@@ -81,8 +87,8 @@
           </div>
         </div>
 
-        <!-- Section 2: Change Password -->
-        <div class="card">
+        <!-- Section 2: Change Password (hidden for OIDC users) -->
+        <div class="card" *ngIf="user.account_type !== 'oidc'">
           <div class="card-header">
             <h3>Change Password</h3>
           </div>

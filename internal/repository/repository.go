@@ -57,12 +57,16 @@ type Repository interface {
 	CountAdminUsers(ctx context.Context) (int64, error)
 	DeleteUser(ctx context.Context, id ULID) error
 	UpdateUser(ctx context.Context, user User) (User, error)
-	GetUsers(ctx context.Context, isServiceAccount *bool) ([]User, error)
+	GetUsers(ctx context.Context, accountType *AccountType) ([]User, error)
 	GetUserByID(ctx context.Context, id ULID) (User, error)
 	GetUserByUsername(ctx context.Context, username string) (User, error)
 	SetUserPermissions(ctx context.Context, permissions UserPermissions) error // create or update or delete (in case of empty Roles)
 	GetUserPermissions(ctx context.Context, userID ULID, dbID ULID) (UserPermissions, error)
 	GetAllUserPermissions(ctx context.Context, userID ULID) ([]UserPermissions, error)
+
+	// OIDC
+	GetUserByOIDCIdentity(ctx context.Context, issuer, subject string) (User, error)
+	CreateOIDCUser(ctx context.Context, params CreateOIDCUserParams) (User, error)
 
 	// Token
 	StoreRefreshToken(ctx context.Context, userID ULID, tokenHash string, validDuration time.Duration) error // TODO adapt implementations

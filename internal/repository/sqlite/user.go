@@ -18,8 +18,8 @@ func (r *SQLiteRepository) CreateUser(ctx context.Context, user repo.User) (repo
 	user.ID = repo.ULID(shared.GenerateULID())
 
 	query, args, err := r.Builder.Insert("users").
-		Columns("id", "username", "password_hash", "is_admin", "is_service_account").
-		Values(user.ID.String(), user.Username, user.PasswordHash, user.IsAdmin, user.IsServiceAccount).
+		Columns("id", "username", "password_hash", "is_admin", "account_type").
+		Values(user.ID.String(), user.Username, user.PasswordHash, user.IsAdmin, int(user.AccountType)).
 		ToSql()
 	if err != nil {
 		return repo.User{}, fmt.Errorf("failed to build insert user query: %w", err)
@@ -89,7 +89,7 @@ func (r *SQLiteRepository) UpdateUser(ctx context.Context, user repo.User) (repo
 		Set("username", user.Username).
 		Set("password_hash", user.PasswordHash).
 		Set("is_admin", user.IsAdmin).
-		Set("is_service_account", user.IsServiceAccount).
+		Set("account_type", int(user.AccountType)).
 		Where(squirrel.Eq{"id": user.ID.String()}).
 		ToSql()
 	if err != nil {
@@ -117,12 +117,12 @@ func (r *SQLiteRepository) UpdateUser(ctx context.Context, user repo.User) (repo
 }
 
 // GetUsers retrieves a list of all user accounts from the database.
-func (r *SQLiteRepository) GetUsers(ctx context.Context, isServiceAccount *bool) ([]repo.User, error) {
-	b := r.Builder.Select("id", "username", "password_hash", "is_admin", "is_service_account").
+func (r *SQLiteRepository) GetUsers(ctx context.Context, accountType *repo.AccountType) ([]repo.User, error) {
+	b := r.Builder.Select("id", "username", "password_hash", "is_admin", "account_type").
 		From("users")
 
-	if isServiceAccount != nil {
-		b = b.Where(squirrel.Eq{"is_service_account": *isServiceAccount})
+	if accountType != nil {
+		b = b.Where(squirrel.Eq{"account_type": int(*accountType)})
 	}
 
 	query, args, err := b.ToSql()
@@ -140,10 +140,12 @@ func (r *SQLiteRepository) GetUsers(ctx context.Context, isServiceAccount *bool)
 	for rows.Next() {
 		var user repo.User
 		var idStr string
-		if err := rows.Scan(&idStr, &user.Username, &user.PasswordHash, &user.IsAdmin, &user.IsServiceAccount); err != nil {
+		var accountTypeUint uint8
+		if err := rows.Scan(&idStr, &user.Username, &user.PasswordHash, &user.IsAdmin, &accountTypeUint); err != nil {
 			return nil, fmt.Errorf("failed to scan user row: %w", err)
 		}
 		user.ID = repo.ULID(idStr)
+		user.AccountType = repo.AccountType(accountTypeUint)
 		users = append(users, user)
 	}
 
@@ -156,7 +158,7 @@ func (r *SQLiteRepository) GetUsers(ctx context.Context, isServiceAccount *bool)
 
 // GetUserByID retrieves a single user record by its unique ID.
 func (r *SQLiteRepository) GetUserByID(ctx context.Context, id repo.ULID) (repo.User, error) {
-	query, args, err := r.Builder.Select("id", "username", "password_hash", "is_admin", "is_service_account").
+	query, args, err := r.Builder.Select("id", "username", "password_hash", "is_admin", "account_type").
 		From("users").
 		Where(squirrel.Eq{"id": id.String()}).
 		ToSql()
@@ -166,7 +168,8 @@ func (r *SQLiteRepository) GetUserByID(ctx context.Context, id repo.ULID) (repo.
 
 	var user repo.User
 	var idStr string
-	err = r.DB.QueryRowContext(ctx, query, args...).Scan(&idStr, &user.Username, &user.PasswordHash, &user.IsAdmin, &user.IsServiceAccount)
+	var accountTypeUint uint8
+	err = r.DB.QueryRowContext(ctx, query, args...).Scan(&idStr, &user.Username, &user.PasswordHash, &user.IsAdmin, &accountTypeUint)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return repo.User{}, customerrors.ErrNotFound
@@ -174,13 +177,14 @@ func (r *SQLiteRepository) GetUserByID(ctx context.Context, id repo.ULID) (repo.
 		return repo.User{}, fmt.Errorf("failed to scan user by id: %w", err)
 	}
 	user.ID = repo.ULID(idStr)
+	user.AccountType = repo.AccountType(accountTypeUint)
 
 	return user, nil
 }
 
 // GetUserByUsername retrieves a single user record by their unique username.
 func (r *SQLiteRepository) GetUserByUsername(ctx context.Context, username string) (repo.User, error) {
-	query, args, err := r.Builder.Select("id", "username", "password_hash", "is_admin", "is_service_account").
+	query, args, err := r.Builder.Select("id", "username", "password_hash", "is_admin", "account_type").
 		From("users").
 		Where(squirrel.Eq{"username": username}).
 		ToSql()
@@ -190,7 +194,8 @@ func (r *SQLiteRepository) GetUserByUsername(ctx context.Context, username strin
 
 	var user repo.User
 	var idStr string
-	err = r.DB.QueryRowContext(ctx, query, args...).Scan(&idStr, &user.Username, &user.PasswordHash, &user.IsAdmin, &user.IsServiceAccount)
+	var accountTypeUint uint8
+	err = r.DB.QueryRowContext(ctx, query, args...).Scan(&idStr, &user.Username, &user.PasswordHash, &user.IsAdmin, &accountTypeUint)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return repo.User{}, customerrors.ErrNotFound
@@ -198,6 +203,7 @@ func (r *SQLiteRepository) GetUserByUsername(ctx context.Context, username strin
 		return repo.User{}, fmt.Errorf("failed to scan user by username: %w", err)
 	}
 	user.ID = repo.ULID(idStr)
+	user.AccountType = repo.AccountType(accountTypeUint)
 
 	return user, nil
 }

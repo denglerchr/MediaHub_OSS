@@ -1,6 +1,6 @@
 import { Component, OnInit, OnDestroy } from '@angular/core';
 import { FormBuilder, FormGroup, Validators } from '@angular/forms';
-import { Router } from '@angular/router';
+import { ActivatedRoute, Router } from '@angular/router';
 import { AuthService } from '../../services/auth.service';
 import { NotificationService } from '../../services/notification.service';
 import { AppInfoService } from '../../services/app-info.service';
@@ -18,6 +18,7 @@ import { HttpErrorResponse } from '@angular/common/http';
 export class LoginPageComponent implements OnInit, OnDestroy {
   loginForm: FormGroup;
   isLoading = false;
+  isExchangingCode = false;
   loginError: string | null = null;
   appInfo: AppInfo | null = null;
   
@@ -27,6 +28,7 @@ export class LoginPageComponent implements OnInit, OnDestroy {
     private fb: FormBuilder,
     private authService: AuthService,
     private router: Router,
+    private route: ActivatedRoute,
     private notificationService: NotificationService,
     private appInfoService: AppInfoService
   ) {
@@ -42,14 +44,41 @@ export class LoginPageComponent implements OnInit, OnDestroy {
       return;
     }
 
+    const code = this.route.snapshot.queryParamMap.get('code');
+    if (code) {
+      this.handleOidcCode(code);
+      return;
+    }
+
     // Load AppInfo to check OIDC settings
     this.appInfoService.loadInfo().pipe(takeUntil(this.destroy$)).subscribe(info => {
       this.appInfo = info;
       
-      // UPDATED: Check nested oidc object properties
+      // Automatically redirect to OIDC if local login page is disabled and no error occurred
       if (this.appInfo?.oidc?.enabled && this.appInfo?.oidc?.login_page_disabled) {
-        // Automatically redirect to OIDC if the local login page is disabled
         this.redirectToOIDC();
+      }
+    });
+  }
+
+  private handleOidcCode(code: string): void {
+    this.isExchangingCode = true;
+    this.loginError = null;
+    const redirectUri = window.location.origin + '/login';
+
+    this.authService.oidcLogin(code, redirectUri).pipe(
+      finalize(() => this.isExchangingCode = false)
+    ).subscribe({
+      next: () => {
+        this.router.navigate(['/dashboard'], { replaceUrl: true });
+      },
+      error: (err: HttpErrorResponse) => {
+        // Strip code parameter from URL to prevent infinite reload loops
+        this.router.navigate(['/login'], { replaceUrl: true });
+        this.loginError = err.error?.message || 'Single Sign-On authentication failed. Please try again.';
+        this.appInfoService.loadInfo().pipe(takeUntil(this.destroy$)).subscribe(info => {
+          this.appInfo = info;
+        });
       }
     });
   }
@@ -63,7 +92,6 @@ export class LoginPageComponent implements OnInit, OnDestroy {
     
     const { username, password } = this.loginForm.value;
     
-    // UPDATED: Call the new basicAuthLogin method
     this.authService.basicAuthLogin(username, password).pipe(
       finalize(() => this.isLoading = false)
     ).subscribe({
@@ -81,23 +109,19 @@ export class LoginPageComponent implements OnInit, OnDestroy {
   }
 
   redirectToOIDC(): void {
-    // Simplify access by grabbing the nested object
     const oidcConfig = this.appInfo?.oidc;
 
-    // UPDATED: Check the nested properties
     if (!oidcConfig?.oidc_issuer_url || !oidcConfig?.oidc_client_id) {
       this.loginError = 'OIDC configuration is missing from the server.';
       return;
     }
     
-    // Construct the standard OIDC Authorization URL using the nested object
     const authEndpoint = `${oidcConfig.oidc_issuer_url}/protocol/openid-connect/auth`;
     const clientId = encodeURIComponent(oidcConfig.oidc_client_id);
     const redirectUri = encodeURIComponent(oidcConfig.oidc_redirect_url || window.location.origin + '/login');
     
     const oidcUrl = `${authEndpoint}?client_id=${clientId}&redirect_uri=${redirectUri}&response_type=code&scope=openid`;
     
-    // Redirect the browser to Keycloak
     window.location.href = oidcUrl;
   }
 

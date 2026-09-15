@@ -64,8 +64,8 @@ func (h *TokenHandler) handleBasicAuth(r *http.Request, username, password strin
 		return repository.User{}, err
 	}
 
-	// Prevent Service Accounts from interactive login via Basic Auth
-	if user.IsServiceAccount {
+	// Prevent Service Accounts and OIDC accounts from interactive login via Basic Auth
+	if user.IsServiceAccount() || user.IsOIDC() {
 		return repository.User{}, customerrors.ErrPermissionDenied
 	}
 

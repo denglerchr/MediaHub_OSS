@@ -70,9 +70,9 @@ func (am *AuthMiddleware) validateBasicAuth(encodedValue string) (repository.Use
 		return repository.User{}, errors.New("user not found")
 	}
 
-	// Prevent Service Accounts from using Basic Auth
-	if user.IsServiceAccount {
-		return repository.User{}, errors.New("service accounts cannot use basic auth")
+	// Prevent Service Accounts and OIDC accounts from using Basic Auth
+	if user.IsServiceAccount() || user.IsOIDC() {
+		return repository.User{}, errors.New("basic auth is not allowed for this account type")
 	}
 
 	// Verify Password using bcrypt

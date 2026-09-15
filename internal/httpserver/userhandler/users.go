@@ -8,7 +8,6 @@ import (
 	"mediahub_oss/internal/shared"
 	"mediahub_oss/internal/shared/customerrors"
 	"net/http"
-	"strconv"
 
 	"golang.org/x/crypto/bcrypt"
 )
@@ -34,11 +33,11 @@ func (h *UserHandler) GetMe(w http.ResponseWriter, r *http.Request) {
 
 	// 2. Initialize the base response
 	response := UserResponse{
-		ID:               user.ID,
-		Username:         user.Username,
-		IsAdmin:          isAdmin,
-		IsServiceAccount: user.IsServiceAccount,
-		Permissions:      []DatabasePermission{}, // Default to empty array
+		ID:          user.ID,
+		Username:    user.Username,
+		IsAdmin:     isAdmin,
+		AccountType: user.AccountType,
+		Permissions: []DatabasePermission{}, // Default to empty array
 	}
 
 	// 3. If the user is an admin, they bypass specific permission checks
@@ -77,23 +76,32 @@ func (h *UserHandler) GetMe(w http.ResponseWriter, r *http.Request) {
 }
 
 // UpdateMe godoc
-// @Summary      Update current user's password
-// @Description  Updates the password for the currently authenticated user. Requires the old password to verify identity.
+// @Summary      Update current user password
+// @Description  Allows the currently authenticated user to update their own password by verifying their old password first.
 // @Tags         User
 // @Accept       json
 // @Produce      json
 // @Security     BasicAuth
 // @Security     BearerAuth
-// @Param        payload body userhandler.UpdateMePayload true "Old and New Password"
+// @Param        body body userhandler.UpdateMePayload true "Password update payload"
 // @Success      200  {object}  utils.MessageResponse "Password updated successfully"
-// @Failure      400  {object}  utils.ErrorResponse "Invalid JSON body or missing fields"
+// @Failure      400  {object}  utils.ErrorResponse "Invalid JSON body or missing password fields"
 // @Failure      401  {object}  utils.ErrorResponse "Authentication failed: invalid old password"
 // @Router       /me [patch]
+// @Router       /me [put]
+// @Router       /user/me [patch]
+// @Router       /user/me [put]
 func (h *UserHandler) UpdateMe(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
 	// 1. Extract the authenticated user from the request context
 	user := utils.GetUserFromContext(ctx)
+
+	// Single Sign-On users cannot change local passwords
+	if user.IsOIDC() {
+		utils.RespondWithError(w, http.StatusBadRequest, "Password management is disabled for Single Sign-On accounts")
+		return
+	}
 
 	// 2. Parse the request payload
 	var payload UpdateMePayload
@@ -159,20 +167,20 @@ func (h *UserHandler) UpdateMe(w http.ResponseWriter, r *http.Request) {
 func (h *UserHandler) GetUsers(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
-	// 1. Parse optional is_service_account filter
-	isServiceAccountStr := r.URL.Query().Get("is_service_account")
-	var isServiceAccountFilter *bool
-	if isServiceAccountStr != "" {
-		val, err := strconv.ParseBool(isServiceAccountStr)
+	// 1. Parse optional account_type filter
+	accountTypeStr := r.URL.Query().Get("account_type")
+	var accountTypeFilter *repo.AccountType
+	if accountTypeStr != "" {
+		val, err := repo.ParseAccountType(accountTypeStr)
 		if err != nil {
-			utils.RespondWithError(w, http.StatusBadRequest, "Invalid is_service_account query parameter: must be boolean")
+			utils.RespondWithError(w, http.StatusBadRequest, "Invalid account_type query parameter: must be 'local', 'service_account', or 'oidc'")
 			return
 		}
-		isServiceAccountFilter = &val
+		accountTypeFilter = &val
 	}
 
 	// 2. Fetch all users from the database
-	dbUsers, err := h.Repo.GetUsers(ctx, isServiceAccountFilter)
+	dbUsers, err := h.Repo.GetUsers(ctx, accountTypeFilter)
 	if err != nil {
 		h.Logger.Error("Failed to retrieve users", "error", err)
 		utils.RespondWithError(w, http.StatusInternalServerError, "Failed to retrieve user list")
@@ -185,11 +193,11 @@ func (h *UserHandler) GetUsers(w http.ResponseWriter, r *http.Request) {
 	// 4. Iterate through each user to build their specific response object
 	for i, u := range dbUsers {
 		userRes := UserResponse{
-			ID:               u.ID,
-			Username:         u.Username,
-			IsAdmin:          u.IsAdmin,
-			IsServiceAccount: u.IsServiceAccount,
-			Permissions:      []DatabasePermission{}, // Default to empty
+			ID:          u.ID,
+			Username:    u.Username,
+			IsAdmin:     u.IsAdmin,
+			AccountType: u.AccountType,
+			Permissions: []DatabasePermission{}, // Default to empty
 		}
 
 		// 4. Admin users implicitly have all rights, so we leave their permissions array empty
@@ -256,8 +264,14 @@ func (h *UserHandler) CreateUser(w http.ResponseWriter, r *http.Request) {
 		utils.RespondWithError(w, http.StatusBadRequest, "Username is required")
 		return
 	}
-	if !payload.IsServiceAccount && payload.Password == "" {
-		utils.RespondWithError(w, http.StatusBadRequest, "Password is required")
+
+	if payload.AccountType == repo.AccountTypeOIDC {
+		utils.RespondWithError(w, http.StatusBadRequest, "OIDC accounts cannot be created directly; they are provisioned automatically via Single Sign-On")
+		return
+	}
+
+	if payload.AccountType != repo.AccountTypeService && payload.Password == "" {
+		utils.RespondWithError(w, http.StatusBadRequest, "Password is required for local user accounts")
 		return
 	}
 
@@ -273,7 +287,7 @@ func (h *UserHandler) CreateUser(w http.ResponseWriter, r *http.Request) {
 
 	// 3. Determine password hash
 	var passwordHash string
-	if payload.IsServiceAccount {
+	if payload.AccountType == repo.AccountTypeService {
 		passwordHash = "SERVICE_ACCOUNT_NO_LOGIN"
 	} else {
 		hashBytes, err := bcrypt.GenerateFromPassword([]byte(payload.Password), bcrypt.DefaultCost)
@@ -287,10 +301,10 @@ func (h *UserHandler) CreateUser(w http.ResponseWriter, r *http.Request) {
 
 	// 4. Create User in Repository
 	newUser := repo.User{
-		Username:         payload.Username,
-		PasswordHash:     passwordHash,
-		IsAdmin:          payload.IsAdmin,
-		IsServiceAccount: payload.IsServiceAccount,
+		Username:     payload.Username,
+		PasswordHash: passwordHash,
+		IsAdmin:      payload.IsAdmin,
+		AccountType:  payload.AccountType,
 	}
 
 	createdUser, err := h.Repo.CreateUser(ctx, newUser)
@@ -332,17 +346,17 @@ func (h *UserHandler) CreateUser(w http.ResponseWriter, r *http.Request) {
 
 	// 6. Build the response
 	response := UserResponse{
-		ID:               createdUser.ID,
-		Username:         createdUser.Username,
-		IsAdmin:          createdUser.IsAdmin,
-		IsServiceAccount: createdUser.IsServiceAccount,
-		Permissions:      appliedPermissions,
+		ID:          createdUser.ID,
+		Username:    createdUser.Username,
+		IsAdmin:     createdUser.IsAdmin,
+		AccountType: createdUser.AccountType,
+		Permissions: appliedPermissions,
 	}
 
 	// 7. Log the action
 	h.Auditor.Log(ctx, "user.create", adminUser.Username, createdUser.Username, map[string]any{
-		"is_admin":           createdUser.IsAdmin,
-		"is_service_account": createdUser.IsServiceAccount,
+		"is_admin":     createdUser.IsAdmin,
+		"account_type": createdUser.AccountType.String(),
 	})
 
 	// 8. Return Success
@@ -423,6 +437,10 @@ func (h *UserHandler) UpdateUser(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if payload.Password != "" {
+		if existingUser.IsOIDC() {
+			utils.RespondWithError(w, http.StatusBadRequest, "Cannot set or change password for Single Sign-On accounts")
+			return
+		}
 		hashBytes, err := bcrypt.GenerateFromPassword([]byte(payload.Password), bcrypt.DefaultCost)
 		if err != nil {
 			utils.RespondWithError(w, http.StatusInternalServerError, "Failed to hash password")
@@ -495,11 +513,11 @@ func (h *UserHandler) UpdateUser(w http.ResponseWriter, r *http.Request) {
 	}
 
 	response := UserResponse{
-		ID:               existingUser.ID,
-		Username:         existingUser.Username,
-		IsAdmin:          existingUser.IsAdmin,
-		IsServiceAccount: existingUser.IsServiceAccount,
-		Permissions:      finalPermissions,
+		ID:          existingUser.ID,
+		Username:    existingUser.Username,
+		IsAdmin:     existingUser.IsAdmin,
+		AccountType: existingUser.AccountType,
+		Permissions: finalPermissions,
 	}
 
 	// 7. Log the action
@@ -650,17 +668,17 @@ func (h *UserHandler) GetUser(w http.ResponseWriter, r *http.Request) {
 	}
 
 	response := UserResponse{
-		ID:               user.ID,
-		Username:         user.Username,
-		IsAdmin:          user.IsAdmin,
-		IsServiceAccount: user.IsServiceAccount,
-		Permissions:      finalPermissions,
+		ID:          user.ID,
+		Username:    user.Username,
+		IsAdmin:     user.IsAdmin,
+		AccountType: user.AccountType,
+		Permissions: finalPermissions,
 	}
 
 	h.Auditor.Log(ctx, "user.get", adminUser.Username, user.Username, map[string]any{
-		"user_id":            string(user.ID),
-		"is_admin":           user.IsAdmin,
-		"is_service_account": user.IsServiceAccount,
+		"user_id":      string(user.ID),
+		"is_admin":     user.IsAdmin,
+		"account_type": user.AccountType.String(),
 	})
 
 	utils.RespondWithJSON(w, http.StatusOK, response)
