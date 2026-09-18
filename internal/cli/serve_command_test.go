@@ -30,7 +30,7 @@ func TestServeCommand_FlagBinding(t *testing.T) {
 		"--media-ffprobe-path=/usr/bin/ffprobe",
 		"--auth-jwt-access-duration=15min",
 		"--auth-jwt-refresh-duration=72h",
-		"--auth-oidc-disable-local-login=true",
+		"--auth-oidc-disable-login-page=true",
 		"--auth-oidc-default-user-rights=custom_role",
 		"--auth-oidc-issuer-url=https://auth.example.com",
 		"--auth-oidc-client-id=my-client",
