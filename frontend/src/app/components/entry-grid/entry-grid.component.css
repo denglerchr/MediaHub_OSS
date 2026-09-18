@@ -141,7 +141,7 @@
 }
 
 .status-processing { color: var(--text-accent); }
-.status-error { color: var(--button-danger-bg); }
+.status-error { color: var(--text-danger); }
 
 .processing-icon {
   animation: spin 1s linear infinite;

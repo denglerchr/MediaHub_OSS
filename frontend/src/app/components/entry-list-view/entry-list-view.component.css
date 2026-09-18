@@ -7,7 +7,7 @@
 }
 .id-link:hover {
   text-decoration: underline;
-  color: var(--button-primary-bg-hover);
+  color: var(--text-accent-hover);
 }
 
 /* --- Selection Column --- */
@@ -81,7 +81,7 @@
   color: var(--text-accent);
 }
 .status-error {
-  color: var(--button-danger-bg);
+  color: var(--text-danger);
 }
 
 .processing-icon {

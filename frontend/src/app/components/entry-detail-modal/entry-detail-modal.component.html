@@ -31,7 +31,7 @@
       </div>
 
       <div *ngIf="isLoadingFile" class="loading-placeholder d-flex flex-column align-items-center justify-content-center" style="min-height: 200px;">
-        <img src="assets/icons/processing-icon.svg" class="spinner mb-2" alt="Loading..." style="width: 48px;" />
+        <div class="spinner mb-2" aria-hidden="true"></div>
         <p class="text-muted fw-bold">Loading media...</p>
       </div>
 

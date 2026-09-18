@@ -100,7 +100,7 @@
           
           <div class="form-row">
             <div class="form-group">
-              <label class="form-label">Username <span style="color: var(--button-danger-bg);">*</span></label>
+              <label class="form-label">Username <span class="required-asterisk">*</span></label>
               <input type="text" formControlName="username" class="form-control" placeholder="Enter username">
               <div *ngIf="detailForm.get('username')?.touched && detailForm.get('username')?.invalid" class="form-error">
                 Valid username is required.
@@ -110,7 +110,7 @@
             <!-- Password field is hidden/bypassed for Service Accounts and OIDC accounts -->
             <div class="form-group" *ngIf="detailForm.get('account_type')?.value === 'local'">
               <label class="form-label">
-                Password <span *ngIf="isNewUser" style="color: var(--button-danger-bg);">*</span>
+                Password <span *ngIf="isNewUser" class="required-asterisk">*</span>
               </label>
               <input type="password" formControlName="password" class="form-control" [placeholder]="isNewUser ? 'Enter secure password' : 'Leave blank to keep current'">
               <div *ngIf="detailForm.get('password')?.touched && detailForm.get('password')?.invalid" class="form-error">

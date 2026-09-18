@@ -102,6 +102,6 @@
 }
 
 .btn-remove:hover {
-  color: var(--button-danger-bg);
+  color: var(--text-danger);
   background-color: var(--item-bg-hover);
 }
