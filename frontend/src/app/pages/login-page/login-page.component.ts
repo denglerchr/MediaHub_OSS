@@ -18,7 +18,6 @@ import { HttpErrorResponse } from '@angular/common/http';
 export class LoginPageComponent implements OnInit, OnDestroy {
   loginForm: FormGroup;
   isLoading = false;
-  isExchangingCode = false;
   loginError: string | null = null;
   appInfo: AppInfo | null = null;
   
@@ -46,40 +45,24 @@ export class LoginPageComponent implements OnInit, OnDestroy {
 
     const code = this.route.snapshot.queryParamMap.get('code');
     if (code) {
-      this.handleOidcCode(code);
+      this.router.navigate(['/auth/callback'], {
+        queryParams: this.route.snapshot.queryParams,
+        replaceUrl: true,
+      });
       return;
+    }
+
+    const errorParam = this.route.snapshot.queryParamMap.get('error');
+    if (errorParam === 'sso_failed') {
+      this.loginError = 'Single Sign-On authentication failed. Please try again.';
+      console.warn(
+        `[MediaHub SSO] Tip for administrators: Ensure "${window.location.origin}/auth/callback" is included in your Identity Provider's (e.g. Keycloak) Valid Redirect URIs.`
+      );
     }
 
     // Load AppInfo to check OIDC settings
     this.appInfoService.loadInfo().pipe(takeUntil(this.destroy$)).subscribe(info => {
       this.appInfo = info;
-      
-      // Automatically redirect to OIDC if local login page is disabled and no error occurred
-      if (this.appInfo?.oidc?.enabled && this.appInfo?.oidc?.login_page_disabled) {
-        this.redirectToOIDC();
-      }
-    });
-  }
-
-  private handleOidcCode(code: string): void {
-    this.isExchangingCode = true;
-    this.loginError = null;
-    const redirectUri = window.location.origin + '/login';
-
-    this.authService.oidcLogin(code, redirectUri).pipe(
-      finalize(() => this.isExchangingCode = false)
-    ).subscribe({
-      next: () => {
-        this.router.navigate(['/dashboard'], { replaceUrl: true });
-      },
-      error: (err: HttpErrorResponse) => {
-        // Strip code parameter from URL to prevent infinite reload loops
-        this.router.navigate(['/login'], { replaceUrl: true });
-        this.loginError = err.error?.message || 'Single Sign-On authentication failed. Please try again.';
-        this.appInfoService.loadInfo().pipe(takeUntil(this.destroy$)).subscribe(info => {
-          this.appInfo = info;
-        });
-      }
     });
   }
 
@@ -118,7 +101,9 @@ export class LoginPageComponent implements OnInit, OnDestroy {
     
     const authEndpoint = `${oidcConfig.oidc_issuer_url}/protocol/openid-connect/auth`;
     const clientId = encodeURIComponent(oidcConfig.oidc_client_id);
-    const redirectUri = encodeURIComponent(oidcConfig.oidc_redirect_url || window.location.origin + '/login');
+    const redirectUri = encodeURIComponent(
+      oidcConfig.oidc_redirect_url || `${window.location.origin}/auth/callback`
+    );
     
     const oidcUrl = `${authEndpoint}?client_id=${clientId}&redirect_uri=${redirectUri}&response_type=code&scope=openid`;
     

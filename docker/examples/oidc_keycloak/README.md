@@ -8,7 +8,7 @@ This directory contains a complete local development and testing environment wit
 - **Pre-configured realm (`mediahub`)** automatically imported on startup with:
   - Client ID: `mediahub`
   - Client Secret: `mediahub-secret-1234`
-  - Valid Redirect URIs: `http://localhost:4200/*`, `http://localhost:8080/*`
+  - Valid Redirect URIs: `http://localhost:4200/*`, `http://localhost:8080/*` (Identity Provider must redirect to `/auth/callback`)
   - Pre-seeded test accounts:
     - Username: `john.doe` | Password: `password123` | Email: `john.doe@example.com`
     - Username: `alice.smith` | Password: `password123` | Email: `alice.smith@example.com`
@@ -32,18 +32,18 @@ If you are developing locally and want to run the Go backend or Angular frontend
    ```bash
    docker compose up keycloak -d
    ```
-2. Run the Go backend on your host:
+2. Run the Go backend on your host (the `--auth.oidc.redirect_url` can be omitted as the frontend defaults to `<origin>/auth/callback`):
    ```bash
    go run ./cmd/mediahub serve \
      --auth.oidc.enabled=true \
      --auth.oidc.issuer_url=http://localhost:8081/realms/mediahub \
      --auth.oidc.client_id=mediahub \
      --auth.oidc.client_secret=mediahub-secret-1234 \
-     --auth.oidc.redirect_url=http://localhost:4200/login
+     --auth.oidc.redirect_url=http://localhost:4200/auth/callback
    ```
 3. Run the Angular frontend dev server:
    ```bash
    cd frontend
    npm start
    ```
-4. Open `http://localhost:4200/login` and click **Login via Single Sign-On**.
+4. Open `http://localhost:4200/` and log in via Single Sign-On.

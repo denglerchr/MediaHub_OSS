@@ -16,7 +16,7 @@ services:
     volumes:
       - ./realm-export.json:/opt/keycloak/data/import/realm-export.json:ro
     healthcheck:
-      test: ["CMD-SHELL", "exec 3<>/dev/tcp/127.0.0.1/9000;echo -e 'GET /health/ready HTTP/1.1\r\nhost: http://localhost\r\nConnection: close\r\n\r\n' >&3;if [ $? -eq 0 ]; then echo 'Healthcheck Successful';exit 0;else echo 'Healthcheck Failed';exit 1;fi;"]
+      test: ["CMD-SHELL", "exec 3<>/dev/tcp/127.0.0.1/9000;echo -e 'GET /health/ready HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n' >&3;if [ $? -eq 0 ]; then echo 'Healthcheck Successful';exit 0;else echo 'Healthcheck Failed';exit 1;fi;"]
       start_period: 10s
       interval: 30s
       retries: 3
@@ -37,11 +37,10 @@ services:
     environment:
       - MEDIAHUB_PASSWORD=${MEDIAHUB_PASSWORD:-password123}
       - MEDIAHUB_AUTH_OIDC_ENABLED=true
-      - MEDIAHUB_AUTH_OIDC_DISABLE_LOCAL_LOGIN=false
+      - MEDIAHUB_AUTH_OIDC_DISABLE_LOGIN_PAGE=true
       - MEDIAHUB_AUTH_OIDC_ISSUER_URL=http://localhost:8081/realms/mediahub
       - MEDIAHUB_AUTH_OIDC_CLIENT_ID=mediahub
       - MEDIAHUB_AUTH_OIDC_CLIENT_SECRET=mediahub-secret-1234
-      - MEDIAHUB_AUTH_OIDC_REDIRECT_URL=http://localhost:8080/login
       - MEDIAHUB_AUTH_OIDC_DEFAULT_USER_RIGHTS=_oidc_user
     depends_on:
       keycloak:

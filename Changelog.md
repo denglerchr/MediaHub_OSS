@@ -1,3 +1,13 @@
+# v3.2 (upcoming)
+
+Features
+- add OIDC compatibility and docker compose example
+- add COORDINATE field type to store location
+- auto-extract location from uploads in the frontend if available
+
+Improvements:
+- cleaning up of CSS styles
+
 # v3.1
 
 Features:

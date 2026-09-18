@@ -28,6 +28,7 @@ import (
 	"mediahub_oss/internal/storage"
 	"mediahub_oss/internal/storage/localstorage"
 	"mediahub_oss/internal/storage/s3storage"
+	"strings"
 	"time"
 
 	// Aliased imports for your sub-handlers
@@ -105,7 +106,7 @@ func registerFlags(cmd *cobra.Command) {
 	cmd.Flags().String("auth-oidc-issuer-url", "", "OIDC Issuer URL.")
 	cmd.Flags().String("auth-oidc-client-id", "", "OIDC Client ID.")
 	cmd.Flags().String("auth-oidc-client-secret", "", "OIDC Client Secret.")
-	cmd.Flags().String("auth-oidc-redirect-url", "", "OIDC Redirect callback URL.")
+	cmd.Flags().String("auth-oidc-redirect-url", "", "OIDC Redirect callback URL (must end in /auth/callback). Defaults to '<origin>/auth/callback' if omitted.")
 
 	flagToViperKey := map[string]string{
 		"server-host":                      "server.host",
@@ -304,6 +305,7 @@ func buildHandlers(cfg *config.Config, repo repository.Repository, storageProvid
 	}
 	var oidcProvider th.OIDCProvider
 	if oidcCfg.Enabled {
+		ValidateOIDCRedirectURL(logger, oidcCfg.RedirectURL)
 		oidcProvider = th.NewHTTPOIDCProvider(oidcCfg, logger)
 	}
 
@@ -452,3 +454,15 @@ func processInitConfig(ctx context.Context, repo repository.Repository, logger *
 
 	return nil
 }
+
+// ValidateOIDCRedirectURL checks if the configured OIDC redirect URL ends in /auth/callback and logs a warning if not.
+func ValidateOIDCRedirectURL(logger *slog.Logger, redirectURL string) bool {
+	if redirectURL != "" && !strings.HasSuffix(strings.TrimRight(redirectURL, "/"), "/auth/callback") {
+		if logger != nil {
+			logger.Warn("OIDC redirect URL does not end in '/auth/callback', which may cause SSO login or callback handling to fail", "redirect_url", redirectURL)
+		}
+		return false
+	}
+	return true
+}
+

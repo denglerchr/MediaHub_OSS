@@ -33,7 +33,7 @@ Retrieves general information about the backend service. This endpoint does not 
     "login_page_disabled": false,
     "oidc_issuer_url": "https://keycloak.example.com/realms/mediahub",
     "oidc_client_id": "mediahub-frontend",
-    "oidc_redirect_url": "http://localhost:4200/login"
+    "oidc_redirect_url": "http://localhost:4200/auth/callback"
   },
   "features": {
     "audit_logs": false

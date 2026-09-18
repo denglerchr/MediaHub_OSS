@@ -80,6 +80,5 @@ ENV MEDIAHUB_DATABASE_PATH=/config/mediahub.db \
     MEDIAHUB_INIT_CONFIG=/config/initconfig.toml
 
 EXPOSE 8080
-VOLUME ["/config", "/storage"]
 ENTRYPOINT ["./mediahub"]
 CMD ["serve"]

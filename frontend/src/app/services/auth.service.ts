@@ -62,7 +62,7 @@ export class AuthService {
   oidcLogin(code: string, redirectUri?: string, codeVerifier?: string): Observable<User> {
     const payload: { code: string; redirect_uri?: string; code_verifier?: string } = {
       code,
-      redirect_uri: redirectUri || window.location.origin + '/login',
+      redirect_uri: redirectUri || `${window.location.origin}/auth/callback`,
     };
     if (codeVerifier) {
       payload.code_verifier = codeVerifier;
@@ -78,7 +78,8 @@ export class AuthService {
         return user;
       }),
       catchError((err: HttpErrorResponse) => {
-        this.logout(false);
+        this.clearTokens();
+        this.currentUserSubject.next(null);
         return throwError(() => err);
       })
     );
