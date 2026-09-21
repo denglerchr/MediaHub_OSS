@@ -69,7 +69,7 @@
 
 .btn-icon-danger:hover {
   background-color: rgba(229, 62, 98, 0.15);
-  color: var(--button-danger-bg);
+  color: var(--text-danger);
 }
 
 .loading-state, .empty-state {

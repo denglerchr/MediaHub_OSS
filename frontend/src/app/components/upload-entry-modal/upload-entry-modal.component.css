@@ -132,7 +132,7 @@
 
 .progress-percent {
   font-weight: bold;
-  color: var(--button-primary-bg);
+  color: var(--text-accent);
   flex-shrink: 0;
 }
 

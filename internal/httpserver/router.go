@@ -22,6 +22,7 @@ func SetupRouter(h *Handlers, frontendFS http.FileSystem, am *auth.AuthMiddlewar
 
 	// --- 2. Public Token Endpoints ---
 	mux.HandleFunc("POST /api/token", h.TokenHandler.GetToken)
+	mux.HandleFunc("POST /api/token/oidc", h.TokenHandler.GetTokenOIDC)
 	mux.HandleFunc("POST /api/token/refresh", h.TokenHandler.RefreshToken)
 
 	// --- 3. Authenticated Routes (Logout & User Self-Management) ---

@@ -10,7 +10,7 @@
       </a>
       <h2 class="shortened-title" title="User Management">User Management</h2>
     </div>
-    <button class="btn btn-primary" (click)="createNewUser()">
+    <button *ngIf="activeListTab !== 'oidc'" class="btn btn-primary" (click)="createNewUser()">
       Create {{ activeListTab === 'service' ? 'Service Account' : 'User' }}
     </button>
   </div>
@@ -30,11 +30,14 @@
         <button class="tab-btn list-tab-btn" [class.active]="activeListTab === 'service'" (click)="setListTab('service')">
           Service Accounts
         </button>
+        <button class="tab-btn list-tab-btn" [class.active]="activeListTab === 'oidc'" (click)="setListTab('oidc')">
+          SSO / OIDC
+        </button>
       </div>
 
       <ul class="user-list">
         <li *ngIf="users.length === 0" class="empty-state">
-          No {{ activeListTab === 'service' ? 'service accounts' : 'users' }} found.
+          No {{ activeListTab === 'service' ? 'service accounts' : (activeListTab === 'oidc' ? 'SSO/OIDC users' : 'users') }} found.
         </li>
         
         <li *ngIf="isNewUser" class="user-list-item draft-item" (click)="createNewUser()">
@@ -54,7 +57,8 @@
           <div class="user-meta">
             <span class="user-id">ID: {{ user.id | slice:0:8 }}...</span>
             <span *ngIf="user.is_admin" class="admin-badge">Admin</span>
-            <span *ngIf="user.is_service_account" class="service-badge">SA</span>
+            <span *ngIf="user.account_type === 'service_account'" class="service-badge">SA</span>
+            <span *ngIf="user.account_type === 'oidc'" class="service-badge" style="background: var(--color-primary, #3b82f6);">OIDC</span>
           </div>
           
         </li>
@@ -76,7 +80,7 @@
               {{ isNewUser ? 'Create New ' + (activeListTab === 'service' ? 'Service Account' : 'User') : 'Edit User: ' + selectedUser?.username }}
             </h3>
             <button *ngIf="!isNewUser" (click)="openDeleteConfirm()" class="btn btn-danger">
-              Delete {{ selectedUser?.is_service_account ? 'Service Account' : 'User' }}
+              Delete {{ selectedUser?.account_type === 'service_account' ? 'Service Account' : (selectedUser?.account_type === 'oidc' ? 'OIDC User' : 'User') }}
             </button>
           </div>
 
@@ -96,21 +100,27 @@
           
           <div class="form-row">
             <div class="form-group">
-              <label class="form-label">Username <span style="color: var(--button-danger-bg);">*</span></label>
+              <label class="form-label">Username <span class="required-asterisk">*</span></label>
               <input type="text" formControlName="username" class="form-control" placeholder="Enter username">
               <div *ngIf="detailForm.get('username')?.touched && detailForm.get('username')?.invalid" class="form-error">
                 Valid username is required.
               </div>
             </div>
 
-            <!-- Password field is hidden/bypassed for Service Accounts -->
-            <div class="form-group" *ngIf="!detailForm.get('is_service_account')?.value">
+            <!-- Password field is hidden/bypassed for Service Accounts and OIDC accounts -->
+            <div class="form-group" *ngIf="detailForm.get('account_type')?.value === 'local'">
               <label class="form-label">
-                Password <span *ngIf="isNewUser" style="color: var(--button-danger-bg);">*</span>
+                Password <span *ngIf="isNewUser" class="required-asterisk">*</span>
               </label>
               <input type="password" formControlName="password" class="form-control" [placeholder]="isNewUser ? 'Enter secure password' : 'Leave blank to keep current'">
               <div *ngIf="detailForm.get('password')?.touched && detailForm.get('password')?.invalid" class="form-error">
                 Min. 8 characters.
+              </div>
+            </div>
+            <div class="form-group" *ngIf="detailForm.get('account_type')?.value === 'oidc'">
+              <label class="form-label">Password</label>
+              <div class="description-text" style="padding-top: 0.5rem; color: var(--text-secondary);">
+                Managed via Single Sign-On Identity Provider
               </div>
             </div>
           </div>

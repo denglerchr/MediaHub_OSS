@@ -129,7 +129,7 @@
 }
 
 /* Helpers for boolean text */
-.text-green { color: #48bb78; font-weight: 600; }
+.text-green { color: var(--text-success); font-weight: 600; }
 .text-muted { color: var(--text-muted); }
 
 /* Action bar wrapping for responsive layouts */

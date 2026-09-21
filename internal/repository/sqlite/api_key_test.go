@@ -38,10 +38,10 @@ func TestAPIKeysRepository(t *testing.T) {
 
 	// 3. Create a test user
 	userModel := repo.User{
-		Username:         "test_owner",
-		PasswordHash:     "somehash",
-		IsAdmin:          false,
-		IsServiceAccount: true,
+		Username:     "test_owner",
+		PasswordHash: "somehash",
+		IsAdmin:      false,
+		AccountType:  repo.AccountTypeService,
 	}
 	createdUser, err := r.CreateUser(ctx, userModel)
 	if err != nil {

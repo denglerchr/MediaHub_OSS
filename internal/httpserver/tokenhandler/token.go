@@ -14,6 +14,16 @@ import (
 	"mediahub_oss/internal/shared/customerrors"
 )
 
+type OIDCConfig struct {
+	Enabled           bool
+	DisableLoginPage  bool
+	DefaultUserRights string
+	IssuerURL         string
+	ClientID          string
+	ClientSecret      string
+	RedirectURL       string
+}
+
 type TokenHandler struct {
 	Logger          *slog.Logger
 	Auditor         audit.AuditLogger
@@ -21,6 +31,8 @@ type TokenHandler struct {
 	JWTSecret       []byte
 	AccessDuration  time.Duration
 	RefreshDuration time.Duration
+	OIDCConfig      OIDCConfig
+	OIDCProvider    OIDCProvider
 }
 
 // TokenResponse defines the JSON payload for successful token generation.
@@ -34,67 +46,31 @@ type TokenRequest struct {
 	RefreshToken string `json:"refresh_token"`
 }
 
-// @Summary Get a token pair
-// @Description Obtains an internal JWT Access/Refresh token pair.
-// @Description Supports two authentication methods:
-// @Description 1. Local Authentication: Send standard Basic Auth headers.
-// @Description 2. OIDC Token Exchange (commercial version only): Send a JSON body containing a valid external JWT (`idp_token`).
-// @Description Providing both methods in a single request will result in a 400 Bad Request.
+// @Summary Get a token pair via Basic Auth
+// @Description Obtains an internal JWT Access/Refresh token pair using HTTP Basic Auth.
 // @Tags token
-// @Accept json
 // @Produce json
-// @Param body body OidcTokenRequest false "OIDC Identity Provider Token (required if not using Basic Auth)"
 // @Success 200 {object} TokenResponse "Returns access and refresh tokens"
-// @Failure 400 {object} utils.ErrorResponse "Ambiguous authentication request"
-// @Failure 401 {object} utils.ErrorResponse "Invalid credentials, invalid OIDC token, or missing authentication"
-// @Failure 500 {object} utils.ErrorResponse "Internal server error or OIDC not available"
+// @Failure 401 {object} utils.ErrorResponse "Invalid credentials or missing authentication"
+// @Failure 500 {object} utils.ErrorResponse "Internal server error"
 // @Security BasicAuth
 // @Router /api/token [post]
 func (h *TokenHandler) GetToken(w http.ResponseWriter, r *http.Request) {
-
 	username, password, hasBasicAuth := r.BasicAuth()
-	oidcReq, hasOIDCAuth := checkOIDC(r)
-	var user repository.User
-	var err error
-
-	// Requires either basic auth or OIDC auth
-	if hasBasicAuth && hasOIDCAuth {
-		h.Logger.Warn("Login attempt failed: ambiguous request (both Basic Auth and OIDC provided)")
-		utils.RespondWithError(w, http.StatusBadRequest, "Ambiguous authentication request")
-		return
-	} else if !(hasBasicAuth || hasOIDCAuth) {
+	if !hasBasicAuth {
 		utils.RespondWithError(w, http.StatusUnauthorized, "Missing authentication credentials")
 		return
 	}
 
-	if hasBasicAuth {
-		user, err = h.handleBasicAuth(r, username, password)
-		if errors.Is(err, customerrors.ErrNotFound) {
-			h.Logger.Warn("Login attempt failed: user not found", "username", username)
-			utils.RespondWithError(w, http.StatusUnauthorized, "Invalid username or password")
-			return
-		} else if errors.Is(err, customerrors.ErrPermissionDenied) {
-			h.Logger.Warn("Login attempt failed: invalid password", "username", username)
-			utils.RespondWithError(w, http.StatusUnauthorized, "Invalid username or password")
-			return
-		} else if err != nil {
-			h.Logger.Error("Failed to handle Basic Auth", "error", err)
-			utils.RespondWithError(w, http.StatusInternalServerError, "Failed to handle Basic Auth")
-			return
-		}
-	}
-
-	if hasOIDCAuth {
-		user, err = h.handleOIDCValidationAndProvisioning(r.Context(), oidcReq.IdpToken)
-		if errors.Is(err, customerrors.ErrNotImplemented) {
-			h.Logger.Error("OIDC not available", "error", err)
-			utils.RespondWithError(w, http.StatusInternalServerError, "OIDC not available")
-			return
-		} else if err != nil {
-			h.Logger.Error("Failed to handle OIDC", "error", err)
-			utils.RespondWithError(w, http.StatusInternalServerError, "Failed to handle OIDC")
-			return
-		}
+	user, err := h.handleBasicAuth(r, username, password)
+	if errors.Is(err, customerrors.ErrNotFound) || errors.Is(err, customerrors.ErrPermissionDenied) {
+		h.Logger.Warn("Login attempt failed: invalid credentials", "username", username)
+		utils.RespondWithError(w, http.StatusUnauthorized, "Invalid username or password")
+		return
+	} else if err != nil {
+		h.Logger.Error("Failed to handle Basic Auth", "error", err)
+		utils.RespondWithError(w, http.StatusInternalServerError, "Failed to handle Basic Auth")
+		return
 	}
 
 	// Generate and return tokens

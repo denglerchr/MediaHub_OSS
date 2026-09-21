@@ -1,6 +1,7 @@
 import { NgModule } from '@angular/core';
 import { RouterModule, Routes } from '@angular/router';
 import { LoginPageComponent } from './pages/login-page/login-page.component';
+import { AuthCallbackPageComponent } from './pages/auth-callback-page/auth-callback-page.component';
 import { DashboardPageComponent } from './pages/dashboard-page/dashboard-page.component';
 import { PageNotFoundComponent } from './pages/page-not-found/page-not-found.component';
 import { AuthGuard } from './guards/auth.guard';
@@ -23,6 +24,10 @@ const routes: Routes = [
   {
     path: 'login',
     component: LoginPageComponent,
+  },
+  {
+    path: 'auth/callback',
+    component: AuthCallbackPageComponent,
   },
   {
     path: 'dashboard',

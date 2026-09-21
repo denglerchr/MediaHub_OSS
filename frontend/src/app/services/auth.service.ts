@@ -56,6 +56,35 @@ export class AuthService {
     );
   }
 
+  /**
+   * Logs the user in via OIDC code exchange (POST /api/token/oidc).
+   */
+  oidcLogin(code: string, redirectUri?: string, codeVerifier?: string): Observable<User> {
+    const payload: { code: string; redirect_uri?: string; code_verifier?: string } = {
+      code,
+      redirect_uri: redirectUri || `${window.location.origin}/auth/callback`,
+    };
+    if (codeVerifier) {
+      payload.code_verifier = codeVerifier;
+    }
+
+    return this.http.post<TokenResponse>(`${this.apiUrl}/token/oidc`, payload).pipe(
+      tap((tokens) => {
+        this.storeTokens(tokens);
+      }),
+      switchMap(() => this.fetchCurrentUser()),
+      map((user) => {
+        if (!user) throw new Error('Failed to fetch user details after OIDC login');
+        return user;
+      }),
+      catchError((err: HttpErrorResponse) => {
+        this.clearTokens();
+        this.currentUserSubject.next(null);
+        return throwError(() => err);
+      })
+    );
+  }
+
 
   /**
    * Logs the user out.
@@ -195,10 +224,10 @@ export class AuthService {
     return this.http.patch(`${this.apiUrl}/me`, payload);
   }
 
-  getUsers(isServiceAccount?: boolean): Observable<User[]> {
+  getUsers(accountType?: string): Observable<User[]> {
     let url = `${this.apiUrl}/users`;
-    if (isServiceAccount !== undefined) {
-      url += `?is_service_account=${isServiceAccount}`;
+    if (accountType) {
+      url += `?account_type=${accountType}`;
     }
     return this.http.get<User[]>(url);
   }

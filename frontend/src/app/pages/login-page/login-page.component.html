@@ -16,8 +16,8 @@
         type="button" 
         class="btn btn-secondary sso-btn" 
         (click)="redirectToOIDC()">
-        <img src="assets/icons/keycloak-icon.svg" alt="SSO" class="sso-icon">
-        Login via Single Sign-On
+        <img src="assets/icons/sso-icon.svg" alt="" aria-hidden="true" class="sso-icon">
+        <span>Login via Single Sign-On</span>
       </button>
       
       <div *ngIf="!appInfo?.oidc?.login_page_disabled" class="divider">

@@ -11,6 +11,7 @@ import { AppComponent } from './app.component';
 
 // Components
 import { LoginPageComponent } from './pages/login-page/login-page.component';
+import { AuthCallbackPageComponent } from './pages/auth-callback-page/auth-callback-page.component';
 import { DashboardPageComponent } from './pages/dashboard-page/dashboard-page.component';
 import { PageNotFoundComponent } from './pages/page-not-found/page-not-found.component';
 import { SidebarComponent } from './components/sidebar/sidebar.component';
@@ -49,6 +50,7 @@ import { JwtInterceptor } from './interceptors/jwt.interceptor';
   declarations: [
     AppComponent,
     LoginPageComponent,
+    AuthCallbackPageComponent,
     DashboardPageComponent,
     SidebarComponent,
     EntryListComponent,

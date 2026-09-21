@@ -57,7 +57,7 @@ REMOVED .btn-link, it's now global
 }
 .btn-remove:hover {
   opacity: 1;
-  color: var(--button-danger-bg); /* UPDATED */
+  color: var(--text-danger);
 }
 
 .modal-actions {

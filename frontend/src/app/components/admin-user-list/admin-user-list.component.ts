@@ -29,8 +29,8 @@ export class AdminUserListComponent implements OnInit, OnDestroy {
   public detailForm: FormGroup;
   public isSaving = false;
 
-  // Sidebar List Tab (Standard Users vs Service Accounts)
-  public activeListTab: 'standard' | 'service' = 'standard';
+  // Sidebar List Tab (Standard Users vs Service Accounts vs SSO/OIDC)
+  public activeListTab: 'standard' | 'service' | 'oidc' = 'standard';
   
   // Detail Pane Tabs (Settings vs API Keys)
   public activeDetailTab: 'settings' | 'keys' = 'settings';
@@ -53,7 +53,7 @@ export class AdminUserListComponent implements OnInit, OnDestroy {
       username: ['', [Validators.required, Validators.pattern(/^[a-zA-Z0-9_]+$/)]],
       password: [''], // Will be required dynamically for new standard users
       is_admin: [false],
-      is_service_account: [false],
+      account_type: ['local'],
       permissions: this.fb.array([])
     });
   }
@@ -76,7 +76,7 @@ export class AdminUserListComponent implements OnInit, OnDestroy {
   /**
    * Sets the active sidebar user list tab and reloads.
    */
-  setListTab(tab: 'standard' | 'service'): void {
+  setListTab(tab: 'standard' | 'service' | 'oidc'): void {
     this.activeListTab = tab;
     this.clearSelection();
     this.loadData();
@@ -99,10 +99,13 @@ export class AdminUserListComponent implements OnInit, OnDestroy {
     this.isLoading = true;
     this.cdr.markForCheck();
     
-    const filterServiceAccount = this.activeListTab === 'service';
+    let filterAccountType: string | undefined;
+    if (this.activeListTab === 'service') filterAccountType = 'service_account';
+    else if (this.activeListTab === 'oidc') filterAccountType = 'oidc';
+    else filterAccountType = 'local';
 
     combineLatest([
-      this.authService.getUsers(filterServiceAccount),
+      this.authService.getUsers(filterAccountType),
       this.databaseService.loadDatabases()
     ])
     .pipe(
@@ -179,7 +182,7 @@ export class AdminUserListComponent implements OnInit, OnDestroy {
     const emptyUser: Partial<User> = {
       username: '',
       is_admin: false,
-      is_service_account: isService,
+      account_type: isService ? 'service_account' : 'local',
       permissions: []
     };
     
@@ -213,7 +216,7 @@ export class AdminUserListComponent implements OnInit, OnDestroy {
       id: user.id || null,
       username: user.username || '',
       is_admin: user.is_admin || false,
-      is_service_account: user.is_service_account || false,
+      account_type: user.account_type || 'local',
       password: ''
     }, { emitEvent: false });
 
@@ -260,7 +263,7 @@ export class AdminUserListComponent implements OnInit, OnDestroy {
 
     // 4. Handle password field validation on edit
     if (!this.isNewUser) {
-      if (user.is_service_account) {
+      if (user.account_type === 'service_account' || user.account_type === 'oidc') {
         this.detailForm.get('password')?.clearValidators();
       } else {
         this.detailForm.get('password')?.setValidators([Validators.minLength(8)]);
@@ -294,8 +297,8 @@ export class AdminUserListComponent implements OnInit, OnDestroy {
     
     const formData = JSON.parse(JSON.stringify(this.detailForm.getRawValue()));
 
-    // Bypasses password for service accounts or if password wasn't provided for edit
-    if (formData.is_service_account || !formData.password) {
+    // Bypasses password for service accounts and OIDC accounts or if password wasn't provided for edit
+    if (formData.account_type === 'service_account' || formData.account_type === 'oidc' || !formData.password) {
       delete formData.password;
     }
 

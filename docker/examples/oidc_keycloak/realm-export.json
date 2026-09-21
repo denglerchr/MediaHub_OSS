@@ -1,0 +1,79 @@
+{
+  "id": "mediahub",
+  "realm": "mediahub",
+  "displayName": "MediaHub SSO Realm",
+  "enabled": true,
+  "sslRequired": "none",
+  "registrationAllowed": false,
+  "loginWithEmailAllowed": true,
+  "duplicateEmailsAllowed": false,
+  "resetPasswordAllowed": false,
+  "editUsernameAllowed": false,
+  "clients": [
+    {
+      "clientId": "mediahub",
+      "name": "MediaHub Web Application",
+      "description": "Client for MediaHub OSS Angular frontend and Go backend code exchange",
+      "rootUrl": "http://localhost:8080",
+      "baseUrl": "/auth/callback",
+      "enabled": true,
+      "clientAuthenticatorType": "client-secret",
+      "secret": "mediahub-secret-1234",
+      "standardFlowEnabled": true,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": true,
+      "serviceAccountsEnabled": false,
+      "publicClient": false,
+      "protocol": "openid-connect",
+      "redirectUris": [
+        "http://localhost:4200/*",
+        "http://localhost:8080/*",
+        "http://127.0.0.1:4200/*",
+        "http://127.0.0.1:8080/*"
+      ],
+      "webOrigins": [
+        "http://localhost:4200",
+        "http://localhost:8080",
+        "+"
+      ],
+      "defaultClientScopes": [
+        "web-origins",
+        "profile",
+        "roles",
+        "email"
+      ]
+    }
+  ],
+  "users": [
+    {
+      "username": "john.doe",
+      "enabled": true,
+      "emailVerified": true,
+      "firstName": "John",
+      "lastName": "Doe",
+      "email": "john.doe@example.com",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "password123",
+          "temporary": false
+        }
+      ]
+    },
+    {
+      "username": "alice.smith",
+      "enabled": true,
+      "emailVerified": true,
+      "firstName": "Alice",
+      "lastName": "Smith",
+      "email": "alice.smith@example.com",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "password123",
+          "temporary": false
+        }
+      ]
+    }
+  ]
+}

@@ -28,6 +28,7 @@ import (
 	"mediahub_oss/internal/storage"
 	"mediahub_oss/internal/storage/localstorage"
 	"mediahub_oss/internal/storage/s3storage"
+	"strings"
 	"time"
 
 	// Aliased imports for your sub-handlers
@@ -54,6 +55,7 @@ func NewServeCommand(globalOptions *GlobalOptions, frontendFS fs.FS) *cobra.Comm
 }
 
 func registerFlags(cmd *cobra.Command) {
+
 	// Operational & Startup Flags
 	cmd.Flags().String("init_config", "", "Path to a TOML config file for one-time initialization.")
 	cmd.Flags().String("password", "", "Password for the 'admin' user.")
@@ -99,12 +101,12 @@ func registerFlags(cmd *cobra.Command) {
 	cmd.Flags().String("auth-jwt-refresh-duration", "24h", "Validity of the refresh token.")
 	cmd.Flags().String("auth-jwt-secret", "", "Secret key for signing JWTs.")
 	cmd.Flags().Bool("auth-oidc-enabled", false, "Toggle OIDC integration.")
-	cmd.Flags().Bool("auth-oidc-disable-local-login", false, "Disable internal local login.")
+	cmd.Flags().Bool("auth-oidc-disable-login-page", false, "Disable frontend login page and redirect directly to OIDC.")
 	cmd.Flags().String("auth-oidc-default-user-rights", "_oidc_user", "Default rights for new OIDC users.")
 	cmd.Flags().String("auth-oidc-issuer-url", "", "OIDC Issuer URL.")
 	cmd.Flags().String("auth-oidc-client-id", "", "OIDC Client ID.")
 	cmd.Flags().String("auth-oidc-client-secret", "", "OIDC Client Secret.")
-	cmd.Flags().String("auth-oidc-redirect-url", "", "OIDC Redirect callback URL.")
+	cmd.Flags().String("auth-oidc-redirect-url", "", "OIDC Redirect callback URL (must end in /auth/callback). Defaults to '<origin>/auth/callback' if omitted.")
 
 	flagToViperKey := map[string]string{
 		"server-host":                      "server.host",
@@ -136,7 +138,7 @@ func registerFlags(cmd *cobra.Command) {
 		"auth-jwt-refresh-duration":        "auth.jwt.refresh_duration",
 		"auth-jwt-secret":                  "auth.jwt.secret",
 		"auth-oidc-enabled":                "auth.oidc.enabled",
-		"auth-oidc-disable-local-login":    "auth.oidc.disable_login_page",
+		"auth-oidc-disable-login-page":     "auth.oidc.disable_login_page",
 		"auth-oidc-default-user-rights":    "auth.oidc.default_user_rights",
 		"auth-oidc-issuer-url":             "auth.oidc.issuer_url",
 		"auth-oidc-client-id":              "auth.oidc.client_id",
@@ -292,6 +294,21 @@ func buildHandlers(cfg *config.Config, repo repository.Repository, storageProvid
 	)
 	infoH.StartTime = startTime
 
+	oidcCfg := th.OIDCConfig{
+		Enabled:           cfg.Auth.OIDC.Enabled,
+		DisableLoginPage:  cfg.Auth.OIDC.DisableLoginPage,
+		DefaultUserRights: cfg.Auth.OIDC.DefaultUserRights,
+		IssuerURL:         cfg.Auth.OIDC.IssuerURL,
+		ClientID:          cfg.Auth.OIDC.ClientID,
+		ClientSecret:      cfg.Auth.OIDC.ClientSecret,
+		RedirectURL:       cfg.Auth.OIDC.RedirectURL,
+	}
+	var oidcProvider th.OIDCProvider
+	if oidcCfg.Enabled {
+		ValidateOIDCRedirectURL(logger, oidcCfg.RedirectURL)
+		oidcProvider = th.NewHTTPOIDCProvider(oidcCfg, logger)
+	}
+
 	return &httpserver.Handlers{
 		InfoHandler: *infoH,
 		EntryHandler: eh.EntryHandler{
@@ -322,6 +339,8 @@ func buildHandlers(cfg *config.Config, repo repository.Repository, storageProvid
 			JWTSecret:       []byte(jwtCfg.Secret),
 			AccessDuration:  jwtCfg.AccessDuration,
 			RefreshDuration: jwtCfg.RefreshDuration,
+			OIDCConfig:      oidcCfg,
+			OIDCProvider:    oidcProvider,
 		},
 		AuditHandler: ah.AuditHandler{
 			Logger: logger,
@@ -435,3 +454,15 @@ func processInitConfig(ctx context.Context, repo repository.Repository, logger *
 
 	return nil
 }
+
+// ValidateOIDCRedirectURL checks if the configured OIDC redirect URL ends in /auth/callback and logs a warning if not.
+func ValidateOIDCRedirectURL(logger *slog.Logger, redirectURL string) bool {
+	if redirectURL != "" && !strings.HasSuffix(strings.TrimRight(redirectURL, "/"), "/auth/callback") {
+		if logger != nil {
+			logger.Warn("OIDC redirect URL does not end in '/auth/callback', which may cause SSO login or callback handling to fail", "redirect_url", redirectURL)
+		}
+		return false
+	}
+	return true
+}
+

@@ -30,12 +30,12 @@ func TestServeCommand_FlagBinding(t *testing.T) {
 		"--media-ffprobe-path=/usr/bin/ffprobe",
 		"--auth-jwt-access-duration=15min",
 		"--auth-jwt-refresh-duration=72h",
-		"--auth-oidc-disable-local-login=true",
+		"--auth-oidc-disable-login-page=true",
 		"--auth-oidc-default-user-rights=custom_role",
 		"--auth-oidc-issuer-url=https://auth.example.com",
 		"--auth-oidc-client-id=my-client",
 		"--auth-oidc-client-secret=my-client-secret",
-		"--auth-oidc-redirect-url=https://app.example.com/callback",
+		"--auth-oidc-redirect-url=https://app.example.com/auth/callback",
 	}
 
 	if err := cmd.ParseFlags(args); err != nil {
@@ -102,7 +102,55 @@ func TestServeCommand_FlagBinding(t *testing.T) {
 	if cfg.Auth.OIDC.ClientSecret != "my-client-secret" {
 		t.Errorf("expected Auth.OIDC.ClientSecret 'my-client-secret', got %q", cfg.Auth.OIDC.ClientSecret)
 	}
-	if cfg.Auth.OIDC.RedirectURL != "https://app.example.com/callback" {
-		t.Errorf("expected Auth.OIDC.RedirectURL 'https://app.example.com/callback', got %q", cfg.Auth.OIDC.RedirectURL)
+	if cfg.Auth.OIDC.RedirectURL != "https://app.example.com/auth/callback" {
+		t.Errorf("expected Auth.OIDC.RedirectURL 'https://app.example.com/auth/callback', got %q", cfg.Auth.OIDC.RedirectURL)
 	}
 }
+
+func TestServeCommand_DisableLoginPageFlag(t *testing.T) {
+	viper.Reset()
+
+	globalOptions := &cli.GlobalOptions{}
+	cmd := cli.NewServeCommand(globalOptions, nil)
+
+	args := []string{
+		"--auth-oidc-disable-login-page=true",
+	}
+
+	if err := cmd.ParseFlags(args); err != nil {
+		t.Fatalf("ParseFlags failed: %v", err)
+	}
+
+	var cfg config.Config
+	if err := viper.Unmarshal(&cfg); err != nil {
+		t.Fatalf("viper.Unmarshal failed: %v", err)
+	}
+
+	if cfg.Auth.OIDC.DisableLoginPage != true {
+		t.Errorf("expected Auth.OIDC.DisableLoginPage true when using --auth-oidc-disable-login-page, got false")
+	}
+}
+
+func TestValidateOIDCRedirectURL(t *testing.T) {
+	tests := []struct {
+		url   string
+		valid bool
+	}{
+		{"", true}, // Empty defaults dynamically on frontend
+		{"http://localhost:8080/auth/callback", true},
+		{"http://localhost:8080/auth/callback/", true},
+		{"https://app.example.com/auth/callback", true},
+		{"http://localhost:8080/", false},
+		{"http://localhost:8080/login", false},
+		{"http://localhost:8080/callback", false},
+	}
+
+	for _, tt := range tests {
+		result := cli.ValidateOIDCRedirectURL(nil, tt.url)
+		if result != tt.valid {
+			t.Errorf("ValidateOIDCRedirectURL(%q) = %v, expected %v", tt.url, result, tt.valid)
+		}
+	}
+}
+
+

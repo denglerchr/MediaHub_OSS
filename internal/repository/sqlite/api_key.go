@@ -162,7 +162,7 @@ func (r *SQLiteRepository) GetAPIKeyWithOwnerByHash(ctx context.Context, keyHash
 		"ak.id", "ak.user_id", "ak.name", "ak.key_hash", "ak.key_hint",
 		"ak.scope_view", "ak.scope_create", "ak.scope_edit", "ak.scope_delete", "ak.scope_admin",
 		"ak.created_at", "ak.expires_at", "ak.last_used_at",
-		"u.id", "u.username", "u.password_hash", "u.is_admin", "u.is_service_account",
+		"u.id", "u.username", "u.password_hash", "u.is_admin", "u.account_type",
 	).
 		From("api_keys ak").
 		Join("users u ON ak.user_id = u.id").
@@ -178,19 +178,22 @@ func (r *SQLiteRepository) GetAPIKeyWithOwnerByHash(ctx context.Context, keyHash
 	var keyIDStr, userIDStr, uIDStr string
 	var createdAtVal int64
 	var expiresAtNull, lastUsedAtNull sql.NullInt64
+	var accountTypeUint uint8
 
 	err = r.DB.QueryRowContext(ctx, query, args...).Scan(
 		&keyIDStr, &userIDStr, &key.Name, &key.KeyHash, &key.KeyHint,
 		&scopeView, &scopeCreate, &scopeEdit, &scopeDelete, &scopeAdmin,
 		&createdAtVal, &expiresAtNull, &lastUsedAtNull,
-		&uIDStr, &user.Username, &user.PasswordHash, &user.IsAdmin, &user.IsServiceAccount,
+		&uIDStr, &user.Username, &user.PasswordHash, &user.IsAdmin, &accountTypeUint,
 	)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return repo.APIKey{}, repo.User{}, customerrors.ErrNotFound
 		}
-		return repo.APIKey{}, repo.User{}, fmt.Errorf("failed to execute get api_key with owner query: %w", err)
+		return repo.APIKey{}, repo.User{}, fmt.Errorf("failed to scan api_key with owner: %w", err)
 	}
+
+	user.AccountType = repo.AccountType(accountTypeUint)
 
 	key.ID = repo.ULID(keyIDStr)
 	key.UserID = repo.ULID(userIDStr)
