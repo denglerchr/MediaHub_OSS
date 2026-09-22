@@ -89,6 +89,8 @@ func mapToPostgresType(t string) string {
 		return "TEXT"
 	case "BOOLEAN", "BOOL":
 		return "BOOLEAN"
+	case "COORDINATE", "POINT":
+		return "POINT"
 	default:
 		return t
 	}

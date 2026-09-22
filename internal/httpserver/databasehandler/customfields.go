@@ -39,7 +39,7 @@ func (h *DatabaseHandler) GetFields(w http.ResponseWriter, r *http.Request) {
 		resp[i] = DatabaseCustomField{
 			ID:        &idVal,
 			Name:      f.Name,
-			Type:      f.Type,
+			Type:      f.Type.String(),
 			IsIndexed: &isIndexedVal,
 		}
 	}
@@ -99,7 +99,7 @@ func (h *DatabaseHandler) AddField(w http.ResponseWriter, r *http.Request) {
 	resp := DatabaseCustomField{
 		ID:        &idVal,
 		Name:      added.Name,
-		Type:      added.Type,
+		Type:      added.Type.String(),
 		IsIndexed: &isIndexedVal,
 	}
 
@@ -155,7 +155,7 @@ func (h *DatabaseHandler) UpdateField(w http.ResponseWriter, r *http.Request) {
 	resp := DatabaseCustomField{
 		ID:        &idVal,
 		Name:      updated.Name,
-		Type:      updated.Type,
+		Type:      updated.Type.String(),
 		IsIndexed: &isIndexedVal,
 	}
 

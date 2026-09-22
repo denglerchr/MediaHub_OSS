@@ -94,13 +94,9 @@ func (r *PostgresRepository) BuildDynamicTableSchema(dbID, contentType string, c
 	sb.WriteString(",\n\tmime_type TEXT NOT NULL")
 
 	for _, cf := range customFields {
-		normType, err := repo.NormalizeCustomFieldType(cf.Type)
-		if err != nil {
-			return "", fmt.Errorf("unsupported custom field type: %s", cf.Type)
-		}
-		datatype := mapToPostgresType(normType)
+		datatype := mapToPostgresType(cf.Type.String())
 		switch datatype {
-		case "TEXT", "INTEGER", "DOUBLE PRECISION", "BOOLEAN":
+		case "TEXT", "INTEGER", "DOUBLE PRECISION", "BOOLEAN", "POINT":
 			sb.WriteString(fmt.Sprintf(",\n\t\"%s%d\" %s", customFieldsPrefix, cf.ID, datatype))
 		default:
 			return "", fmt.Errorf("unsupported custom field type: %s", cf.Type)
@@ -109,6 +105,20 @@ func (r *PostgresRepository) BuildDynamicTableSchema(dbID, contentType string, c
 
 	sb.WriteString("\n);")
 	return sb.String(), nil
+}
+
+// BuildCustomFieldIndexSQL generates the CREATE INDEX statement for a custom field in PostgreSQL.
+func BuildCustomFieldIndexSQL(dbID string, cf repo.CustomFieldDef) string {
+	tableName := fmt.Sprintf(`"entries_%s"`, dbID)
+	if cf.Type.IsCoordinate() {
+		return fmt.Sprintf(`CREATE INDEX IF NOT EXISTS "idx_entries_%s_%s%d" ON %s USING gist("%s%d");`, dbID, customFieldsPrefix, cf.ID, tableName, customFieldsPrefix, cf.ID)
+	}
+	return fmt.Sprintf(`CREATE INDEX IF NOT EXISTS "idx_entries_%s_%s%d" ON %s("%s%d");`, dbID, customFieldsPrefix, cf.ID, tableName, customFieldsPrefix, cf.ID)
+}
+
+// BuildCustomFieldDropIndexSQL generates the DROP INDEX statement for a custom field in PostgreSQL.
+func BuildCustomFieldDropIndexSQL(dbID string, fieldID int) string {
+	return fmt.Sprintf(`DROP INDEX IF EXISTS "idx_entries_%s_%s%d"`, dbID, customFieldsPrefix, fieldID)
 }
 
 // BuildIndexesSQL returns standard and partial PostgreSQL indexes for dynamic entry tables.
@@ -128,7 +138,7 @@ func BuildIndexesSQL(dbID string, customFields []repo.CustomFieldDef) []string {
 
 	for _, cf := range customFields {
 		if cf.IsIndexed {
-			sqls = append(sqls, fmt.Sprintf(`CREATE INDEX IF NOT EXISTS "idx_entries_%s_%s%d" ON %s("%s%d");`, dbID, customFieldsPrefix, cf.ID, tableName, customFieldsPrefix, cf.ID))
+			sqls = append(sqls, BuildCustomFieldIndexSQL(dbID, cf))
 		}
 	}
 

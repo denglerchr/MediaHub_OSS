@@ -97,10 +97,11 @@ func (r *SQLiteRepository) BuildDynamicTableSchema(dbID, contentType string, cus
 
 	// 4. Add User Custom Fields
 	for _, cf := range customFields {
-		datatype := strings.ToUpper(cf.Type)
-		switch datatype {
-		case "TEXT", "INTEGER", "REAL", "BOOLEAN":
-			sb.WriteString(fmt.Sprintf(",\n\t\"%s%d\" %s", customFieldsPrefix, cf.ID, datatype))
+		switch cf.Type {
+		case repo.CustomFieldTypeText, repo.CustomFieldTypeInteger, repo.CustomFieldTypeReal, repo.CustomFieldTypeBoolean:
+			sb.WriteString(fmt.Sprintf(",\n\t\"%s%d\" %s", customFieldsPrefix, cf.ID, cf.Type.String()))
+		case repo.CustomFieldTypeCoordinate:
+			sb.WriteString(fmt.Sprintf(",\n\t\"%s%d_lat\" REAL,\n\t\"%s%d_lng\" REAL", customFieldsPrefix, cf.ID, customFieldsPrefix, cf.ID))
 		default:
 			return "", fmt.Errorf("unsupported custom field type: %s", cf.Type)
 		}
@@ -108,6 +109,20 @@ func (r *SQLiteRepository) BuildDynamicTableSchema(dbID, contentType string, cus
 
 	sb.WriteString("\n);")
 	return sb.String(), nil
+}
+
+// BuildCustomFieldIndexSQL generates the CREATE INDEX statement for a custom field.
+func BuildCustomFieldIndexSQL(dbID string, cf repo.CustomFieldDef) string {
+	tableName := fmt.Sprintf(`"entries_%s"`, dbID)
+	if cf.Type.IsCoordinate() {
+		return fmt.Sprintf(`CREATE INDEX IF NOT EXISTS "idx_entries_%s_%s%d" ON %s("%s%d_lat", "%s%d_lng")`, dbID, customFieldsPrefix, cf.ID, tableName, customFieldsPrefix, cf.ID, customFieldsPrefix, cf.ID)
+	}
+	return fmt.Sprintf(`CREATE INDEX IF NOT EXISTS "idx_entries_%s_%s%d" ON %s("%s%d")`, dbID, customFieldsPrefix, cf.ID, tableName, customFieldsPrefix, cf.ID)
+}
+
+// BuildCustomFieldDropIndexSQL generates the DROP INDEX statement for a custom field.
+func BuildCustomFieldDropIndexSQL(dbID string, fieldID int) string {
+	return fmt.Sprintf(`DROP INDEX IF EXISTS "idx_entries_%s_%s%d"`, dbID, customFieldsPrefix, fieldID)
 }
 
 // BuildIndexesSQL creates the indexing statements using the database ID.
@@ -122,7 +137,7 @@ func BuildIndexesSQL(dbID string, customFields []repo.CustomFieldDef) []string {
 
 	for _, cf := range customFields {
 		if cf.IsIndexed {
-			sqls = append(sqls, fmt.Sprintf(`CREATE INDEX IF NOT EXISTS "idx_entries_%s_%s%d" ON %s("%s%d");`, dbID, customFieldsPrefix, cf.ID, tableName, customFieldsPrefix, cf.ID))
+			sqls = append(sqls, BuildCustomFieldIndexSQL(dbID, cf))
 		}
 	}
 

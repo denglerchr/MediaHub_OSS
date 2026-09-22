@@ -134,7 +134,7 @@ func up02001(ctx context.Context, tx *sql.Tx) error {
 			for i, cf := range m.customFields {
 				// Insert into new table
 				insertCFSQL := `INSERT INTO database_custom_fields (database_id, field_id, name, type, is_indexed) VALUES (?, ?, ?, ?, 1)`
-				if _, err := tx.ExecContext(ctx, insertCFSQL, m.dbID, i, cf.Name, strings.ToUpper(cf.Type)); err != nil {
+				if _, err := tx.ExecContext(ctx, insertCFSQL, m.dbID, i, cf.Name, cf.Type.String()); err != nil {
 					return fmt.Errorf("failed to insert custom field: %w", err)
 				}
 
@@ -269,9 +269,10 @@ func down02001(ctx context.Context, tx *sql.Tx) error {
 			for dbID, recs := range dbFields {
 				var oldCFs []repository.CustomFieldDef
 				for _, rec := range recs {
+					parsedType, _ := repository.ParseCustomFieldType(rec.Type)
 					oldCFs = append(oldCFs, repository.CustomFieldDef{
 						Name: rec.Name,
-						Type: rec.Type,
+						Type: parsedType,
 					})
 				}
 				js, err := json.Marshal(oldCFs)
@@ -523,7 +524,7 @@ func buildDynamicTableSchema(dbID, contentType string, customFields []repository
 	sb.WriteString(",\n\tmime_type TEXT NOT NULL")
 
 	for _, cf := range customFields {
-		datatype := strings.ToUpper(cf.Type)
+		datatype := cf.Type.String()
 		switch datatype {
 		case "TEXT", "INTEGER", "REAL", "BOOLEAN":
 			sb.WriteString(fmt.Sprintf(",\n\t\"cf_%d\" %s", cf.ID, datatype))

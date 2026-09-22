@@ -210,7 +210,7 @@ func TestDeleteDatabase_InvalidatesCustomFieldsCache(t *testing.T) {
 	// Add custom field
 	_, err = r.AddCustomField(ctx, createdDB.ID, repo.CustomFieldDef{
 		Name: "photographer",
-		Type: "string",
+		Type: repo.CustomFieldTypeText,
 	})
 	if err != nil {
 		t.Fatalf("failed to add custom field: %v", err)
@@ -239,5 +239,292 @@ func TestDeleteDatabase_InvalidatesCustomFieldsCache(t *testing.T) {
 	// Verify cache key was evicted
 	if _, found := r.Cache.Get(cacheKey); found {
 		t.Fatalf("expected cache key %s to be deleted after DeleteDatabase", cacheKey)
+	}
+}
+
+func TestCoordinateCustomField_SQLite(t *testing.T) {
+	ctx := context.Background()
+
+	r, err := sqlite.NewRepository(":memory:")
+	if err != nil {
+		t.Fatalf("failed to create repo: %v", err)
+	}
+	defer r.Close()
+
+	if err := goose.SetDialect("sqlite3"); err != nil {
+		t.Fatalf("failed to set goose dialect: %v", err)
+	}
+	goose.SetBaseFS(migrations.EmbedFS)
+	if err := goose.Up(r.DB, "sqlite"); err != nil {
+		t.Fatalf("failed to run migrations: %v", err)
+	}
+
+	dbModel := repo.Database{
+		Name:        "geo_test_db",
+		ContentType: "image",
+	}
+	db, err := r.CreateDatabase(ctx, dbModel)
+	if err != nil {
+		t.Fatalf("failed to create database: %v", err)
+	}
+
+	// 1. Add COORDINATE custom field
+	addedField, err := r.AddCustomField(ctx, db.ID, repo.CustomFieldDef{
+		Name:      "location",
+		Type:      repo.CustomFieldTypeCoordinate,
+		IsIndexed: true,
+	})
+	if err != nil {
+		t.Fatalf("failed to add COORDINATE field: %v", err)
+	}
+	if addedField.Type != repo.CustomFieldTypeCoordinate {
+		t.Errorf("expected type COORDINATE, got %s", addedField.Type)
+	}
+	db.CustomFields = append(db.CustomFields, addedField)
+
+	// 2. Insert entries with coordinates
+	e1 := repo.Entry{
+		FileName: "munich.jpg",
+		MimeType: "image/jpeg",
+		Size:     1000,
+		MediaFields: map[string]any{
+			"width": 800, "height": 600,
+		},
+		CustomFields: map[string]any{
+			"location": repo.Coordinate{Latitude: 48.137154, Longitude: 11.576124},
+		},
+	}
+	createdE1, err := r.CreateEntry(ctx, db, e1)
+	if err != nil {
+		t.Fatalf("failed to create entry with coordinate: %v", err)
+	}
+
+	// Fetch entry 1
+	fetchedE1, err := r.GetEntry(ctx, db.ID, createdE1.ID)
+	if err != nil {
+		t.Fatalf("failed to get entry: %v", err)
+	}
+	locVal, exists := fetchedE1.CustomFields["location"]
+	if !exists {
+		t.Fatalf("expected 'location' in CustomFields")
+	}
+	locCoord, ok := locVal.(repo.Coordinate)
+	if !ok {
+		t.Fatalf("expected repo.Coordinate type, got %T (%v)", locVal, locVal)
+	}
+	if locCoord.Latitude != 48.137154 || locCoord.Longitude != 11.576124 {
+		t.Errorf("expected (48.137154, 11.576124), got (%v, %v)", locCoord.Latitude, locCoord.Longitude)
+	}
+
+	// Antimeridian entries: e2 east (+179.5), e3 west (-179.5)
+	e2 := repo.Entry{
+		FileName: "east.jpg",
+		MimeType: "image/jpeg",
+		Size:     1000,
+		MediaFields: map[string]any{
+			"width": 800, "height": 600,
+		},
+		CustomFields: map[string]any{
+			"location": repo.Coordinate{Latitude: 10.0, Longitude: 179.5},
+		},
+	}
+	createdE2, err := r.CreateEntry(ctx, db, e2)
+	if err != nil {
+		t.Fatalf("failed to create entry e2: %v", err)
+	}
+
+	e3 := repo.Entry{
+		FileName: "west.jpg",
+		MimeType: "image/jpeg",
+		Size:     1000,
+		MediaFields: map[string]any{
+			"width": 800, "height": 600,
+		},
+		CustomFields: map[string]any{
+			"location": repo.Coordinate{Latitude: 10.0, Longitude: -179.5},
+		},
+	}
+	createdE3, err := r.CreateEntry(ctx, db, e3)
+	if err != nil {
+		t.Fatalf("failed to create entry e3: %v", err)
+	}
+
+	cfs, err := r.GetCustomFields(ctx, db.ID)
+	if err != nil {
+		t.Fatalf("failed to get custom fields: %v", err)
+	}
+
+	// 3. Search: standard box containing Munich
+	munichSearch := repo.SearchRequest{
+		Filter: &repo.FilterGroup{
+			Operator: "and",
+			Conditions: []repo.Condition{
+				{
+					Field:    "location",
+					Operator: "in_box",
+					Value: map[string]any{
+						"min_lat": 48.0, "max_lat": 49.0,
+						"min_lng": 11.0, "max_lng": 12.0,
+					},
+				},
+			},
+		},
+		Pagination: repo.Pagination{Limit: 10},
+	}
+	res, err := r.SearchEntries(ctx, db.ID, munichSearch, cfs)
+	if err != nil {
+		t.Fatalf("search failed: %v", err)
+	}
+	if len(res) != 1 || res[0].ID != createdE1.ID {
+		t.Errorf("expected 1 result with ID %d, got %d results", createdE1.ID, len(res))
+	}
+
+	// Standard box outside Munich
+	outsideSearch := repo.SearchRequest{
+		Filter: &repo.FilterGroup{
+			Operator: "and",
+			Conditions: []repo.Condition{
+				{
+					Field:    "location",
+					Operator: "in_box",
+					Value: map[string]any{
+						"min_lat": 50.0, "max_lat": 51.0,
+						"min_lng": 11.0, "max_lng": 12.0,
+					},
+				},
+			},
+		},
+		Pagination: repo.Pagination{Limit: 10},
+	}
+	resOutside, err := r.SearchEntries(ctx, db.ID, outsideSearch, cfs)
+	if err != nil {
+		t.Fatalf("search outside failed: %v", err)
+	}
+	if len(resOutside) != 0 {
+		t.Errorf("expected 0 results, got %d", len(resOutside))
+	}
+
+	// Antimeridian search (spanning 179.0 to -179.0)
+	antiSearch := repo.SearchRequest{
+		Filter: &repo.FilterGroup{
+			Operator: "and",
+			Conditions: []repo.Condition{
+				{
+					Field:    "location",
+					Operator: "in_box",
+					Value: map[string]any{
+						"min_lat": 5.0, "max_lat": 15.0,
+						"min_lng": 179.0, "max_lng": -179.0,
+					},
+				},
+			},
+		},
+		Pagination: repo.Pagination{Limit: 10},
+	}
+	resAnti, err := r.SearchEntries(ctx, db.ID, antiSearch, cfs)
+	if err != nil {
+		t.Fatalf("antimeridian search failed: %v", err)
+	}
+	if len(resAnti) != 2 {
+		t.Errorf("expected 2 results across antimeridian, got %d", len(resAnti))
+	}
+	foundE2, foundE3 := false, false
+	for _, item := range resAnti {
+		if item.ID == createdE2.ID {
+			foundE2 = true
+		}
+		if item.ID == createdE3.ID {
+			foundE3 = true
+		}
+	}
+	if !foundE2 || !foundE3 {
+		t.Errorf("expected to find e2 and e3 across antimeridian, foundE2=%v, foundE3=%v", foundE2, foundE3)
+	}
+
+	// 4. Invalid operator on coordinate field
+	invalidOpSearch := repo.SearchRequest{
+		Filter: &repo.FilterGroup{
+			Operator: "and",
+			Conditions: []repo.Condition{
+				{
+					Field:    "location",
+					Operator: "=",
+					Value:    48.0,
+				},
+			},
+		},
+		Pagination: repo.Pagination{Limit: 10},
+	}
+	if _, err := r.SearchEntries(ctx, db.ID, invalidOpSearch, cfs); err == nil {
+		t.Errorf("expected validation error for '=' operator on coordinate field")
+	}
+
+	// 5. In_box operator on non-coordinate field
+	invalidFieldSearch := repo.SearchRequest{
+		Filter: &repo.FilterGroup{
+			Operator: "and",
+			Conditions: []repo.Condition{
+				{
+					Field:    "filename",
+					Operator: "in_box",
+					Value:    map[string]any{"min_lat": 0.0, "max_lat": 1.0, "min_lng": 0.0, "max_lng": 1.0},
+				},
+			},
+		},
+		Pagination: repo.Pagination{Limit: 10},
+	}
+	if _, err := r.SearchEntries(ctx, db.ID, invalidFieldSearch, cfs); err == nil {
+		t.Errorf("expected validation error for in_box on non-coordinate field")
+	}
+
+	// 6. Sorting by coordinate field
+	sortCoordSearch := repo.SearchRequest{
+		Sort: &repo.SortCriteria{
+			Field:     "location",
+			Direction: "asc",
+		},
+		Pagination: repo.Pagination{Limit: 10},
+	}
+	if _, err := r.SearchEntries(ctx, db.ID, sortCoordSearch, cfs); err == nil {
+		t.Errorf("expected validation error when sorting by coordinate field")
+	}
+
+	// 7. Update entry coordinate
+	fetchedE1.CustomFields["location"] = repo.Coordinate{Latitude: 48.2, Longitude: 11.6}
+	updatedE1, err := r.UpdateEntry(ctx, db.ID, fetchedE1)
+	if err != nil {
+		t.Fatalf("failed to update entry: %v", err)
+	}
+	reFetchedE1, err := r.GetEntry(ctx, db.ID, updatedE1.ID)
+	if err != nil {
+		t.Fatalf("failed to re-fetch entry: %v", err)
+	}
+	reLoc := reFetchedE1.CustomFields["location"].(repo.Coordinate)
+	if reLoc.Latitude != 48.2 || reLoc.Longitude != 11.6 {
+		t.Errorf("expected updated coordinate (48.2, 11.6), got %v", reLoc)
+	}
+
+	// 8. Toggle index
+	falseVal := false
+	_, err = r.UpdateCustomField(ctx, db.ID, addedField.ID, nil, &falseVal)
+	if err != nil {
+		t.Fatalf("failed to disable index on coordinate field: %v", err)
+	}
+	trueVal := true
+	_, err = r.UpdateCustomField(ctx, db.ID, addedField.ID, nil, &trueVal)
+	if err != nil {
+		t.Fatalf("failed to re-enable index on coordinate field: %v", err)
+	}
+
+	// 9. Delete custom field
+	if err := r.DeleteCustomField(ctx, db.ID, addedField.ID); err != nil {
+		t.Fatalf("failed to delete coordinate custom field: %v", err)
+	}
+	postDeleteFields, err := r.GetCustomFields(ctx, db.ID)
+	if err != nil {
+		t.Fatalf("failed to get fields after delete: %v", err)
+	}
+	if len(postDeleteFields) != 0 {
+		t.Errorf("expected 0 custom fields after delete, got %d", len(postDeleteFields))
 	}
 }

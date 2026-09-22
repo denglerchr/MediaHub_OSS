@@ -32,12 +32,13 @@ func TestBuildDynamicTableSchema(t *testing.T) {
 	}
 
 	customFields := []repo.CustomFieldDef{
-		{ID: 0, Name: "artist", Type: "TEXT", IsIndexed: true},
-		{ID: 1, Name: "year", Type: "INTEGER", IsIndexed: false},
-		{ID: 2, Name: "rating", Type: "REAL", IsIndexed: true},
-		{ID: 3, Name: "is_favorite", Type: "BOOLEAN", IsIndexed: false},
-		{ID: 4, Name: "score", Type: "float64", IsIndexed: false},
-		{ID: 5, Name: "count", Type: "int", IsIndexed: false},
+		{ID: 0, Name: "artist", Type: repo.CustomFieldTypeText, IsIndexed: true},
+		{ID: 1, Name: "year", Type: repo.CustomFieldTypeInteger, IsIndexed: false},
+		{ID: 2, Name: "rating", Type: repo.CustomFieldTypeReal, IsIndexed: true},
+		{ID: 3, Name: "is_favorite", Type: repo.CustomFieldTypeBoolean, IsIndexed: false},
+		{ID: 4, Name: "score", Type: repo.CustomFieldTypeReal, IsIndexed: false},
+		{ID: 5, Name: "count", Type: repo.CustomFieldTypeInteger, IsIndexed: false},
+		{ID: 6, Name: "location", Type: repo.CustomFieldTypeCoordinate, IsIndexed: true},
 	}
 
 	sql, err := r.BuildDynamicTableSchema("01HGFB9Z5W7ABCDEFGHJKMNPQR", "image", customFields)
@@ -66,8 +67,37 @@ func TestBuildDynamicTableSchema(t *testing.T) {
 	if !strings.Contains(sql, `"cf_5" INTEGER`) {
 		t.Errorf("expected cf_5 column in SQL, got: %s", sql)
 	}
+	if !strings.Contains(sql, `"cf_6" POINT`) {
+		t.Errorf("expected cf_6 POINT column in SQL, got: %s", sql)
+	}
 	if !strings.Contains(sql, `id SERIAL PRIMARY KEY`) {
 		t.Errorf("expected SERIAL id column in SQL, got: %s", sql)
+	}
+}
+
+func TestBuildIndexesSQL_Coordinate(t *testing.T) {
+	customFields := []repo.CustomFieldDef{
+		{ID: 0, Name: "artist", Type: repo.CustomFieldTypeText, IsIndexed: true},
+		{ID: 1, Name: "location", Type: repo.CustomFieldTypeCoordinate, IsIndexed: true},
+		{ID: 2, Name: "rating", Type: repo.CustomFieldTypeReal, IsIndexed: false},
+	}
+
+	sqls := BuildIndexesSQL("01HGFB9Z5W7ABCDEFGHJKMNPQR", customFields)
+	foundGist := false
+	foundBtree := false
+	for _, s := range sqls {
+		if strings.Contains(s, `USING gist("cf_1")`) {
+			foundGist = true
+		}
+		if strings.Contains(s, `ON "entries_01HGFB9Z5W7ABCDEFGHJKMNPQR"("cf_0")`) {
+			foundBtree = true
+		}
+	}
+	if !foundGist {
+		t.Errorf("expected GiST index for coordinate field, got indexes: %v", sqls)
+	}
+	if !foundBtree {
+		t.Errorf("expected standard B-Tree index for cf_0, got indexes: %v", sqls)
 	}
 }
 
@@ -103,15 +133,17 @@ func TestValidOperator(t *testing.T) {
 
 func TestMapToPostgresType(t *testing.T) {
 	tests := map[string]string{
-		"INTEGER":  "INTEGER",
-		"REAL":     "DOUBLE PRECISION",
-		"TEXT":     "TEXT",
-		"BOOLEAN":  "BOOLEAN",
-		"uint64":   "BIGINT",
-		"INT64":    "BIGINT",
-		"float64":  "DOUBLE PRECISION",
-		"uint8":    "SMALLINT",
-		"SMALLINT": "SMALLINT",
+		"INTEGER":    "INTEGER",
+		"REAL":       "DOUBLE PRECISION",
+		"TEXT":       "TEXT",
+		"BOOLEAN":    "BOOLEAN",
+		"COORDINATE": "POINT",
+		"POINT":      "POINT",
+		"uint64":     "BIGINT",
+		"INT64":      "BIGINT",
+		"float64":    "DOUBLE PRECISION",
+		"uint8":      "SMALLINT",
+		"SMALLINT":   "SMALLINT",
 	}
 	for in, expected := range tests {
 		got := mapToPostgresType(in)

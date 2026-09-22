@@ -55,16 +55,8 @@ func (r *PostgresRepository) CreateEntry(ctx context.Context, db repo.Database, 
 	for key, value := range entry.MediaFields {
 		insertData[key] = value
 	}
-	cfNameToID := make(map[string]int)
-	for _, cf := range db.CustomFields {
-		cfNameToID[cf.Name] = cf.ID
-	}
-	for key, value := range entry.CustomFields {
-		if id, ok := cfNameToID[key]; ok {
-			insertData[fmt.Sprintf("%s%d", customFieldsPrefix, id)] = value
-		} else {
-			insertData[customFieldsPrefix+key] = value
-		}
+	if err := mapCustomFieldsToPostgresColumns(db.CustomFields, entry.CustomFields, insertData); err != nil {
+		return repo.Entry{}, err
 	}
 
 	tx, err := r.DB.BeginTx(ctx, nil)
@@ -262,16 +254,8 @@ func (r *PostgresRepository) UpdateEntry(ctx context.Context, dbID repo.ULID, en
 	for key, value := range entry.MediaFields {
 		updateData[key] = value
 	}
-	cfNameToID := make(map[string]int)
-	for _, cf := range customFields {
-		cfNameToID[cf.Name] = cf.ID
-	}
-	for key, value := range entry.CustomFields {
-		if id, ok := cfNameToID[key]; ok {
-			updateData[fmt.Sprintf("%s%d", customFieldsPrefix, id)] = value
-		} else {
-			updateData[customFieldsPrefix+key] = value
-		}
+	if err := mapCustomFieldsToPostgresColumns(customFields, entry.CustomFields, updateData); err != nil {
+		return repo.Entry{}, err
 	}
 
 	updateQuery, argsUpdate, err := r.Builder.Update(tableName).
@@ -494,20 +478,58 @@ func (r *PostgresRepository) SearchEntries(ctx context.Context, dbID repo.ULID, 
 		isOr := strings.ToLower(req.Filter.Operator) == "or"
 
 		for _, cond := range req.Filter.Conditions {
-			safeField, err := r.validateAndFormatSearchField(cond.Field, customFields)
-			if err != nil {
-				return nil, fmt.Errorf("%w: %v", customerrors.ErrValidation, err)
+			var cf *repo.CustomFieldDef
+			for i := range customFields {
+				if customFields[i].Name == cond.Field {
+					cf = &customFields[i]
+					break
+				}
 			}
 
-			if !isValidOperator(cond.Operator) {
-				return nil, fmt.Errorf("%w: invalid operator '%s'", customerrors.ErrValidation, cond.Operator)
-			}
-
-			expr := squirrel.Expr(fmt.Sprintf("%s %s ?", safeField, cond.Operator), cond.Value)
-			if isOr {
-				orExpr = append(orExpr, expr)
+			if cf != nil && cf.Type.IsCoordinate() {
+				if strings.ToLower(cond.Operator) != "in_box" {
+					return nil, fmt.Errorf("%w: operator '%s' is not supported on coordinate fields; only 'in_box' is allowed", customerrors.ErrValidation, cond.Operator)
+				}
+				box, err := repo.ParseBoundingBox(cond.Value)
+				if err != nil {
+					return nil, fmt.Errorf("%w: %v", customerrors.ErrValidation, err)
+				}
+				var expr squirrel.Sqlizer
+				if box.MinLng <= box.MaxLng {
+					expr = squirrel.Expr(
+						fmt.Sprintf(`"%s%d" <@ box(point(?, ?), point(?, ?))`, customFieldsPrefix, cf.ID),
+						box.MinLng, box.MinLat, box.MaxLng, box.MaxLat,
+					)
+				} else {
+					expr = squirrel.Expr(
+						fmt.Sprintf(`("%s%d" <@ box(point(?, ?), point(?, ?)) OR "%s%d" <@ box(point(?, ?), point(?, ?)))`, customFieldsPrefix, cf.ID, customFieldsPrefix, cf.ID),
+						box.MinLng, box.MinLat, 180.0, box.MaxLat, -180.0, box.MinLat, box.MaxLng, box.MaxLat,
+					)
+				}
+				if isOr {
+					orExpr = append(orExpr, expr)
+				} else {
+					andExpr = append(andExpr, expr)
+				}
 			} else {
-				andExpr = append(andExpr, expr)
+				if strings.ToLower(cond.Operator) == "in_box" {
+					return nil, fmt.Errorf("%w: 'in_box' operator is only supported on coordinate fields", customerrors.ErrValidation)
+				}
+				safeField, err := r.validateAndFormatSearchField(cond.Field, customFields)
+				if err != nil {
+					return nil, fmt.Errorf("%w: %v", customerrors.ErrValidation, err)
+				}
+
+				if !isValidOperator(cond.Operator) {
+					return nil, fmt.Errorf("%w: invalid operator '%s'", customerrors.ErrValidation, cond.Operator)
+				}
+
+				expr := squirrel.Expr(fmt.Sprintf("%s %s ?", safeField, cond.Operator), cond.Value)
+				if isOr {
+					orExpr = append(orExpr, expr)
+				} else {
+					andExpr = append(andExpr, expr)
+				}
 			}
 		}
 
@@ -519,6 +541,12 @@ func (r *PostgresRepository) SearchEntries(ctx context.Context, dbID repo.ULID, 
 	}
 
 	if req.Sort != nil && req.Sort.Field != "" {
+		for _, cf := range customFields {
+			if cf.Name == req.Sort.Field && cf.Type.IsCoordinate() {
+				return nil, fmt.Errorf("%w: sorting by coordinate fields is not supported", customerrors.ErrValidation)
+			}
+		}
+
 		safeField, err := r.validateAndFormatSearchField(req.Sort.Field, customFields)
 		if err != nil {
 			return nil, fmt.Errorf("%w: %v", customerrors.ErrValidation, err)

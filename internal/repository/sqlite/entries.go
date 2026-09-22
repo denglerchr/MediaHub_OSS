@@ -61,16 +61,8 @@ func (r *SQLiteRepository) CreateEntry(ctx context.Context, db repo.Database, en
 	for key, value := range entry.MediaFields {
 		insertData[key] = value
 	}
-	cfNameToID := make(map[string]int)
-	for _, cf := range db.CustomFields {
-		cfNameToID[cf.Name] = cf.ID
-	}
-	for key, value := range entry.CustomFields {
-		if id, ok := cfNameToID[key]; ok {
-			insertData[fmt.Sprintf("%s%d", customFieldsPrefix, id)] = value
-		} else {
-			insertData[customFieldsPrefix+key] = value
-		}
+	if err := mapCustomFieldsToSQLiteColumns(db.CustomFields, entry.CustomFields, insertData); err != nil {
+		return repo.Entry{}, err
 	}
 
 	// Begin Transaction
@@ -274,16 +266,8 @@ func (r *SQLiteRepository) UpdateEntry(ctx context.Context, dbID repo.ULID, entr
 	for key, value := range entry.MediaFields {
 		updateData[key] = value
 	}
-	cfNameToID := make(map[string]int)
-	for _, cf := range customFields {
-		cfNameToID[cf.Name] = cf.ID
-	}
-	for key, value := range entry.CustomFields {
-		if id, ok := cfNameToID[key]; ok {
-			updateData[fmt.Sprintf("%s%d", customFieldsPrefix, id)] = value
-		} else {
-			updateData[customFieldsPrefix+key] = value
-		}
+	if err := mapCustomFieldsToSQLiteColumns(customFields, entry.CustomFields, updateData); err != nil {
+		return repo.Entry{}, err
 	}
 
 	updateQuery, argsUpdate, err := r.Builder.Update(tableName).
@@ -516,21 +500,59 @@ func (r *SQLiteRepository) SearchEntries(ctx context.Context, dbID repo.ULID, re
 		isOr := strings.ToLower(req.Filter.Operator) == "or"
 
 		for _, cond := range req.Filter.Conditions {
-			safeField, err := r.validateAndFormatSearchField(cond.Field, customFields)
-			if err != nil {
-				return nil, fmt.Errorf("%w: %v", customerrors.ErrValidation, err)
+			var cf *repo.CustomFieldDef
+			for i := range customFields {
+				if customFields[i].Name == cond.Field {
+					cf = &customFields[i]
+					break
+				}
 			}
 
-			if !isValidOperator(cond.Operator) {
-				return nil, fmt.Errorf("%w: invalid operator '%s'", customerrors.ErrValidation, cond.Operator)
-			}
-
-			// Safely assemble the SQL condition using squirrel.Expr
-			expr := squirrel.Expr(fmt.Sprintf("%s %s ?", safeField, cond.Operator), cond.Value)
-			if isOr {
-				orExpr = append(orExpr, expr)
+			if cf != nil && cf.Type.IsCoordinate() {
+				if strings.ToLower(cond.Operator) != "in_box" {
+					return nil, fmt.Errorf("%w: operator '%s' is not supported on coordinate fields; only 'in_box' is allowed", customerrors.ErrValidation, cond.Operator)
+				}
+				box, err := repo.ParseBoundingBox(cond.Value)
+				if err != nil {
+					return nil, fmt.Errorf("%w: %v", customerrors.ErrValidation, err)
+				}
+				var expr squirrel.Sqlizer
+				if box.MinLng <= box.MaxLng {
+					expr = squirrel.Expr(
+						fmt.Sprintf(`"%s%d_lat" >= ? AND "%s%d_lat" <= ? AND "%s%d_lng" >= ? AND "%s%d_lng" <= ?`, customFieldsPrefix, cf.ID, customFieldsPrefix, cf.ID, customFieldsPrefix, cf.ID, customFieldsPrefix, cf.ID),
+						box.MinLat, box.MaxLat, box.MinLng, box.MaxLng,
+					)
+				} else {
+					expr = squirrel.Expr(
+						fmt.Sprintf(`"%s%d_lat" >= ? AND "%s%d_lat" <= ? AND ("%s%d_lng" >= ? OR "%s%d_lng" <= ?)`, customFieldsPrefix, cf.ID, customFieldsPrefix, cf.ID, customFieldsPrefix, cf.ID, customFieldsPrefix, cf.ID),
+						box.MinLat, box.MaxLat, box.MinLng, box.MaxLng,
+					)
+				}
+				if isOr {
+					orExpr = append(orExpr, expr)
+				} else {
+					andExpr = append(andExpr, expr)
+				}
 			} else {
-				andExpr = append(andExpr, expr)
+				if strings.ToLower(cond.Operator) == "in_box" {
+					return nil, fmt.Errorf("%w: 'in_box' operator is only supported on coordinate fields", customerrors.ErrValidation)
+				}
+				safeField, err := r.validateAndFormatSearchField(cond.Field, customFields)
+				if err != nil {
+					return nil, fmt.Errorf("%w: %v", customerrors.ErrValidation, err)
+				}
+
+				if !isValidOperator(cond.Operator) {
+					return nil, fmt.Errorf("%w: invalid operator '%s'", customerrors.ErrValidation, cond.Operator)
+				}
+
+				// Safely assemble the SQL condition using squirrel.Expr
+				expr := squirrel.Expr(fmt.Sprintf("%s %s ?", safeField, cond.Operator), cond.Value)
+				if isOr {
+					orExpr = append(orExpr, expr)
+				} else {
+					andExpr = append(andExpr, expr)
+				}
 			}
 		}
 
@@ -543,6 +565,12 @@ func (r *SQLiteRepository) SearchEntries(ctx context.Context, dbID repo.ULID, re
 
 	// 2. Build Sorting securely
 	if req.Sort != nil && req.Sort.Field != "" {
+		for _, cf := range customFields {
+			if cf.Name == req.Sort.Field && cf.Type.IsCoordinate() {
+				return nil, fmt.Errorf("%w: sorting by coordinate fields is not supported", customerrors.ErrValidation)
+			}
+		}
+
 		safeField, err := r.validateAndFormatSearchField(req.Sort.Field, customFields)
 		if err != nil {
 			return nil, fmt.Errorf("%w: %v", customerrors.ErrValidation, err)

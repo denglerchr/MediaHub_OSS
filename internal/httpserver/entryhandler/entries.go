@@ -904,6 +904,12 @@ func (h *EntryHandler) ExportEntries(w http.ResponseWriter, r *http.Request) {
 				val, exists := entry.CustomFields[cf.Name]
 				if !exists || val == nil {
 					row = append(row, "") // Empty column if no value
+				} else if cf.Type.IsCoordinate() {
+					if coord, err := repo.ParseCoordinate(val); err == nil {
+						row = append(row, fmt.Sprintf("%v, %v", coord.Latitude, coord.Longitude))
+					} else {
+						row = append(row, fmt.Sprintf("%v", val))
+					}
 				} else {
 					row = append(row, fmt.Sprintf("%v", val))
 				}

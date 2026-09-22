@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"mediahub_oss/internal/media"
@@ -311,15 +312,30 @@ func (h *EntryHandler) mapCustomFields(row []string, headers []string, db repo.D
 			if cf.Name == dbField {
 				validField = true
 				switch cf.Type {
-				case "INTEGER":
+				case repo.CustomFieldTypeInteger:
 					val, _ := strconv.ParseInt(row[i], 10, 64)
 					mappedCustomFields[dbField] = val
-				case "REAL":
+				case repo.CustomFieldTypeReal:
 					val, _ := strconv.ParseFloat(row[i], 64)
 					mappedCustomFields[dbField] = val
-				case "BOOLEAN":
+				case repo.CustomFieldTypeBoolean:
 					val, _ := strconv.ParseBool(row[i])
 					mappedCustomFields[dbField] = val
+				case repo.CustomFieldTypeCoordinate:
+					cell := strings.TrimSpace(row[i])
+					if cell != "" {
+						parts := strings.Split(cell, ",")
+						if len(parts) == 2 {
+							lat, err1 := strconv.ParseFloat(strings.TrimSpace(parts[0]), 64)
+							lng, err2 := strconv.ParseFloat(strings.TrimSpace(parts[1]), 64)
+							if err1 == nil && err2 == nil {
+								coord, err := repo.ParseCoordinate(repo.Coordinate{Latitude: lat, Longitude: lng})
+								if err == nil {
+									mappedCustomFields[dbField] = coord
+								}
+							}
+						}
+					}
 				default: // TEXT
 					mappedCustomFields[dbField] = row[i]
 				}
