@@ -1,9 +1,11 @@
 import { ContentType } from './enums';
 
+export type CustomFieldType = 'TEXT' | 'INTEGER' | 'REAL' | 'BOOLEAN' | 'COORDINATE';
+
 export interface CustomField {
   id?: number;
   name: string;
-  type: 'TEXT' | 'INTEGER' | 'REAL' | 'BOOLEAN';
+  type: CustomFieldType;
   is_indexed?: boolean;
 }
 

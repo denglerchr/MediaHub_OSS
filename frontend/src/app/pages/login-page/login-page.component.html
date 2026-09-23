@@ -20,14 +20,14 @@
         <span>Login via Single Sign-On</span>
       </button>
       
-      <div *ngIf="!appInfo?.oidc?.login_page_disabled" class="divider">
+      <div *ngIf="showLoginForm" class="divider">
         <hr class="divider-line">
         <span class="divider-text">OR</span>
         <hr class="divider-line">
       </div>
     </div>
 
-    <form *ngIf="!appInfo?.oidc?.login_page_disabled" [formGroup]="loginForm" (ngSubmit)="onSubmit()">
+    <form *ngIf="showLoginForm" [formGroup]="loginForm" (ngSubmit)="onSubmit()">
       <div class="form-group">
         <label for="username" class="form-label">Username</label>
         <input
@@ -65,7 +65,7 @@
       </button>
     </form>
 
-    <div *ngIf="appInfo?.oidc?.login_page_disabled" class="disabled-login-msg">
+    <div *ngIf="!showLoginForm" class="disabled-login-msg">
       <p>Local login is disabled. Please use Single Sign-On.</p>
       <div *ngIf="loginError" class="alert alert-danger mt-3">
         {{ loginError }}

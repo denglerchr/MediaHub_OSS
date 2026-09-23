@@ -20,6 +20,7 @@ export class LoginPageComponent implements OnInit, OnDestroy {
   isLoading = false;
   loginError: string | null = null;
   appInfo: AppInfo | null = null;
+  isLocalBypass = false;
   
   private destroy$ = new Subject<void>();
 
@@ -37,11 +38,20 @@ export class LoginPageComponent implements OnInit, OnDestroy {
     });
   }
 
+  get showLoginForm(): boolean {
+    return !this.appInfo?.oidc?.login_page_disabled || this.isLocalBypass;
+  }
+
   ngOnInit(): void {
     if (this.authService.getCurrentUser()) {
       this.router.navigate(['/dashboard']);
       return;
     }
+
+    this.route.queryParamMap.pipe(takeUntil(this.destroy$)).subscribe(params => {
+      const local = params.get('local');
+      this.isLocalBypass = local === '1' || local?.toLowerCase() === 'true';
+    });
 
     const code = this.route.snapshot.queryParamMap.get('code');
     if (code) {

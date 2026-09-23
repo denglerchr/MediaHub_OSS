@@ -40,8 +40,10 @@ Of course it can also be used to store media in other contexts, but in that case
   * Automatic FFmpeg-powered media conversion on ingestion (e.g., raw camera frames to `JPEG`/`WebP`, audio to `FLAC`, video to `WebM`).
   * Automated preview generation for UI thumbnail viewing.
 * **Hybrid Authentication & RBAC**:
-  * Support for **Basic Auth**, **JWT Access/Refresh tokens**, and long-lived **API Keys** with scope restrictions.
+  * Support for **OpenID Connect (OIDC / SSO)** (e.g., Keycloak, Authentik, Okta) with automatic user provisioning.
+  * Local **Basic Auth**, **JWT Access/Refresh tokens**, and long-lived **API Keys** with scope restrictions.
   * Fine-grained Role-Based Access Control (RBAC) per database (`can_view`, `can_create`, `can_edit`, `can_delete`, `can_admin`).
+  * Dedicated administrator break-glass bypass (`/login?local=1`) when OIDC-only mode is enforced.
 * **Single Binary Deployment**:
   * The Angular web UI is compiled and embedded into the Go executable for zero-dependency execution.
 * **Bulk Export & Import**:

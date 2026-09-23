@@ -52,10 +52,18 @@ Any setting provided as a CLI flag takes precedence over environment variables, 
 | **Media Settings** | | `[media]` | | |
 | `--media-ffmpeg-path` | `MEDIAHUB_MEDIA_FFMPEG_PATH` | `ffmpeg_path` | Custom path to FFmpeg binary | `""` |
 | `--media-ffprobe-path` | `MEDIAHUB_MEDIA_FFPROBE_PATH` | `ffprobe_path` | Custom path to FFprobe binary | `""` |
-| **Auth Settings** | | `[auth.jwt]` | | |
+| **Auth Settings (JWT)** | | `[auth.jwt]` | | |
 | `--auth-jwt-access-duration`| `MEDIAHUB_AUTH_JWT_ACCESS_DURATION`| `access_duration`| JWT access token validity duration | `"5min"` |
 | `--auth-jwt-refresh-duration`| `MEDIAHUB_AUTH_JWT_REFRESH_DURATION`| `refresh_duration`| JWT refresh token validity duration | `"24h"` |
 | `--auth-jwt-secret` | `MEDIAHUB_AUTH_JWT_SECRET` | `secret` | Signing secret (auto-generated if empty) | `""` |
+| **Auth Settings (OIDC / SSO)** | | `[auth.oidc]` | *(New in v3.2)* | |
+| `--auth-oidc-enabled` | `MEDIAHUB_AUTH_OIDC_ENABLED` | `enabled` | Enable OpenID Connect (OIDC / SSO) integration | `false` |
+| `--auth-oidc-issuer-url` | `MEDIAHUB_AUTH_OIDC_ISSUER_URL` | `issuer_url` | OIDC Issuer URL (e.g. `https://keycloak.example.com/realms/mediahub`) | `""` |
+| `--auth-oidc-client-id` | `MEDIAHUB_AUTH_OIDC_CLIENT_ID` | `client_id` | OIDC Client ID registered with the Identity Provider | `""` |
+| `--auth-oidc-client-secret` | `MEDIAHUB_AUTH_OIDC_CLIENT_SECRET` | `client_secret` | OIDC Client Secret | `""` |
+| `--auth-oidc-redirect-url` | `MEDIAHUB_AUTH_OIDC_REDIRECT_URL` | `redirect_url` | OIDC redirect callback URL (must end in `/auth/callback`). Defaults to `<origin>/auth/callback` if omitted. | `""` |
+| `--auth-oidc-default-user-rights` | `MEDIAHUB_AUTH_OIDC_DEFAULT_USER_RIGHTS` | `default_user_rights` | Default permission role assigned to auto-provisioned OIDC users | `"_oidc_user"` |
+| `--auth-oidc-disable-login-page` | `MEDIAHUB_AUTH_OIDC_DISABLE_LOGIN_PAGE` | `disable_login_page` | Disables the local login form and directs users to OIDC. Access `/login?local=1` to bypass and display the form. | `false` |
 
 ---
 
@@ -94,7 +102,23 @@ ffprobe_path = ""
 access_duration = "5min"
 refresh_duration = "24h"
 secret = ""
+
+# OpenID Connect (SSO) configuration (New in v3.2)
+[auth.oidc]
+enabled = false
+disable_login_page = false # If true, hides local form and directs to SSO. Use /login?local=1 for admin break-glass login
+issuer_url = "https://keycloak.example.com/realms/mediahub"
+client_id = "mediahub"
+client_secret = "your-client-secret"
+redirect_url = "" # Optional; defaults to <origin>/auth/callback
+default_user_rights = "_oidc_user"
 ```
+
+:::tip Admin Break-Glass Access (`/login?local=1`)
+When `disable_login_page = true` is configured, MediaHub disables the standard username/password login form and forwards users to the external OIDC identity provider.
+
+If the OIDC identity provider becomes unavailable or misconfigured, administrators can bypass the OIDC enforcement by navigating directly to `/login?local=1`. This reveals the local username/password form, allowing local administrators (such as the default `admin` user) to log in and manage the server.
+:::
 
 ---
 

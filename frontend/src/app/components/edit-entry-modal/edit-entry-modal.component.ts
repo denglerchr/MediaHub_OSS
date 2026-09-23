@@ -75,8 +75,18 @@ export class EditEntryModalComponent implements OnInit, OnDestroy {
 
     // Add custom fields
     db.custom_fields.forEach(field => {
-      const defaultValue = field.type === 'BOOLEAN' ? false : '';
-      customGroup.addControl(field.name, this.fb.control(defaultValue));
+      if (field.type === 'COORDINATE') {
+        customGroup.addControl(
+          field.name,
+          this.fb.group({
+            latitude: [null, [Validators.min(-90), Validators.max(90)]],
+            longitude: [null, [Validators.min(-180), Validators.max(180)]]
+          })
+        );
+      } else {
+        const defaultValue = field.type === 'BOOLEAN' ? false : '';
+        customGroup.addControl(field.name, this.fb.control(defaultValue));
+      }
     });
 
     this.editForm.setControl('custom_fields', customGroup);
@@ -102,8 +112,19 @@ export class EditEntryModalComponent implements OnInit, OnDestroy {
          let val = entry.custom_fields[field.name];
          if (field.type === 'BOOLEAN') {
            val = (val === 1 || val === true);
+         } else if (field.type === 'COORDINATE') {
+           if (val && typeof val === 'object') {
+             val = {
+               latitude: val.latitude !== undefined ? val.latitude : null,
+               longitude: val.longitude !== undefined ? val.longitude : null
+             };
+           } else {
+             val = { latitude: null, longitude: null };
+           }
          }
          patchData.custom_fields[field.name] = val;
+       } else if (field.type === 'COORDINATE') {
+         patchData.custom_fields[field.name] = { latitude: null, longitude: null };
        }
     });
 
@@ -117,6 +138,20 @@ export class EditEntryModalComponent implements OnInit, OnDestroy {
 
     this.isLoading = true;
     const formValue = this.editForm.value;
+
+    const sanitizeCoord = (val: any) => {
+      if (!val) return null;
+      const lat = val.latitude;
+      const lng = val.longitude;
+      if (lat !== null && lat !== '' && lat !== undefined && lng !== null && lng !== '' && lng !== undefined) {
+        const numLat = Number(lat);
+        const numLng = Number(lng);
+        if (!isNaN(numLat) && !isNaN(numLng)) {
+          return { latitude: numLat, longitude: numLng };
+        }
+      }
+      return null;
+    };
 
     // Build the clean update payload without media_fields
     const updates: any = {
@@ -132,6 +167,8 @@ export class EditEntryModalComponent implements OnInit, OnDestroy {
         updates.custom_fields[field.name] = !!val;
       } else if ((field.type === 'INTEGER' || field.type === 'REAL') && val !== '' && val !== null) {
         updates.custom_fields[field.name] = Number(val);
+      } else if (field.type === 'COORDINATE') {
+        updates.custom_fields[field.name] = sanitizeCoord(val);
       }
     });
 

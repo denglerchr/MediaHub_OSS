@@ -32,6 +32,9 @@ services:
       - "${MEDIAHUB_PORT:-8080}:8080"
     volumes:
       - mediahub_storage:/storage
+    configs:
+      - source: mediahub_init
+        target: /config/initconfig.toml
     extra_hosts:
       - "localhost:host-gateway"
     environment:
@@ -48,3 +51,33 @@ services:
 
 volumes:
   mediahub_storage:
+
+configs:
+  mediahub_init:
+    content: |
+      [[user]]
+      name = "_oidc_user"
+      is_admin = false
+      is_service_account = true
+      password = ""
+
+      [[user.permissions]]
+      database_name = "ImageDB"
+      can_view = true
+      can_create = true
+      can_edit = true
+      can_delete = false
+      can_admin = false
+
+      # --- Databases ---
+
+      [[database]]
+      name = "ImageDB"
+      content_type = "image"
+      config = { create_preview = true, auto_conversion = "webp" }
+      housekeeping = { interval = "1h", disk_space = "10G", max_age = "0" }
+      # Custom metadata schema
+      custom_fields = [
+          {name = "location", type = "COORDINATE"},
+          {name = "description", type = "TEXT", is_indexed=false}
+      ]

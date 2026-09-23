@@ -38,6 +38,29 @@ If you forget the admin password, reset it using the `--reset_pw` CLI flag:
 ```
 On startup, MediaHub updates the existing `admin` user's password to `NewSecurePassword123`.
 
+### 4. Single Sign-On (OIDC / SSO) *(New in v3.2)*
+When OIDC integration is enabled (`auth.oidc.enabled = true`), the login page presents a **Login via Single Sign-On** button alongside the standard username/password form. 
+
+Clicking this button redirects users to your enterprise Identity Provider (e.g., Keycloak, Authentik, Okta) to complete authentication. Upon first successful login, MediaHub automatically provisions a local user identity matched to the external OIDC subject.
+
+### 5. Enforced SSO & Administrator Break-Glass (`/login?local=1`)
+In enterprise environments, administrators can disable local login forms to enforce SSO-only access across the organization by configuring:
+
+```toml
+[auth.oidc]
+enabled = true
+disable_login_page = true
+```
+
+* **Standard User Behavior**: Unauthenticated visits to the application automatically direct users to authenticate via the external Identity Provider. Direct visits to `/login` display the SSO login button with local login forms hidden.
+* **Administrator Break-Glass Bypass**: If your Identity Provider is down, misconfigured, or unreachable, administrators can bypass the OIDC enforcement by directly navigating to:
+
+  ```
+  http://<mediahub-host>:<port>/login?local=1
+  ```
+
+  Visiting `/login?local=1` instructs the login page to bypass the disabled state and display the username and password form. Administrators can then sign in with their local administrative credentials (such as the primary `admin` account) to perform emergency maintenance and restore system settings.
+
 ---
 
 ## 🧭 Navigating the Dashboard

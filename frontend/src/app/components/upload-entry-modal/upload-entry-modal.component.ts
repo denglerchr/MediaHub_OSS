@@ -109,8 +109,18 @@ export class UploadEntryModalComponent implements OnInit, OnDestroy {
 
     if (this.currentDatabase) {
       this.currentDatabase.custom_fields.forEach((field: CustomField) => {
-        const defaultValue = field.type === 'BOOLEAN' ? false : '';
-        this.uploadForm.addControl(field.name, this.fb.control(defaultValue));
+        if (field.type === 'COORDINATE') {
+          this.uploadForm.addControl(
+            field.name,
+            this.fb.group({
+              latitude: [null, [Validators.min(-90), Validators.max(90)]],
+              longitude: [null, [Validators.min(-180), Validators.max(180)]]
+            })
+          );
+        } else {
+          const defaultValue = field.type === 'BOOLEAN' ? false : '';
+          this.uploadForm.addControl(field.name, this.fb.control(defaultValue));
+        }
       });
     }
   }
@@ -180,9 +190,25 @@ export class UploadEntryModalComponent implements OnInit, OnDestroy {
 
     try {
       const ext = await extractMetadata(file);
-      if (ext && ext.timestamp) {
-        this.uploadForm.patchValue({ timestamp: this.getLocalISOString(ext.timestamp) });
-        this.notificationService.showSuccess(`Extracted capture timestamp from file: ${ext.timestamp.toLocaleString()}`);
+      if (ext) {
+        if (ext.timestamp) {
+          this.uploadForm.patchValue({ timestamp: this.getLocalISOString(ext.timestamp) });
+          this.notificationService.showSuccess(`Extracted capture timestamp from file: ${ext.timestamp.toLocaleString()}`);
+        }
+        if (ext.coordinates && this.currentDatabase) {
+          const coordFields = this.currentDatabase.custom_fields.filter(cf => cf.type === 'COORDINATE');
+          if (coordFields.length > 0) {
+            coordFields.forEach(cf => {
+              this.uploadForm.get(cf.name)?.patchValue({
+                latitude: ext.coordinates!.latitude,
+                longitude: ext.coordinates!.longitude
+              });
+            });
+            this.notificationService.showSuccess(
+              `Extracted GPS coordinates (${ext.coordinates.latitude.toFixed(6)}, ${ext.coordinates.longitude.toFixed(6)}) from file.`
+            );
+          }
+        }
         this.cdr.detectChanges();
       }
     } catch (err) {
@@ -216,6 +242,20 @@ export class UploadEntryModalComponent implements OnInit, OnDestroy {
     // Destructure to separate the core fields from the dynamic custom fields
     const { timestamp, file, ...rawCustomFields } = this.uploadForm.value;
 
+    const sanitizeCoord = (val: any) => {
+      if (!val) return null;
+      const lat = val.latitude;
+      const lng = val.longitude;
+      if (lat !== null && lat !== '' && lat !== undefined && lng !== null && lng !== '' && lng !== undefined) {
+        const numLat = Number(lat);
+        const numLng = Number(lng);
+        if (!isNaN(numLat) && !isNaN(numLng)) {
+          return { latitude: numLat, longitude: numLng };
+        }
+      }
+      return null;
+    };
+
     const custom_fields: Record<string, any> = {};
 
     this.currentDatabase.custom_fields.forEach(field => {
@@ -226,9 +266,13 @@ export class UploadEntryModalComponent implements OnInit, OnDestroy {
                 value = !!value; 
             } else if ((field.type === 'INTEGER' || field.type === 'REAL') && value !== '' && value !== null) {
                 value = Number(value);
+            } else if (field.type === 'COORDINATE') {
+                value = sanitizeCoord(value);
             }
             
-            custom_fields[field.name] = value;
+            if (value !== null && value !== undefined && value !== '') {
+              custom_fields[field.name] = value;
+            }
         }
     });
 
@@ -253,10 +297,19 @@ export class UploadEntryModalComponent implements OnInit, OnDestroy {
 
             const ext = await extractMetadata(f);
             const ts = ext?.timestamp ? ext.timestamp.getTime() : Date.now();
+            const itemCustomFields: Record<string, any> = { ...custom_fields };
+
+            if (ext?.coordinates && this.currentDatabase) {
+              const coordFields = this.currentDatabase.custom_fields.filter(cf => cf.type === 'COORDINATE');
+              coordFields.forEach(cf => {
+                itemCustomFields[cf.name] = ext.coordinates;
+              });
+            }
+
             const metadata = {
               timestamp: ts,
               filename: f.name,
-              custom_fields: custom_fields
+              custom_fields: itemCustomFields
             };
             
             await firstValueFrom(this.entryService.uploadEntry(

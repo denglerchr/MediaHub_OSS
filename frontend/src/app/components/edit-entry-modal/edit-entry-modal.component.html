@@ -36,6 +36,28 @@
                 </div>
               </ng-container>
 
+              <ng-container *ngSwitchCase="'COORDINATE'">
+                <label class="form-label">{{ field.name }} (COORDINATE)</label>
+                <div [formGroupName]="field.name" class="coordinate-input-group" style="display: flex; gap: 0.5rem;">
+                  <input type="number"
+                         step="any"
+                         min="-90"
+                         max="90"
+                         formControlName="latitude"
+                         placeholder="Latitude (-90 to 90)"
+                         class="form-control"
+                         style="flex: 1;">
+                  <input type="number"
+                         step="any"
+                         min="-180"
+                         max="180"
+                         formControlName="longitude"
+                         placeholder="Longitude (-180 to 180)"
+                         class="form-control"
+                         style="flex: 1;">
+                </div>
+              </ng-container>
+
               <ng-container *ngSwitchDefault>
                 <label [for]="field.name" class="form-label">{{ field.name }} ({{ field.type }})</label>
 

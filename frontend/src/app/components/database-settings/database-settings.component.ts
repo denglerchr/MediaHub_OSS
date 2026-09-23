@@ -3,7 +3,7 @@ import { ActivatedRoute } from '@angular/router';
 import { FormBuilder, FormGroup, Validators } from '@angular/forms';
 import { Observable, Subject, of } from 'rxjs';
 import { switchMap, takeUntil, filter, take, finalize } from 'rxjs/operators';
-import { Database, User, DatabaseConfig, CustomField } from '../../models';
+import { Database, User, DatabaseConfig, CustomField, CustomFieldType } from '../../models';
 import { DatabaseService, DatabaseUpdatePayload } from '../../services/database.service';
 import { AuthService } from '../../services/auth.service';
 import { ModalService } from '../../services/modal.service';
@@ -32,7 +32,7 @@ export class DatabaseSettingsComponent implements OnInit, OnDestroy {
 
   // Custom Field Form State
   public newFieldName = '';
-  public newFieldType: 'TEXT' | 'INTEGER' | 'REAL' | 'BOOLEAN' = 'TEXT';
+  public newFieldType: CustomFieldType = 'TEXT';
   public newFieldIsIndexed = true;
 
   public editingFieldId: number | null = null;

@@ -7,6 +7,18 @@ export interface MediaFields {
   channels?: number;
 }
 
+export interface Coordinate {
+  latitude: number;
+  longitude: number;
+}
+
+export interface CoordinateBoundingBox {
+  min_lat: number;
+  max_lat: number;
+  min_lng: number;
+  max_lng: number;
+}
+
 export interface Entry {
   id: number;
   timestamp: number;

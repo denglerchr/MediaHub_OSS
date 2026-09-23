@@ -1,11 +1,14 @@
 // frontend/src/app/utils/metadata-extractor.ts
 
+import { Coordinate } from '../models';
+
 export interface ExtractedMetadata {
   timestamp?: Date;
+  coordinates?: Coordinate;
 }
 
 /**
- * Extracts metadata (e.g., creation/capture timestamps) from files.
+ * Extracts metadata (e.g., creation/capture timestamps and GPS coordinates) from files.
  * Supports JPEGs (EXIF) and MP4s (Movie Header Box).
  * Easily extendable to parse other formats or extract GPS coordinates, etc.
  */
@@ -16,8 +19,7 @@ export async function extractMetadata(file: File): Promise<ExtractedMetadata | n
       // Read the first 128 KB of the image where the EXIF APP1 segment resides.
       const slice = file.slice(0, 128 * 1024);
       const buffer = await slice.arrayBuffer();
-      const date = parseExif(buffer);
-      if (date) return { timestamp: date };
+      return parseExif(buffer);
     } else if (file.type.startsWith('video/mp4') || filenameLower.endsWith('.mp4')) {
       // Read the first 2 MB of the video. The 'moov' header box is typically at the start or near the end.
       const slice = file.slice(0, 2 * 1024 * 1024);
@@ -31,7 +33,7 @@ export async function extractMetadata(file: File): Promise<ExtractedMetadata | n
   return null;
 }
 
-function parseExif(buffer: ArrayBuffer): Date | null {
+function parseExif(buffer: ArrayBuffer): ExtractedMetadata | null {
   const view = new DataView(buffer);
   if (view.byteLength < 8) return null;
   
@@ -70,7 +72,7 @@ function parseExif(buffer: ArrayBuffer): Date | null {
   return null;
 }
 
-function parseTiff(view: DataView, tiffOffset: number): Date | null {
+function parseTiff(view: DataView, tiffOffset: number): ExtractedMetadata | null {
   if (tiffOffset + 8 > view.byteLength) return null;
   
   const byteOrder = view.getUint16(tiffOffset);
@@ -82,6 +84,7 @@ function parseTiff(view: DataView, tiffOffset: number): Date | null {
   let ifdOffset = tiffOffset + firstIfdOffset;
 
   let exifSubIfdOffset = 0;
+  let gpsSubIfdOffset = 0;
   let dateTimeStr = '';
 
   // Read IFD0 entries
@@ -94,12 +97,16 @@ function parseTiff(view: DataView, tiffOffset: number): Date | null {
       
       if (tag === 0x8769) { // Exif SubIFD Offset tag
         exifSubIfdOffset = view.getUint32(entryOffset + 8, littleEndian);
+      } else if (tag === 0x8825) { // GPS Info IFD Offset tag
+        gpsSubIfdOffset = view.getUint32(entryOffset + 8, littleEndian);
       } else if (tag === 0x0132) { // Modification Date/Time tag
         dateTimeStr = readTiffString(view, entryOffset, tiffOffset, littleEndian);
       }
       entryOffset += 12;
     }
   }
+
+  let date: Date | null = null;
 
   // Read Exif SubIFD entries
   if (exifSubIfdOffset > 0) {
@@ -113,10 +120,15 @@ function parseTiff(view: DataView, tiffOffset: number): Date | null {
         
         if (tag === 0x9003) { // DateTimeOriginal (Capture time)
           const val = readTiffString(view, entryOffset, tiffOffset, littleEndian);
-          if (val) return parseExifDate(val);
-        } else if (tag === 0x9004) { // DateTimeDigitized
+          if (val) {
+            date = parseExifDate(val);
+            break;
+          }
+        } else if (tag === 0x9004 && !date) { // DateTimeDigitized
           const val = readTiffString(view, entryOffset, tiffOffset, littleEndian);
-          if (val) return parseExifDate(val);
+          if (val) {
+            date = parseExifDate(val);
+          }
         }
         entryOffset += 12;
       }
@@ -124,17 +136,98 @@ function parseTiff(view: DataView, tiffOffset: number): Date | null {
   }
 
   // Fallback to IFD0 modified date if DateTimeOriginal was not found
-  if (dateTimeStr) {
-    return parseExifDate(dateTimeStr);
+  if (!date && dateTimeStr) {
+    date = parseExifDate(dateTimeStr);
+  }
+
+  let coordinates: Coordinate | null = null;
+  if (gpsSubIfdOffset > 0) {
+    coordinates = parseGps(view, gpsSubIfdOffset, tiffOffset, littleEndian);
+  }
+
+  if (date || coordinates) {
+    const result: ExtractedMetadata = {};
+    if (date) result.timestamp = date;
+    if (coordinates) result.coordinates = coordinates;
+    return result;
   }
 
   return null;
 }
 
+function parseGps(view: DataView, gpsIfdOffset: number, tiffOffset: number, littleEndian: boolean): Coordinate | null {
+  const gpsOffset = tiffOffset + gpsIfdOffset;
+  if (gpsOffset + 2 > view.byteLength) return null;
+
+  const numEntries = view.getUint16(gpsOffset, littleEndian);
+  let latRef = '';
+  let lngRef = '';
+  let latDegrees: number[] | null = null;
+  let lngDegrees: number[] | null = null;
+
+  let entryOffset = gpsOffset + 2;
+  for (let i = 0; i < numEntries; i++) {
+    if (entryOffset + 12 > view.byteLength) break;
+    const tag = view.getUint16(entryOffset, littleEndian);
+
+    if (tag === 0x0001) { // GPSLatitudeRef
+      latRef = readTiffString(view, entryOffset, tiffOffset, littleEndian).trim().toUpperCase();
+    } else if (tag === 0x0002) { // GPSLatitude
+      latDegrees = readRationals(view, entryOffset, tiffOffset, littleEndian, 3);
+    } else if (tag === 0x0003) { // GPSLongitudeRef
+      lngRef = readTiffString(view, entryOffset, tiffOffset, littleEndian).trim().toUpperCase();
+    } else if (tag === 0x0004) { // GPSLongitude
+      lngDegrees = readRationals(view, entryOffset, tiffOffset, littleEndian, 3);
+    }
+    entryOffset += 12;
+  }
+
+  if (!latDegrees || !lngDegrees) return null;
+
+  let lat = latDegrees[0] + latDegrees[1] / 60 + latDegrees[2] / 3600;
+  let lng = lngDegrees[0] + lngDegrees[1] / 60 + lngDegrees[2] / 3600;
+
+  if (latRef === 'S') lat = -lat;
+  if (lngRef === 'W') lng = -lng;
+
+  if (isNaN(lat) || isNaN(lng) || lat < -90 || lat > 90 || lng < -180 || lng > 180) {
+    return null;
+  }
+
+  return {
+    latitude: Number(lat.toFixed(6)),
+    longitude: Number(lng.toFixed(6))
+  };
+}
+
+function readRationals(
+  view: DataView,
+  entryOffset: number,
+  tiffOffset: number,
+  littleEndian: boolean,
+  expectedCount: number
+): number[] | null {
+  const count = view.getUint32(entryOffset + 4, littleEndian);
+  if (count < expectedCount) return null;
+
+  const valueOffset = view.getUint32(entryOffset + 8, littleEndian);
+  const actualOffset = tiffOffset + valueOffset;
+
+  if (actualOffset + expectedCount * 8 > view.byteLength) return null;
+
+  const values: number[] = [];
+  for (let i = 0; i < expectedCount; i++) {
+    const num = view.getUint32(actualOffset + i * 8, littleEndian);
+    const den = view.getUint32(actualOffset + i * 8 + 4, littleEndian);
+    values.push(den !== 0 ? num / den : 0);
+  }
+  return values;
+}
+
 function readTiffString(view: DataView, entryOffset: number, tiffOffset: number, littleEndian: boolean): string {
   const count = view.getUint32(entryOffset + 4, littleEndian);
   const valueOffset = view.getUint32(entryOffset + 8, littleEndian);
-  const actualOffset = tiffOffset + (count <= 4 ? entryOffset + 8 : valueOffset);
+  const actualOffset = count <= 4 ? entryOffset + 8 : tiffOffset + valueOffset;
   
   if (actualOffset + count > view.byteLength) return '';
   

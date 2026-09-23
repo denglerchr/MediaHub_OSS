@@ -125,7 +125,21 @@
             </ng-container>
 
             <ng-container *ngSwitchDefault>
-              {{ entry.custom_fields ? entry.custom_fields[col] : '' }}
+              <ng-container *ngIf="entry.custom_fields && entry.custom_fields[col] !== undefined && entry.custom_fields[col] !== null">
+                <ng-container *ngIf="isCoordinate(entry.custom_fields[col]); else defaultCustomValue">
+                  <a [href]="getOpenStreetMapUrl(entry.custom_fields[col])"
+                     target="_blank"
+                     rel="noopener noreferrer"
+                     class="coordinate-table-link"
+                     (click)="$event.stopPropagation()"
+                     title="View in OpenStreetMap">
+                    📍 {{ formatCoordinate(entry.custom_fields[col]) }}
+                  </a>
+                </ng-container>
+                <ng-template #defaultCustomValue>
+                  {{ entry.custom_fields[col] }}
+                </ng-template>
+              </ng-container>
             </ng-container>
 
           </ng-container>

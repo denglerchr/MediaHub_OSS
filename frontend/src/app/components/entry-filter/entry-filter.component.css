@@ -105,3 +105,14 @@
   color: var(--text-danger);
   background-color: var(--item-bg-hover);
 }
+
+.bbox-input-group {
+  display: flex;
+  gap: 0.25rem;
+  flex: 2 1 260px;
+}
+
+.bbox-input-group input {
+  min-width: 60px;
+  flex: 1;
+}

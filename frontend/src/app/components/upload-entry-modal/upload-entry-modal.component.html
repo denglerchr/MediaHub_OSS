@@ -11,7 +11,7 @@
         <span class="info-icon">ℹ️</span>
         <div class="info-content">
           <p>These files will share the same custom metadata values specified below. You can edit individual files after upload if required.</p>
-          <p><strong>Note:</strong> Timestamps will be extracted from each file individually, or set to <code>now()</code> if not found.</p>
+          <p><strong>Note:</strong> Timestamps and GPS coordinates will be extracted from each file individually, or fall back to form defaults if not found.</p>
         </div>
       </div>
 
@@ -90,6 +90,28 @@
                   <span class="bool-field-value">
                     {{ uploadForm.get(field.name)?.value ? 'True' : 'False' }}
                   </span>
+                </div>
+              </ng-container>
+
+              <ng-container *ngSwitchCase="'COORDINATE'">
+                <label class="form-label">{{ field.name }} (COORDINATE)</label>
+                <div [formGroupName]="field.name" class="coordinate-input-group" style="display: flex; gap: 0.5rem;">
+                  <input type="number"
+                         step="any"
+                         min="-90"
+                         max="90"
+                         formControlName="latitude"
+                         placeholder="Latitude (-90 to 90)"
+                         class="form-control"
+                         style="flex: 1;">
+                  <input type="number"
+                         step="any"
+                         min="-180"
+                         max="180"
+                         formControlName="longitude"
+                         placeholder="Longitude (-180 to 180)"
+                         class="form-control"
+                         style="flex: 1;">
                 </div>
               </ng-container>
 
