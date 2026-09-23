@@ -85,18 +85,44 @@ func Apply(ctx context.Context, config *InitConfig, repo repository.Repository, 
 	for i, userInit := range config.Users {
 		_, err := repo.GetUserByUsername(ctx, userInit.Name)
 		if errors.Is(err, customerrors.ErrNotFound) {
+			accountType := repository.AccountTypeLocal
+			if userInit.AccountType != "" {
+				parsed, err := repository.ParseAccountType(userInit.AccountType)
+				if err != nil {
+					logger.Error("Invalid account_type for user in init config", "user", userInit.Name, "account_type", userInit.AccountType, "error", err)
+					continue
+				}
+				if parsed == repository.AccountTypeOIDC {
+					logger.Error("OIDC accounts cannot be created directly via init config", "user", userInit.Name)
+					continue
+				}
+				accountType = parsed
+			}
 
-			// Hash the password securely
-			hash, err := bcrypt.GenerateFromPassword([]byte(userInit.Password), bcrypt.DefaultCost)
-			if err != nil {
-				logger.Error("Failed to hash password for user", "user", userInit.Name, "error", err)
-				continue
+			var passwordHash string
+			if accountType == repository.AccountTypeService {
+				if userInit.Password != "" {
+					logger.Warn("Password provided for service account in init config will be ignored; service accounts authenticate via API keys", "user", userInit.Name)
+				}
+				passwordHash = "SERVICE_ACCOUNT_NO_LOGIN"
+			} else {
+				if userInit.Password == "" {
+					logger.Error("Password is required for local user in init config", "user", userInit.Name)
+					continue
+				}
+				hash, err := bcrypt.GenerateFromPassword([]byte(userInit.Password), bcrypt.DefaultCost)
+				if err != nil {
+					logger.Error("Failed to hash password for user", "user", userInit.Name, "error", err)
+					continue
+				}
+				passwordHash = string(hash)
 			}
 
 			user := repository.User{
 				Username:     userInit.Name,
 				IsAdmin:      userInit.IsAdmin,
-				PasswordHash: string(hash),
+				PasswordHash: passwordHash,
+				AccountType:  accountType,
 			}
 
 			createdUser, err := repo.CreateUser(ctx, user)

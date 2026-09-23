@@ -58,8 +58,7 @@ configs:
       [[user]]
       name = "_oidc_user"
       is_admin = false
-      is_service_account = true
-      password = ""
+      account_type = "service_account"
 
       [[user.permissions]]
       database_name = "ImageDB"

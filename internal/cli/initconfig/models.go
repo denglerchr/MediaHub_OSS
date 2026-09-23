@@ -15,6 +15,7 @@ type InitConfig struct {
 type InitUser struct {
 	Name        string               `toml:"name"`
 	IsAdmin     bool                 `toml:"is_admin"`
+	AccountType string               `toml:"account_type,omitempty"`
 	Password    string               `toml:"password"`
 	Permissions []InitUserPermission `toml:"permissions"`
 }

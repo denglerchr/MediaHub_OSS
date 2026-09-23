@@ -141,14 +141,28 @@ is_admin = true
 password = "SuperSecretPassword"
 
 [[user]]
-name = "SensorBot"
+name = "SomeUser"
 is_admin = false
-password = "BotPassword123"
+account_type = "local" # Optional, defaults to "local"
+password = "SomePassword123"
 
     [[user.permissions]]
     database_name = "CameraDB"
     can_view = true
     can_create = true
+    can_edit = false
+    can_delete = false
+    can_admin = false
+
+[[user]]
+name = "BackupService"
+is_admin = false
+account_type = "service_account" # Password not required; authenticates via API keys
+
+    [[user.permissions]]
+    database_name = "CameraDB"
+    can_view = true
+    can_create = false
     can_edit = false
     can_delete = false
     can_admin = false
