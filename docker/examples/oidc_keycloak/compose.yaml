@@ -73,7 +73,7 @@ configs:
       [[database]]
       name = "ImageDB"
       content_type = "image"
-      config = { create_preview = true, auto_conversion = "webp" }
+      config = { create_preview = true, auto_conversion = "image/webp" }
       housekeeping = { interval = "1h", disk_space = "10G", max_age = "0" }
       # Custom metadata schema
       custom_fields = [

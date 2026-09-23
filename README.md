@@ -300,7 +300,7 @@ password = "BobsPassword"
 [[database]]
 name = "ImageDB1"
 content_type = "image"
-config = { create_preview = true, auto_conversion = "jpeg" }
+config = { create_preview = true, auto_conversion = "image/jpeg" }
 housekeeping = { interval = "1h", disk_space = "100G", max_age = "0" }
 # Custom metadata schema
 custom_fields = [
@@ -312,7 +312,7 @@ custom_fields = [
 [[database]]
 name = "Audio_Archive"
 content_type = "audio"
-config = { create_preview = true, auto_conversion = "flac" }
+config = { create_preview = true, auto_conversion = "audio/flac" }
 housekeeping = { interval = "24h", disk_space = "500G", max_age = "0" } # Disable age-based cleanup
 custom_fields = [
     {name = "source", type = "TEXT"}
@@ -321,7 +321,7 @@ custom_fields = [
 [[database]]
 name = "MyMovies"
 content_type = "video"
-config = { create_preview = true, auto_conversion = "mp4" }
+config = { create_preview = true, auto_conversion = "video/mp4" }
 housekeeping = { interval = "24h", disk_space = "1T", max_age = "730d" }
 custom_fields = [
     {name = "director", type = "TEXT"},

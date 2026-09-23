@@ -172,7 +172,7 @@ account_type = "service_account" # Password not required; authenticates via API 
 [[database]]
 name = "CameraDB"
 content_type = "image"
-config = { create_preview = true, auto_conversion = "jpeg" }
+config = { create_preview = true, auto_conversion = "image/webp" }
 housekeeping = { interval = "1h", disk_space = "100G", max_age = "0" }
 custom_fields = [
     {name = "latitude", type = "REAL"},
