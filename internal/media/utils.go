@@ -74,18 +74,53 @@ func GetMetadataFields(contentType string) ([]FieldDef, error) {
 
 // convert mime aliases into a common type
 func NormalizeMimeType(mime string) string {
-	switch mime {
+	clean := strings.ToLower(strings.TrimSpace(mime))
+	clean = strings.TrimPrefix(clean, ".")
+
+	switch clean {
+	// Images
+	case "webp", "image/webp":
+		return "image/webp"
+	case "jpg", "jpeg", "image/jpg", "image/jpeg":
+		return "image/jpeg"
+	case "avif", "image/avif":
+		return "image/avif"
+	case "png", "image/png":
+		return "image/png"
+	case "gif", "image/gif":
+		return "image/gif"
+
+	// Audio
+	case "flac", "audio/x-flac", "audio/flac":
+		return "audio/flac"
+	case "opus", "audio/opus":
+		return "audio/opus"
+	case "mp3", "audio/mp3", "audio/mpeg":
+		return "audio/mpeg"
+	case "m4a", "audio/m4a":
+		return "audio/mp4"
+	case "wav", "audio/wav", "audio/x-wav":
+		return "audio/wav"
 	case "application/ogg":
 		return "audio/ogg"
-	case "image/jpg":
-		return "image/jpeg"
-	case "audio/m4a":
-		return "audio/mp4"
-	case "audio/mp3":
-		return "audio/mpeg"
-	case "audio/x-flac":
-		return "audio/flac"
+
+	// Video
+	case "mp4", "video/mp4":
+		return "video/mp4"
+	case "webm", "video/webm":
+		return "video/webm"
+	case "ogv", "video/ogg":
+		return "video/ogg"
+	case "mkv", "video/x-matroska":
+		return "video/x-matroska"
+	case "avi", "video/x-msvideo":
+		return "video/x-msvideo"
+	case "flv", "video/x-flv":
+		return "video/x-flv"
+	case "mov", "video/quicktime":
+		return "video/quicktime"
+
 	default:
-		return mime
+		return clean
 	}
 }
