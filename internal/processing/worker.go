@@ -22,7 +22,11 @@ func (p *Processor) StartQueueChecker(ctx context.Context) {
 	}
 
 	for _, db := range databases {
-		queuedEntries, err := p.Repo.GetEntriesByStatus(ctx, db.ID, repo.EntryStatusQueued)
+		limit := uint64(p.NFfmpegAsync)
+		if limit == 0 {
+			limit = 10
+		}
+		queuedEntries, err := p.Repo.GetEntriesByStatus(ctx, db.ID, repo.EntryStatusQueued, limit)
 		if err != nil {
 			p.Logger.Error("QueueChecker: Failed to get queued entries", "database_id", db.ID.String(), "error", err)
 			continue

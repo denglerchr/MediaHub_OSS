@@ -618,7 +618,7 @@ func (r *PostgresRepository) ClaimQueuedEntry(ctx context.Context, dbID repo.ULI
 }
 
 // GetEntriesByStatus retrieves entries matching a status, ordered by ID ascending (oldest first).
-func (r *PostgresRepository) GetEntriesByStatus(ctx context.Context, dbID repo.ULID, status repo.EntryStatus) ([]repo.Entry, error) {
+func (r *PostgresRepository) GetEntriesByStatus(ctx context.Context, dbID repo.ULID, status repo.EntryStatus, limit uint64) ([]repo.Entry, error) {
 	if !shared.IsValidULID(dbID.String()) {
 		return nil, fmt.Errorf("%w: invalid database id", customerrors.ErrValidation)
 	}
@@ -629,7 +629,11 @@ func (r *PostgresRepository) GetEntriesByStatus(ctx context.Context, dbID repo.U
 	}
 
 	tableName := fmt.Sprintf(`"entries_%s"`, dbID.String())
-	query, args, err := r.Builder.Select("*").From(tableName).Where(squirrel.Eq{"status": status}).OrderBy("id ASC").ToSql()
+	b := r.Builder.Select("*").From(tableName).Where(squirrel.Eq{"status": status}).OrderBy("id ASC")
+	if limit > 0 {
+		b = b.Limit(limit)
+	}
+	query, args, err := b.ToSql()
 	if err != nil {
 		return nil, fmt.Errorf("failed to build get-by-status query: %w", err)
 	}

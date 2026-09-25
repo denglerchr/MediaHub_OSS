@@ -97,7 +97,7 @@ func (p *Processor) findNextQueuedEntry(ctx context.Context) (repo.Entry, repo.D
 	}
 
 	for _, db := range databases {
-		entries, err := p.Repo.GetEntriesByStatus(ctx, db.ID, repo.EntryStatusQueued)
+		entries, err := p.Repo.GetEntriesByStatus(ctx, db.ID, repo.EntryStatusQueued, 1)
 		if err != nil {
 			return repo.Entry{}, repo.Database{}, false, err
 		}

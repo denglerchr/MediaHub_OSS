@@ -528,3 +528,76 @@ func TestCoordinateCustomField_SQLite(t *testing.T) {
 		t.Errorf("expected 0 custom fields after delete, got %d", len(postDeleteFields))
 	}
 }
+
+func TestGetEntriesByStatus_Limit(t *testing.T) {
+	ctx := context.Background()
+
+	r, err := sqlite.NewRepository(":memory:")
+	if err != nil {
+		t.Fatalf("failed to create repo: %v", err)
+	}
+	defer r.Close()
+
+	if err := goose.SetDialect("sqlite3"); err != nil {
+		t.Fatalf("failed to set goose dialect: %v", err)
+	}
+	goose.SetBaseFS(migrations.EmbedFS)
+	if err := goose.Up(r.DB, "sqlite"); err != nil {
+		t.Fatalf("failed to run migrations: %v", err)
+	}
+
+	db, err := r.CreateDatabase(ctx, repo.Database{
+		Name:        "test_queue_limit",
+		ContentType: "image",
+	})
+	if err != nil {
+		t.Fatalf("failed to create database: %v", err)
+	}
+
+	// Create 5 queued entries
+	for i := 0; i < 5; i++ {
+		_, err := r.CreateEntry(ctx, db, repo.Entry{
+			FileName: "queued.jpg",
+			MimeType: "image/jpeg",
+			Size:     1024,
+			Status:   repo.EntryStatusQueued,
+			MediaFields: map[string]any{
+				"width":  800,
+				"height": 600,
+			},
+		})
+		if err != nil {
+			t.Fatalf("failed to create entry %d: %v", i, err)
+		}
+	}
+
+	// 1. With 0 limit -> returns all 5
+	all, err := r.GetEntriesByStatus(ctx, db.ID, repo.EntryStatusQueued, 0)
+	if err != nil {
+		t.Fatalf("GetEntriesByStatus without limit failed: %v", err)
+	}
+	if len(all) != 5 {
+		t.Fatalf("expected 5 entries without limit, got %d", len(all))
+	}
+
+	// 2. With limit 1 -> returns oldest 1
+	one, err := r.GetEntriesByStatus(ctx, db.ID, repo.EntryStatusQueued, 1)
+	if err != nil {
+		t.Fatalf("GetEntriesByStatus with limit 1 failed: %v", err)
+	}
+	if len(one) != 1 {
+		t.Fatalf("expected 1 entry with limit 1, got %d", len(one))
+	}
+	if one[0].ID != all[0].ID {
+		t.Errorf("expected oldest entry ID %d, got %d", all[0].ID, one[0].ID)
+	}
+
+	// 3. With limit 3 -> returns oldest 3
+	three, err := r.GetEntriesByStatus(ctx, db.ID, repo.EntryStatusQueued, 3)
+	if err != nil {
+		t.Fatalf("GetEntriesByStatus with limit 3 failed: %v", err)
+	}
+	if len(three) != 3 {
+		t.Fatalf("expected 3 entries with limit 3, got %d", len(three))
+	}
+}
