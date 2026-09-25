@@ -68,6 +68,8 @@ export class LoginPageComponent implements OnInit, OnDestroy {
       console.warn(
         `[MediaHub SSO] Tip for administrators: Ensure "${window.location.origin}/auth/callback" is included in your Identity Provider's (e.g. Keycloak) Valid Redirect URIs.`
       );
+    } else if (errorParam === 'sso_state_invalid') {
+      this.loginError = 'Single Sign-On session was invalid or expired (CSRF protection). Please try again.';
     }
 
     // Load AppInfo to check OIDC settings
@@ -101,7 +103,7 @@ export class LoginPageComponent implements OnInit, OnDestroy {
     });
   }
 
-  redirectToOIDC(): void {
+  async redirectToOIDC(): Promise<void> {
     const oidcConfig = this.appInfo?.oidc;
 
     if (!oidcConfig?.oidc_issuer_url || !oidcConfig?.oidc_client_id) {
@@ -109,15 +111,12 @@ export class LoginPageComponent implements OnInit, OnDestroy {
       return;
     }
     
-    const authEndpoint = `${oidcConfig.oidc_issuer_url}/protocol/openid-connect/auth`;
-    const clientId = encodeURIComponent(oidcConfig.oidc_client_id);
-    const redirectUri = encodeURIComponent(
-      oidcConfig.oidc_redirect_url || `${window.location.origin}/auth/callback`
-    );
-    
-    const oidcUrl = `${authEndpoint}?client_id=${clientId}&redirect_uri=${redirectUri}&response_type=code&scope=openid`;
-    
-    window.location.href = oidcUrl;
+    try {
+      await this.authService.redirectToOidc(oidcConfig);
+    } catch (err) {
+      console.error('Failed to initiate OIDC redirect:', err);
+      this.loginError = 'Failed to initiate Single Sign-On.';
+    }
   }
 
   ngOnDestroy(): void {

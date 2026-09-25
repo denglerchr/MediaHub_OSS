@@ -2,6 +2,9 @@ package tokenhandler
 
 import (
 	"context"
+	"crypto"
+	"crypto/ecdsa"
+	"crypto/elliptic"
 	"crypto/rsa"
 	"encoding/base64"
 	"encoding/json"
@@ -41,6 +44,7 @@ type OIDCClaims struct {
 // OIDCProvider abstracts the OIDC authorization code exchange and validation for testability.
 type OIDCProvider interface {
 	ExchangeCode(ctx context.Context, code, redirectURI, codeVerifier string) (*OIDCClaims, error)
+	GetAuthEndpoint(ctx context.Context) (string, error)
 }
 
 // HTTPOIDCProvider implements OIDCProvider using HTTP requests with JWKS discovery and caching.
@@ -52,7 +56,7 @@ type HTTPOIDCProvider struct {
 	mu              sync.RWMutex
 	cachedEndpoints openIDConfiguration
 	endpointsExpiry time.Time
-	cachedJWKS      map[string]*rsa.PublicKey
+	cachedJWKS      map[string]crypto.PublicKey
 	jwksExpiry      time.Time
 }
 
@@ -65,15 +69,16 @@ func NewHTTPOIDCProvider(cfg OIDCConfig, logger *slog.Logger) *HTTPOIDCProvider 
 		Config:     cfg,
 		HTTPClient: &http.Client{Timeout: 10 * time.Second},
 		Logger:     logger,
-		cachedJWKS: make(map[string]*rsa.PublicKey),
+		cachedJWKS: make(map[string]crypto.PublicKey),
 	}
 }
 
 type openIDConfiguration struct {
-	Issuer           string `json:"issuer"`
-	TokenEndpoint    string `json:"token_endpoint"`
-	JWKSURI          string `json:"jwks_uri"`
-	UserinfoEndpoint string `json:"userinfo_endpoint"`
+	Issuer                string `json:"issuer"`
+	AuthorizationEndpoint string `json:"authorization_endpoint"`
+	TokenEndpoint         string `json:"token_endpoint"`
+	JWKSURI               string `json:"jwks_uri"`
+	UserinfoEndpoint      string `json:"userinfo_endpoint"`
 }
 
 type idpTokenResponse struct {
@@ -94,6 +99,18 @@ type jwkKey struct {
 	Alg string `json:"alg"`
 	N   string `json:"n"`
 	E   string `json:"e"`
+	Crv string `json:"crv"`
+	X   string `json:"x"`
+	Y   string `json:"y"`
+}
+
+// GetAuthEndpoint returns the discovered authorization endpoint URL.
+func (p *HTTPOIDCProvider) GetAuthEndpoint(ctx context.Context) (string, error) {
+	endpoints, err := p.discoverEndpoints(ctx)
+	if err != nil {
+		return "", err
+	}
+	return endpoints.AuthorizationEndpoint, nil
 }
 
 func (p *HTTPOIDCProvider) discoverEndpoints(ctx context.Context) (openIDConfiguration, error) {
@@ -143,6 +160,7 @@ func (p *HTTPOIDCProvider) discoverEndpoints(ctx context.Context) (openIDConfigu
 	if p.Logger != nil {
 		p.Logger.DebugContext(ctx, "Discovered OIDC provider configuration",
 			"issuer", doc.Issuer,
+			"authorization_endpoint", doc.AuthorizationEndpoint,
 			"token_endpoint", doc.TokenEndpoint,
 			"jwks_uri", doc.JWKSURI,
 			"userinfo_endpoint", doc.UserinfoEndpoint,
@@ -155,7 +173,7 @@ func (p *HTTPOIDCProvider) discoverEndpoints(ctx context.Context) (openIDConfigu
 	return doc, nil
 }
 
-func (p *HTTPOIDCProvider) getJWKSPublicKey(ctx context.Context, jwksURI, kid string) (*rsa.PublicKey, error) {
+func (p *HTTPOIDCProvider) getJWKSPublicKey(ctx context.Context, jwksURI, kid string) (crypto.PublicKey, error) {
 	p.mu.RLock()
 	if time.Now().Before(p.jwksExpiry) {
 		if key, ok := p.cachedJWKS[kid]; ok {
@@ -187,12 +205,22 @@ func (p *HTTPOIDCProvider) getJWKSPublicKey(ctx context.Context, jwksURI, kid st
 		return nil, fmt.Errorf("failed to decode JWKS: %w", err)
 	}
 
-	newMap := make(map[string]*rsa.PublicKey)
+	newMap := make(map[string]crypto.PublicKey)
 	for _, k := range jwks.Keys {
-		if k.Kty == "RSA" && k.N != "" && k.E != "" {
-			pubKey, err := parseRSAPublicKey(k.N, k.E)
-			if err == nil {
-				newMap[k.Kid] = pubKey
+		switch k.Kty {
+		case "RSA":
+			if k.N != "" && k.E != "" {
+				pubKey, err := parseRSAPublicKey(k.N, k.E)
+				if err == nil {
+					newMap[k.Kid] = pubKey
+				}
+			}
+		case "EC":
+			if k.Crv != "" && k.X != "" && k.Y != "" {
+				pubKey, err := parseECPublicKey(k.Crv, k.X, k.Y)
+				if err == nil {
+					newMap[k.Kid] = pubKey
+				}
 			}
 		}
 	}
@@ -212,12 +240,25 @@ func (p *HTTPOIDCProvider) getJWKSPublicKey(ctx context.Context, jwksURI, kid st
 	return nil, fmt.Errorf("no matching key found for kid '%s' in JWKS", kid)
 }
 
+func decodeBase64URL(s string) ([]byte, error) {
+	if b, err := base64.RawURLEncoding.DecodeString(s); err == nil {
+		return b, nil
+	}
+	if b, err := base64.URLEncoding.DecodeString(s); err == nil {
+		return b, nil
+	}
+	if b, err := base64.RawStdEncoding.DecodeString(s); err == nil {
+		return b, nil
+	}
+	return base64.StdEncoding.DecodeString(s)
+}
+
 func parseRSAPublicKey(nStr, eStr string) (*rsa.PublicKey, error) {
-	nBytes, err := base64.RawURLEncoding.DecodeString(nStr)
+	nBytes, err := decodeBase64URL(nStr)
 	if err != nil {
 		return nil, err
 	}
-	eBytes, err := base64.RawURLEncoding.DecodeString(eStr)
+	eBytes, err := decodeBase64URL(eStr)
 	if err != nil {
 		return nil, err
 	}
@@ -227,6 +268,34 @@ func parseRSAPublicKey(nStr, eStr string) (*rsa.PublicKey, error) {
 	}
 	n := new(big.Int).SetBytes(nBytes)
 	return &rsa.PublicKey{N: n, E: eInt}, nil
+}
+
+func parseECPublicKey(crvStr, xStr, yStr string) (*ecdsa.PublicKey, error) {
+	var curve elliptic.Curve
+	switch crvStr {
+	case "P-256":
+		curve = elliptic.P256()
+	case "P-384":
+		curve = elliptic.P384()
+	case "P-521":
+		curve = elliptic.P521()
+	default:
+		return nil, fmt.Errorf("unsupported EC curve '%s'", crvStr)
+	}
+
+	xBytes, err := decodeBase64URL(xStr)
+	if err != nil {
+		return nil, fmt.Errorf("invalid x coordinate in EC key: %w", err)
+	}
+	yBytes, err := decodeBase64URL(yStr)
+	if err != nil {
+		return nil, fmt.Errorf("invalid y coordinate in EC key: %w", err)
+	}
+
+	x := new(big.Int).SetBytes(xBytes)
+	y := new(big.Int).SetBytes(yBytes)
+
+	return &ecdsa.PublicKey{Curve: curve, X: x, Y: y}, nil
 }
 
 // ExchangeCode implements OIDCProvider.
@@ -288,45 +357,35 @@ func (p *HTTPOIDCProvider) ExchangeCode(ctx context.Context, code, redirectURI, 
 
 	claims := &OIDCClaims{}
 
-	// Parse ID token if present
+	// Parse and cryptographically verify ID token if present
 	if tokenRes.IDToken != "" {
 		parsedToken, err := jwt.Parse(tokenRes.IDToken, func(token *jwt.Token) (any, error) {
 			kid, _ := token.Header["kid"].(string)
 			return p.getJWKSPublicKey(ctx, endpoints.JWKSURI, kid)
-		})
-		if err == nil && parsedToken.Valid {
-			if mapClaims, ok := parsedToken.Claims.(jwt.MapClaims); ok {
-				if sub, ok := mapClaims["sub"].(string); ok {
-					claims.Subject = sub
-				}
-				if iss, ok := mapClaims["iss"].(string); ok {
-					claims.Issuer = iss
-				}
-				if pref, ok := mapClaims["preferred_username"].(string); ok {
-					claims.PreferredUsername = pref
-				}
-				if em, ok := mapClaims["email"].(string); ok {
-					claims.Email = em
-				}
+		}, jwt.WithAudience(p.Config.ClientID))
+
+		if err != nil || !parsedToken.Valid {
+			return nil, fmt.Errorf("invalid id_token signature or claims: %w", err)
+		}
+
+		if mapClaims, ok := parsedToken.Claims.(jwt.MapClaims); ok {
+			iss, _ := mapClaims["iss"].(string)
+			expectedIssuer := strings.TrimRight(endpoints.Issuer, "/")
+			tokenIssuer := strings.TrimRight(iss, "/")
+			configIssuer := strings.TrimRight(p.Config.IssuerURL, "/")
+			if tokenIssuer == "" || (tokenIssuer != expectedIssuer && tokenIssuer != configIssuer) {
+				return nil, fmt.Errorf("invalid id_token issuer '%s': expected '%s'", iss, endpoints.Issuer)
 			}
-		} else {
-			// Fallback: parse unverified claims from id_token if JWKS signature check is not reachable
-			unverifiedToken, _, unvErr := jwt.NewParser().ParseUnverified(tokenRes.IDToken, jwt.MapClaims{})
-			if unvErr == nil {
-				if mapClaims, ok := unverifiedToken.Claims.(jwt.MapClaims); ok {
-					if sub, ok := mapClaims["sub"].(string); ok {
-						claims.Subject = sub
-					}
-					if iss, ok := mapClaims["iss"].(string); ok {
-						claims.Issuer = iss
-					}
-					if pref, ok := mapClaims["preferred_username"].(string); ok {
-						claims.PreferredUsername = pref
-					}
-					if em, ok := mapClaims["email"].(string); ok {
-						claims.Email = em
-					}
-				}
+			claims.Issuer = iss
+
+			if sub, ok := mapClaims["sub"].(string); ok {
+				claims.Subject = sub
+			}
+			if pref, ok := mapClaims["preferred_username"].(string); ok {
+				claims.PreferredUsername = pref
+			}
+			if em, ok := mapClaims["email"].(string); ok {
+				claims.Email = em
 			}
 		}
 	}

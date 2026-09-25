@@ -260,6 +260,9 @@ definitions:
         type: boolean
       login_page_disabled:
         type: boolean
+      oidc_auth_endpoint:
+        description: dynamically filled
+        type: string
       oidc_client_id:
         type: string
       oidc_issuer_url:
@@ -267,6 +270,17 @@ definitions:
       oidc_redirect_url:
         type: string
     type: object
+  repository.AccountType:
+    enum:
+    - 0
+    - 1
+    - 2
+    format: int32
+    type: integer
+    x-enum-varnames:
+    - AccountTypeLocal
+    - AccountTypeService
+    - AccountTypeOIDC
   repository.Condition:
     properties:
       field:
@@ -312,9 +326,13 @@ definitions:
       field:
         type: string
     type: object
-  tokenhandler.OidcTokenRequest:
+  tokenhandler.OidcTokenExchangeRequest:
     properties:
-      idp_token:
+      code:
+        type: string
+      code_verifier:
+        type: string
+      redirect_uri:
         type: string
     type: object
   tokenhandler.TokenRequest:
@@ -408,9 +426,9 @@ definitions:
     type: object
   userhandler.CreateUserPayload:
     properties:
+      account_type:
+        $ref: '#/definitions/repository.AccountType'
       is_admin:
-        type: boolean
-      is_service_account:
         type: boolean
       password:
         type: string
@@ -475,11 +493,11 @@ definitions:
     type: object
   userhandler.UserResponse:
     properties:
+      account_type:
+        $ref: '#/definitions/repository.AccountType'
       id:
         type: string
       is_admin:
-        type: boolean
-      is_service_account:
         type: boolean
       permissions:
         items:
@@ -490,11 +508,11 @@ definitions:
     type: object
   userhandler.UserSubResponse:
     properties:
+      account_type:
+        $ref: '#/definitions/repository.AccountType'
       id:
         type: string
       is_admin:
-        type: boolean
-      is_service_account:
         type: boolean
       username:
         type: string
@@ -553,20 +571,42 @@ paths:
       - token
   /api/token:
     post:
+      description: Obtains an internal JWT Access/Refresh token pair using HTTP Basic
+        Auth.
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: Returns access and refresh tokens
+          schema:
+            $ref: '#/definitions/tokenhandler.TokenResponse'
+        "401":
+          description: Invalid credentials or missing authentication
+          schema:
+            $ref: '#/definitions/utils.ErrorResponse'
+        "500":
+          description: Internal server error
+          schema:
+            $ref: '#/definitions/utils.ErrorResponse'
+      security:
+      - BasicAuth: []
+      summary: Get a token pair via Basic Auth
+      tags:
+      - token
+  /api/token/oidc:
+    post:
       consumes:
       - application/json
-      description: |-
-        Obtains an internal JWT Access/Refresh token pair.
-        Supports two authentication methods:
-        1. Local Authentication: Send standard Basic Auth headers.
-        2. OIDC Token Exchange (commercial version only): Send a JSON body containing a valid external JWT (`idp_token`).
-        Providing both methods in a single request will result in a 400 Bad Request.
+      description: Exchanges an authorization code from an external OIDC provider
+        (e.g., Keycloak) for an internal JWT Access/Refresh token pair. Automatically
+        provisions new users if necessary.
       parameters:
-      - description: OIDC Identity Provider Token (required if not using Basic Auth)
+      - description: OIDC Authorization Code Request
         in: body
         name: body
+        required: true
         schema:
-          $ref: '#/definitions/tokenhandler.OidcTokenRequest'
+          $ref: '#/definitions/tokenhandler.OidcTokenExchangeRequest'
       produces:
       - application/json
       responses:
@@ -575,20 +615,18 @@ paths:
           schema:
             $ref: '#/definitions/tokenhandler.TokenResponse'
         "400":
-          description: Ambiguous authentication request
+          description: Invalid request body or OIDC disabled
           schema:
             $ref: '#/definitions/utils.ErrorResponse'
         "401":
-          description: Invalid credentials, invalid OIDC token, or missing authentication
+          description: Failed to validate OIDC credentials
           schema:
             $ref: '#/definitions/utils.ErrorResponse'
         "500":
-          description: Internal server error or OIDC not available
+          description: Internal server error
           schema:
             $ref: '#/definitions/utils.ErrorResponse'
-      security:
-      - BasicAuth: []
-      summary: Get a token pair
+      summary: Exchange OIDC Authorization Code
       tags:
       - token
   /api/token/refresh:
@@ -1545,12 +1583,12 @@ paths:
     patch:
       consumes:
       - application/json
-      description: Updates the password for the currently authenticated user. Requires
-        the old password to verify identity.
+      description: Allows the currently authenticated user to update their own password
+        by verifying their old password first.
       parameters:
-      - description: Old and New Password
+      - description: Password update payload
         in: body
-        name: payload
+        name: body
         required: true
         schema:
           $ref: '#/definitions/userhandler.UpdateMePayload'
@@ -1562,7 +1600,7 @@ paths:
           schema:
             $ref: '#/definitions/utils.MessageResponse'
         "400":
-          description: Invalid JSON body or missing fields
+          description: Invalid JSON body or missing password fields
           schema:
             $ref: '#/definitions/utils.ErrorResponse'
         "401":
@@ -1572,7 +1610,40 @@ paths:
       security:
       - BasicAuth: []
       - BearerAuth: []
-      summary: Update current user's password
+      summary: Update current user password
+      tags:
+      - User
+    put:
+      consumes:
+      - application/json
+      description: Allows the currently authenticated user to update their own password
+        by verifying their old password first.
+      parameters:
+      - description: Password update payload
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/userhandler.UpdateMePayload'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: Password updated successfully
+          schema:
+            $ref: '#/definitions/utils.MessageResponse'
+        "400":
+          description: Invalid JSON body or missing password fields
+          schema:
+            $ref: '#/definitions/utils.ErrorResponse'
+        "401":
+          description: 'Authentication failed: invalid old password'
+          schema:
+            $ref: '#/definitions/utils.ErrorResponse'
+      security:
+      - BasicAuth: []
+      - BearerAuth: []
+      summary: Update current user password
       tags:
       - User
   /user:
@@ -1967,6 +2038,73 @@ paths:
       security:
       - BearerAuth: []
       summary: Update an API key
+      tags:
+      - User
+  /user/me:
+    patch:
+      consumes:
+      - application/json
+      description: Allows the currently authenticated user to update their own password
+        by verifying their old password first.
+      parameters:
+      - description: Password update payload
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/userhandler.UpdateMePayload'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: Password updated successfully
+          schema:
+            $ref: '#/definitions/utils.MessageResponse'
+        "400":
+          description: Invalid JSON body or missing password fields
+          schema:
+            $ref: '#/definitions/utils.ErrorResponse'
+        "401":
+          description: 'Authentication failed: invalid old password'
+          schema:
+            $ref: '#/definitions/utils.ErrorResponse'
+      security:
+      - BasicAuth: []
+      - BearerAuth: []
+      summary: Update current user password
+      tags:
+      - User
+    put:
+      consumes:
+      - application/json
+      description: Allows the currently authenticated user to update their own password
+        by verifying their old password first.
+      parameters:
+      - description: Password update payload
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/userhandler.UpdateMePayload'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: Password updated successfully
+          schema:
+            $ref: '#/definitions/utils.MessageResponse'
+        "400":
+          description: Invalid JSON body or missing password fields
+          schema:
+            $ref: '#/definitions/utils.ErrorResponse'
+        "401":
+          description: 'Authentication failed: invalid old password'
+          schema:
+            $ref: '#/definitions/utils.ErrorResponse'
+      security:
+      - BasicAuth: []
+      - BearerAuth: []
+      summary: Update current user password
       tags:
       - User
   /users:

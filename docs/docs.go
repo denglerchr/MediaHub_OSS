@@ -77,7 +77,39 @@ const docTemplate = `{
                         "BasicAuth": []
                     }
                 ],
-                "description": "Obtains an internal JWT Access/Refresh token pair.\nSupports two authentication methods:\n1. Local Authentication: Send standard Basic Auth headers.\n2. OIDC Token Exchange (commercial version only): Send a JSON body containing a valid external JWT (` + "`" + `idp_token` + "`" + `).\nProviding both methods in a single request will result in a 400 Bad Request.",
+                "description": "Obtains an internal JWT Access/Refresh token pair using HTTP Basic Auth.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "token"
+                ],
+                "summary": "Get a token pair via Basic Auth",
+                "responses": {
+                    "200": {
+                        "description": "Returns access and refresh tokens",
+                        "schema": {
+                            "$ref": "#/definitions/tokenhandler.TokenResponse"
+                        }
+                    },
+                    "401": {
+                        "description": "Invalid credentials or missing authentication",
+                        "schema": {
+                            "$ref": "#/definitions/utils.ErrorResponse"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal server error",
+                        "schema": {
+                            "$ref": "#/definitions/utils.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/token/oidc": {
+            "post": {
+                "description": "Exchanges an authorization code from an external OIDC provider (e.g., Keycloak) for an internal JWT Access/Refresh token pair. Automatically provisions new users if necessary.",
                 "consumes": [
                     "application/json"
                 ],
@@ -87,14 +119,15 @@ const docTemplate = `{
                 "tags": [
                     "token"
                 ],
-                "summary": "Get a token pair",
+                "summary": "Exchange OIDC Authorization Code",
                 "parameters": [
                     {
-                        "description": "OIDC Identity Provider Token (required if not using Basic Auth)",
+                        "description": "OIDC Authorization Code Request",
                         "name": "body",
                         "in": "body",
+                        "required": true,
                         "schema": {
-                            "$ref": "#/definitions/tokenhandler.OidcTokenRequest"
+                            "$ref": "#/definitions/tokenhandler.OidcTokenExchangeRequest"
                         }
                     }
                 ],
@@ -106,19 +139,19 @@ const docTemplate = `{
                         }
                     },
                     "400": {
-                        "description": "Ambiguous authentication request",
+                        "description": "Invalid request body or OIDC disabled",
                         "schema": {
                             "$ref": "#/definitions/utils.ErrorResponse"
                         }
                     },
                     "401": {
-                        "description": "Invalid credentials, invalid OIDC token, or missing authentication",
+                        "description": "Failed to validate OIDC credentials",
                         "schema": {
                             "$ref": "#/definitions/utils.ErrorResponse"
                         }
                     },
                     "500": {
-                        "description": "Internal server error or OIDC not available",
+                        "description": "Internal server error",
                         "schema": {
                             "$ref": "#/definitions/utils.ErrorResponse"
                         }
@@ -1554,7 +1587,7 @@ const docTemplate = `{
                     }
                 }
             },
-            "patch": {
+            "put": {
                 "security": [
                     {
                         "BasicAuth": []
@@ -1563,7 +1596,7 @@ const docTemplate = `{
                         "BearerAuth": []
                     }
                 ],
-                "description": "Updates the password for the currently authenticated user. Requires the old password to verify identity.",
+                "description": "Allows the currently authenticated user to update their own password by verifying their old password first.",
                 "consumes": [
                     "application/json"
                 ],
@@ -1573,11 +1606,11 @@ const docTemplate = `{
                 "tags": [
                     "User"
                 ],
-                "summary": "Update current user's password",
+                "summary": "Update current user password",
                 "parameters": [
                     {
-                        "description": "Old and New Password",
-                        "name": "payload",
+                        "description": "Password update payload",
+                        "name": "body",
                         "in": "body",
                         "required": true,
                         "schema": {
@@ -1593,7 +1626,59 @@ const docTemplate = `{
                         }
                     },
                     "400": {
-                        "description": "Invalid JSON body or missing fields",
+                        "description": "Invalid JSON body or missing password fields",
+                        "schema": {
+                            "$ref": "#/definitions/utils.ErrorResponse"
+                        }
+                    },
+                    "401": {
+                        "description": "Authentication failed: invalid old password",
+                        "schema": {
+                            "$ref": "#/definitions/utils.ErrorResponse"
+                        }
+                    }
+                }
+            },
+            "patch": {
+                "security": [
+                    {
+                        "BasicAuth": []
+                    },
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "Allows the currently authenticated user to update their own password by verifying their old password first.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "User"
+                ],
+                "summary": "Update current user password",
+                "parameters": [
+                    {
+                        "description": "Password update payload",
+                        "name": "body",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/userhandler.UpdateMePayload"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Password updated successfully",
+                        "schema": {
+                            "$ref": "#/definitions/utils.MessageResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "Invalid JSON body or missing password fields",
                         "schema": {
                             "$ref": "#/definitions/utils.ErrorResponse"
                         }
@@ -1743,6 +1828,112 @@ const docTemplate = `{
                     },
                     "500": {
                         "description": "Internal server error",
+                        "schema": {
+                            "$ref": "#/definitions/utils.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/user/me": {
+            "put": {
+                "security": [
+                    {
+                        "BasicAuth": []
+                    },
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "Allows the currently authenticated user to update their own password by verifying their old password first.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "User"
+                ],
+                "summary": "Update current user password",
+                "parameters": [
+                    {
+                        "description": "Password update payload",
+                        "name": "body",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/userhandler.UpdateMePayload"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Password updated successfully",
+                        "schema": {
+                            "$ref": "#/definitions/utils.MessageResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "Invalid JSON body or missing password fields",
+                        "schema": {
+                            "$ref": "#/definitions/utils.ErrorResponse"
+                        }
+                    },
+                    "401": {
+                        "description": "Authentication failed: invalid old password",
+                        "schema": {
+                            "$ref": "#/definitions/utils.ErrorResponse"
+                        }
+                    }
+                }
+            },
+            "patch": {
+                "security": [
+                    {
+                        "BasicAuth": []
+                    },
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "Allows the currently authenticated user to update their own password by verifying their old password first.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "User"
+                ],
+                "summary": "Update current user password",
+                "parameters": [
+                    {
+                        "description": "Password update payload",
+                        "name": "body",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/userhandler.UpdateMePayload"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Password updated successfully",
+                        "schema": {
+                            "$ref": "#/definitions/utils.MessageResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "Invalid JSON body or missing password fields",
+                        "schema": {
+                            "$ref": "#/definitions/utils.ErrorResponse"
+                        }
+                    },
+                    "401": {
+                        "description": "Authentication failed: invalid old password",
                         "schema": {
                             "$ref": "#/definitions/utils.ErrorResponse"
                         }
@@ -2688,6 +2879,10 @@ const docTemplate = `{
                 "login_page_disabled": {
                     "type": "boolean"
                 },
+                "oidc_auth_endpoint": {
+                    "description": "dynamically filled",
+                    "type": "string"
+                },
                 "oidc_client_id": {
                     "type": "string"
                 },
@@ -2698,6 +2893,20 @@ const docTemplate = `{
                     "type": "string"
                 }
             }
+        },
+        "repository.AccountType": {
+            "type": "integer",
+            "format": "int32",
+            "enum": [
+                0,
+                1,
+                2
+            ],
+            "x-enum-varnames": [
+                "AccountTypeLocal",
+                "AccountTypeService",
+                "AccountTypeOIDC"
+            ]
         },
         "repository.Condition": {
             "type": "object",
@@ -2767,10 +2976,16 @@ const docTemplate = `{
                 }
             }
         },
-        "tokenhandler.OidcTokenRequest": {
+        "tokenhandler.OidcTokenExchangeRequest": {
             "type": "object",
             "properties": {
-                "idp_token": {
+                "code": {
+                    "type": "string"
+                },
+                "code_verifier": {
+                    "type": "string"
+                },
+                "redirect_uri": {
                     "type": "string"
                 }
             }
@@ -2912,10 +3127,10 @@ const docTemplate = `{
         "userhandler.CreateUserPayload": {
             "type": "object",
             "properties": {
-                "is_admin": {
-                    "type": "boolean"
+                "account_type": {
+                    "$ref": "#/definitions/repository.AccountType"
                 },
-                "is_service_account": {
+                "is_admin": {
                     "type": "boolean"
                 },
                 "password": {
@@ -3015,13 +3230,13 @@ const docTemplate = `{
         "userhandler.UserResponse": {
             "type": "object",
             "properties": {
+                "account_type": {
+                    "$ref": "#/definitions/repository.AccountType"
+                },
                 "id": {
                     "type": "string"
                 },
                 "is_admin": {
-                    "type": "boolean"
-                },
-                "is_service_account": {
                     "type": "boolean"
                 },
                 "permissions": {
@@ -3038,13 +3253,13 @@ const docTemplate = `{
         "userhandler.UserSubResponse": {
             "type": "object",
             "properties": {
+                "account_type": {
+                    "$ref": "#/definitions/repository.AccountType"
+                },
                 "id": {
                     "type": "string"
                 },
                 "is_admin": {
-                    "type": "boolean"
-                },
-                "is_service_account": {
                     "type": "boolean"
                 },
                 "username": {

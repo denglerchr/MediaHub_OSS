@@ -9,7 +9,7 @@ import (
 	"fmt"
 	"io"
 	"mediahub_oss/internal/httpserver/utils"
-	repo "mediahub_oss/internal/repository"
+	"mediahub_oss/internal/repository"
 	"mediahub_oss/internal/shared"
 	"mediahub_oss/internal/shared/customerrors"
 	"net/http"
@@ -42,7 +42,7 @@ type UserSubResponse struct {
 	ID          string           `json:"id"`
 	Username    string           `json:"username"`
 	IsAdmin     bool             `json:"is_admin"`
-	AccountType repo.AccountType `json:"account_type"`
+	AccountType repository.AccountType `json:"account_type"`
 }
 
 type CreateAPIKeyPayload struct {
@@ -65,7 +65,7 @@ type UpdateAPIKeyPayload struct {
 	ScopeAdmin  *bool   `json:"scope_admin"`
 }
 
-func mapToAPIKeyResponse(key repo.APIKey) APIKeyResponse {
+func mapToAPIKeyResponse(key repository.APIKey) APIKeyResponse {
 	var expiresAt *int64
 	if !key.ExpiresAt.IsZero() {
 		val := key.ExpiresAt.UnixMilli()
@@ -82,11 +82,11 @@ func mapToAPIKeyResponse(key repo.APIKey) APIKeyResponse {
 		ID:          string(key.ID),
 		Name:        key.Name,
 		KeyHint:     key.KeyHint,
-		ScopeView:   key.Scope.HasAccess(repo.AccessView),
-		ScopeCreate: key.Scope.HasAccess(repo.AccessCreate),
-		ScopeEdit:   key.Scope.HasAccess(repo.AccessEdit),
-		ScopeDelete: key.Scope.HasAccess(repo.AccessDelete),
-		ScopeAdmin:  key.Scope.HasAccess(repo.AccessAdmin),
+		ScopeView:   key.Scope.HasAccess(repository.AccessView),
+		ScopeCreate: key.Scope.HasAccess(repository.AccessCreate),
+		ScopeEdit:   key.Scope.HasAccess(repository.AccessEdit),
+		ScopeDelete: key.Scope.HasAccess(repository.AccessDelete),
+		ScopeAdmin:  key.Scope.HasAccess(repository.AccessAdmin),
 		CreatedAt:   key.CreatedAt.UnixMilli(),
 		ExpiresAt:   expiresAt,
 		LastUsedAt:  lastUsedAt,
@@ -119,7 +119,7 @@ func (h *UserHandler) GetAllAPIKeys(w http.ResponseWriter, r *http.Request) {
 		utils.RespondWithError(w, http.StatusInternalServerError, "Internal server error")
 		return
 	}
-	userMap := make(map[repo.ULID]repo.User, len(users))
+	userMap := make(map[repository.ULID]repository.User, len(users))
 	for _, u := range users {
 		userMap[u.ID] = u
 	}
@@ -174,14 +174,14 @@ func (h *UserHandler) CreateAPIKey(w http.ResponseWriter, r *http.Request) {
 		userIDStr = r.PathValue("user_id")
 	}
 
-	var userID repo.ULID
+	var userID repository.ULID
 	var targetUsername string
 	ctxUser := utils.GetUserFromContext(ctx)
 	if string(ctxUser.ID) == userIDStr {
 		userID = ctxUser.ID
 		targetUsername = ctxUser.Username
 	} else {
-		user, err := h.Repo.GetUserByID(ctx, repo.ULID(userIDStr))
+		user, err := h.Repo.GetUserByID(ctx, repository.ULID(userIDStr))
 		if err != nil {
 			if errors.Is(err, customerrors.ErrNotFound) {
 				utils.RespondWithError(w, http.StatusNotFound, "User not found")
@@ -226,13 +226,13 @@ func (h *UserHandler) CreateAPIKey(w http.ResponseWriter, r *http.Request) {
 		expiresAt = time.UnixMilli(*payload.ExpiresAt)
 	}
 
-	keyModel := repo.APIKey{
-		ID:        repo.ULID(shared.GenerateULID()),
+	keyModel := repository.APIKey{
+		ID:        repository.ULID(shared.GenerateULID()),
 		UserID:    userID,
 		Name:      payload.Name,
 		KeyHash:   keyHash,
 		KeyHint:   keyHint,
-		Scope:     repo.NewAccessGrant(payload.ScopeView, payload.ScopeCreate, payload.ScopeEdit, payload.ScopeDelete, payload.ScopeAdmin),
+		Scope:     repository.NewAccessGrant(payload.ScopeView, payload.ScopeCreate, payload.ScopeEdit, payload.ScopeDelete, payload.ScopeAdmin),
 		CreatedAt: time.Now(),
 		ExpiresAt: expiresAt,
 	}
@@ -253,11 +253,11 @@ func (h *UserHandler) CreateAPIKey(w http.ResponseWriter, r *http.Request) {
 		"key_id":       string(createdKey.ID),
 		"key_name":     createdKey.Name,
 		"key_hint":     createdKey.KeyHint,
-		"scope_view":   createdKey.Scope.HasAccess(repo.AccessView),
-		"scope_create": createdKey.Scope.HasAccess(repo.AccessCreate),
-		"scope_edit":   createdKey.Scope.HasAccess(repo.AccessEdit),
-		"scope_delete": createdKey.Scope.HasAccess(repo.AccessDelete),
-		"scope_admin":  createdKey.Scope.HasAccess(repo.AccessAdmin),
+		"scope_view":   createdKey.Scope.HasAccess(repository.AccessView),
+		"scope_create": createdKey.Scope.HasAccess(repository.AccessCreate),
+		"scope_edit":   createdKey.Scope.HasAccess(repository.AccessEdit),
+		"scope_delete": createdKey.Scope.HasAccess(repository.AccessDelete),
+		"scope_admin":  createdKey.Scope.HasAccess(repository.AccessAdmin),
 		"expires_at":   payload.ExpiresAt,
 	})
 
@@ -287,7 +287,7 @@ func (h *UserHandler) GetAPIKeys(w http.ResponseWriter, r *http.Request) {
 	ctxUser := utils.GetUserFromContext(ctx)
 	var targetUsername string
 	if string(ctxUser.ID) != userIDStr {
-		user, err := h.Repo.GetUserByID(ctx, repo.ULID(userIDStr))
+		user, err := h.Repo.GetUserByID(ctx, repository.ULID(userIDStr))
 		if err != nil {
 			if errors.Is(err, customerrors.ErrNotFound) {
 				utils.RespondWithError(w, http.StatusNotFound, "User not found")
@@ -302,7 +302,7 @@ func (h *UserHandler) GetAPIKeys(w http.ResponseWriter, r *http.Request) {
 		targetUsername = ctxUser.Username
 	}
 
-	keys, err := h.Repo.GetAPIKeysByUserID(ctx, repo.ULID(userIDStr))
+	keys, err := h.Repo.GetAPIKeysByUserID(ctx, repository.ULID(userIDStr))
 	if err != nil {
 		h.Logger.Error("Failed to retrieve API keys for user", "error", err, "user_id", userIDStr)
 		utils.RespondWithError(w, http.StatusInternalServerError, "Internal server error")
@@ -345,7 +345,7 @@ func (h *UserHandler) GetAPIKey(w http.ResponseWriter, r *http.Request) {
 		keyIDStr = r.PathValue("key_id")
 	}
 
-	key, err := h.Repo.GetAPIKeyByID(ctx, repo.ULID(keyIDStr))
+	key, err := h.Repo.GetAPIKeyByID(ctx, repository.ULID(keyIDStr))
 	if err != nil {
 		if errors.Is(err, customerrors.ErrNotFound) {
 			utils.RespondWithError(w, http.StatusNotFound, "API Key not found")
@@ -398,7 +398,7 @@ func (h *UserHandler) UpdateAPIKey(w http.ResponseWriter, r *http.Request) {
 		keyIDStr = r.PathValue("key_id")
 	}
 
-	key, err := h.Repo.GetAPIKeyByID(ctx, repo.ULID(keyIDStr))
+	key, err := h.Repo.GetAPIKeyByID(ctx, repository.ULID(keyIDStr))
 	if err != nil {
 		if errors.Is(err, customerrors.ErrNotFound) {
 			utils.RespondWithError(w, http.StatusNotFound, "API Key not found")
@@ -429,11 +429,11 @@ func (h *UserHandler) UpdateAPIKey(w http.ResponseWriter, r *http.Request) {
 	if payload.Name != nil {
 		key.Name = *payload.Name
 	}
-	canView := key.Scope.HasAccess(repo.AccessView)
-	canCreate := key.Scope.HasAccess(repo.AccessCreate)
-	canEdit := key.Scope.HasAccess(repo.AccessEdit)
-	canDelete := key.Scope.HasAccess(repo.AccessDelete)
-	canAdmin := key.Scope.HasAccess(repo.AccessAdmin)
+	canView := key.Scope.HasAccess(repository.AccessView)
+	canCreate := key.Scope.HasAccess(repository.AccessCreate)
+	canEdit := key.Scope.HasAccess(repository.AccessEdit)
+	canDelete := key.Scope.HasAccess(repository.AccessDelete)
+	canAdmin := key.Scope.HasAccess(repository.AccessAdmin)
 
 	if payload.ScopeView != nil {
 		canView = *payload.ScopeView
@@ -450,7 +450,7 @@ func (h *UserHandler) UpdateAPIKey(w http.ResponseWriter, r *http.Request) {
 	if payload.ScopeAdmin != nil {
 		canAdmin = *payload.ScopeAdmin
 	}
-	key.Scope = repo.NewAccessGrant(canView, canCreate, canEdit, canDelete, canAdmin)
+	key.Scope = repository.NewAccessGrant(canView, canCreate, canEdit, canDelete, canAdmin)
 
 	// Detect if expires_at was explicitly sent (even if null)
 	var rawMap map[string]any
@@ -477,11 +477,11 @@ func (h *UserHandler) UpdateAPIKey(w http.ResponseWriter, r *http.Request) {
 		"key_id":       string(updatedKey.ID),
 		"key_name":     updatedKey.Name,
 		"key_hint":     updatedKey.KeyHint,
-		"scope_view":   updatedKey.Scope.HasAccess(repo.AccessView),
-		"scope_create": updatedKey.Scope.HasAccess(repo.AccessCreate),
-		"scope_edit":   updatedKey.Scope.HasAccess(repo.AccessEdit),
-		"scope_delete": updatedKey.Scope.HasAccess(repo.AccessDelete),
-		"scope_admin":  updatedKey.Scope.HasAccess(repo.AccessAdmin),
+		"scope_view":   updatedKey.Scope.HasAccess(repository.AccessView),
+		"scope_create": updatedKey.Scope.HasAccess(repository.AccessCreate),
+		"scope_edit":   updatedKey.Scope.HasAccess(repository.AccessEdit),
+		"scope_delete": updatedKey.Scope.HasAccess(repository.AccessDelete),
+		"scope_admin":  updatedKey.Scope.HasAccess(repository.AccessAdmin),
 	})
 
 	utils.RespondWithJSON(w, http.StatusOK, mapToAPIKeyResponse(updatedKey))
@@ -511,7 +511,7 @@ func (h *UserHandler) DeleteAPIKey(w http.ResponseWriter, r *http.Request) {
 		keyIDStr = r.PathValue("key_id")
 	}
 
-	key, err := h.Repo.GetAPIKeyByID(ctx, repo.ULID(keyIDStr))
+	key, err := h.Repo.GetAPIKeyByID(ctx, repository.ULID(keyIDStr))
 	if err != nil {
 		if errors.Is(err, customerrors.ErrNotFound) {
 			utils.RespondWithError(w, http.StatusNotFound, "API Key not found")
@@ -527,7 +527,7 @@ func (h *UserHandler) DeleteAPIKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	err = h.Repo.DeleteAPIKey(ctx, repo.ULID(keyIDStr))
+	err = h.Repo.DeleteAPIKey(ctx, repository.ULID(keyIDStr))
 	if err != nil {
 		h.Logger.Error("Failed to delete API key", "error", err, "key_id", keyIDStr)
 		utils.RespondWithError(w, http.StatusInternalServerError, "Failed to delete API Key")

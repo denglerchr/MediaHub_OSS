@@ -21,6 +21,7 @@ func NewInfoHandler(
 	oidcIssuerURL string,
 	oidcClientID string,
 	oidcRedirectURL string,
+	oidcProvider AuthEndpointProvider,
 	auditLogsStored bool,
 ) *InfoHandler {
 
@@ -42,6 +43,7 @@ func NewInfoHandler(
 			ClientID:          oidcClientID,
 			RedirectURL:       oidcRedirectURL,
 		},
+		OIDCProvider: oidcProvider,
 		Features: FeaturesConfig{
 			AuditLogs: auditLogsStored,
 		},
@@ -65,12 +67,19 @@ func (h *InfoHandler) GetInfo(w http.ResponseWriter, r *http.Request) {
 	// Calculate the duration since StartTime and round it to the nearest second for a cleaner output
 	elapsed := time.Since(h.StartTime).Round(time.Second)
 
+	oidcConfig := h.OIDC
+	if oidcConfig.Enabled && h.OIDCProvider != nil {
+		if authEndpoint, err := h.OIDCProvider.GetAuthEndpoint(r.Context()); err == nil && authEndpoint != "" {
+			oidcConfig.AuthEndpoint = authEndpoint
+		}
+	}
+
 	resp := InfoResponse{
 		ServiceName:  "SWCD MediaHub-API",
 		Version:      h.Version,
 		Uptime:       elapsed.String(), // Returns format like "1h5m30s"
 		ConversionTo: h.ConversionTo,
-		OIDC:         h.OIDC,
+		OIDC:         oidcConfig,
 		Features:     h.Features,
 	}
 

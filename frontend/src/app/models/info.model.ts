@@ -13,6 +13,7 @@ export interface AppInfo {
     oidc_issuer_url?: string;
     oidc_client_id?: string;
     oidc_redirect_url?: string;
+    oidc_auth_endpoint?: string;
   };
   features?: {
     audit_logs: boolean;
