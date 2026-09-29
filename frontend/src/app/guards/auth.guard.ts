@@ -51,12 +51,7 @@ export class AuthGuard implements CanActivate {
               oidc?.oidc_issuer_url &&
               oidc?.oidc_client_id
             ) {
-              const authEndpoint = `${oidc.oidc_issuer_url}/protocol/openid-connect/auth`;
-              const clientId = encodeURIComponent(oidc.oidc_client_id);
-              const redirectUri = encodeURIComponent(
-                oidc.oidc_redirect_url || `${window.location.origin}/auth/callback`
-              );
-              window.location.href = `${authEndpoint}?client_id=${clientId}&redirect_uri=${redirectUri}&response_type=code&scope=openid`;
+              this.authService.redirectToOidc(oidc);
               return false;
             }
 

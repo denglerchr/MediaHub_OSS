@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"strings"
 	"time"
 
 	"mediahub_oss/internal/media"
@@ -18,97 +19,172 @@ type ConversionProfile struct {
 	Args        []string
 }
 
-// ConvertFile transcodes a large file using pure disk-to-disk direct I/O.
-func (c *FfmpegConverter) ConvertFile(ctx context.Context, inputPath string, outputPath string, inputMimeType, targetMimeType string) error {
-	ffmpegPath, err := c.GetFFmpegPath()
-	if err != nil {
-		return fmt.Errorf("ffmpeg is not available: %w", err)
+// BuildImageFilter constructs the FFmpeg video filter (-vf) string for image resizing and scaling.
+// Supported fit modes:
+//   - "cut" (default when both width & height given): Preserves aspect ratio, scales to cover, crops overflow.
+//   - "stretch": Forces exact width & height, ignoring aspect ratio.
+//   - "pad-white": Preserves aspect ratio, fits within target dimensions, pads with white background.
+//   - "pad-black": Preserves aspect ratio, fits within target dimensions, pads with black background.
+// Single dimension scaling (width only or height only) scales proportionally preserving aspect ratio.
+func BuildImageFilter(width, height int, fit string) (string, error) {
+	if width < 0 || height < 0 {
+		return "", fmt.Errorf("width and height must be non-negative")
+	}
+	if width == 0 && height == 0 {
+		return "", nil
 	}
 
+	// Single dimension: proportional scaling preserving aspect ratio
+	if width > 0 && height == 0 {
+		return fmt.Sprintf("scale=w=%d:h=-1", width), nil
+	}
+	if width == 0 && height > 0 {
+		return fmt.Sprintf("scale=w=-1:h=%d", height), nil
+	}
+
+	// Both dimensions provided
+	switch strings.ToLower(strings.TrimSpace(fit)) {
+	case "cut", "":
+		return fmt.Sprintf("scale=w=%d:h=%d:force_original_aspect_ratio=increase,crop=%d:%d", width, height, width, height), nil
+	case "stretch":
+		return fmt.Sprintf("scale=w=%d:h=%d", width, height), nil
+	case "pad-white":
+		return fmt.Sprintf("scale=w=%d:h=%d:force_original_aspect_ratio=decrease,pad=w=%d:h=%d:x=(ow-iw)/2:y=(oh-ih)/2:color=white", width, height, width, height), nil
+	case "pad-black":
+		return fmt.Sprintf("scale=w=%d:h=%d:force_original_aspect_ratio=decrease,pad=w=%d:h=%d:x=(ow-iw)/2:y=(oh-ih)/2:color=black", width, height, width, height), nil
+	default:
+		return "", fmt.Errorf("unsupported fit mode: %s", fit)
+	}
+}
+
+// prepareConversion validates the conversion options and returns the normalized target MIME type
+// and the combined processing arguments (filters and format/codec flags).
+func (c *FfmpegConverter) prepareConversion(inputMimeType string, opts media.ConversionOptions) (string, []string, error) {
+	contentType, err := media.GetContentType(inputMimeType)
+	if err != nil {
+		return "", nil, fmt.Errorf("failed to determine content type: %w", err)
+	}
+
+	if contentType != "image" && (opts.Width > 0 || opts.Height > 0 || opts.Fit != "") {
+		return "", nil, fmt.Errorf("resolution and fit options are only supported for images, got content type: %s", contentType)
+	}
+
+	targetMimeType := opts.TargetMimeType
+	if targetMimeType == "" {
+		targetMimeType = inputMimeType
+	}
 	normTarget := media.NormalizeMimeType(targetMimeType)
 
-	// -y to overwrite existing output files automatically, -i to read direct from disk
-	args := []string{"-y", "-i", inputPath}
+	var filterArgs []string
+	if contentType == "image" && (opts.Width > 0 || opts.Height > 0) {
+		filter, err := BuildImageFilter(opts.Width, opts.Height, opts.Fit)
+		if err != nil {
+			return "", nil, err
+		}
+		if filter != "" {
+			filterArgs = []string{"-vf", filter}
+		}
+	}
 
-	// Get the required codec and format arguments (isStream = false)
 	formatArgs, err := c.buildConversionArgs(normTarget)
 	if err != nil {
-		return err
+		return "", nil, err
 	}
-	args = append(args, formatArgs...)
 
-	// Specify the final output path
-	args = append(args, outputPath)
+	conversionArgs := make([]string, 0, len(filterArgs)+len(formatArgs))
+	conversionArgs = append(conversionArgs, filterArgs...)
+	conversionArgs = append(conversionArgs, formatArgs...)
 
-	// Bind the FFmpeg process to the provided context to prevent zombie processes
+	return normTarget, conversionArgs, nil
+}
+
+// runFFmpegCommand executes an FFmpeg process with context and logs any failures with standard error output.
+func (c *FfmpegConverter) runFFmpegCommand(ctx context.Context, ffmpegPath string, args []string, logContext string, normTarget string) error {
 	cmd := exec.CommandContext(ctx, ffmpegPath, args...)
 
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 
 	if err := cmd.Run(); err != nil {
-		c.logger.Error("FFmpeg file conversion failed", "error", err, "stderr", stderr.String(), "target", targetMimeType)
+		c.logger.Error(logContext, "error", err, "stderr", stderr.String(), "target", normTarget)
 		return fmt.Errorf("ffmpeg conversion error: %w", err)
 	}
 
 	return nil
 }
 
-// ConvertStream transcodes small files in RAM, utilizing the HTTP loopback server for input
-// and an optimized OS-level temporary file for seekable output.
-func (c *FfmpegConverter) ConvertStream(ctx context.Context, inputData io.ReadSeeker, outputStream io.Writer, inputMimeType, targetMimeType string) error {
+// ConvertFile transcodes a large file using pure disk-to-disk direct I/O.
+func (c *FfmpegConverter) ConvertFile(ctx context.Context, inputPath string, outputPath string, inputMimeType string, opts media.ConversionOptions) error {
 	ffmpegPath, err := c.GetFFmpegPath()
 	if err != nil {
 		return fmt.Errorf("ffmpeg is not available: %w", err)
 	}
 
+	normTarget, conversionArgs, err := c.prepareConversion(inputMimeType, opts)
+	if err != nil {
+		return err
+	}
+
+	args := append([]string{"-y", "-i", inputPath}, conversionArgs...)
+	args = append(args, outputPath)
+
+	return c.runFFmpegCommand(ctx, ffmpegPath, args, "FFmpeg file conversion failed", normTarget)
+}
+
+// ConvertStreamToFile executes the stream conversion and returns an open *os.File to the resulting temporary file.
+// The caller is responsible for closing the returned file and removing it from disk.
+func (c *FfmpegConverter) ConvertStreamToFile(ctx context.Context, inputData io.ReadSeeker, inputMimeType string, opts media.ConversionOptions) (*os.File, error) {
+	ffmpegPath, err := c.GetFFmpegPath()
+	if err != nil {
+		return nil, fmt.Errorf("ffmpeg is not available: %w", err)
+	}
+
+	normTarget, conversionArgs, err := c.prepareConversion(inputMimeType, opts)
+	if err != nil {
+		return nil, err
+	}
+
 	// Register the stream with the local loopback server.
 	id, fullURL, err := c.localServer.Register(inputData, 30*time.Minute)
 	if err != nil {
-		return fmt.Errorf("failed to register stream: %w", err)
+		return nil, fmt.Errorf("failed to register stream: %w", err)
 	}
 	defer c.localServer.Unregister(id)
 
 	// Create the highly optimized temporary file to satisfy FFmpeg's need for a seekable output
 	tmpPath, err := createInMemoryFile("", "ffmpeg-output-*.tmp")
 	if err != nil {
-		return fmt.Errorf("failed to create temporary output file: %w", err)
+		return nil, fmt.Errorf("failed to create temporary output file: %w", err)
 	}
-	// Guarantee the file is deleted from RAM/Disk when this function exits
-	defer os.Remove(tmpPath)
 
-	normTarget := media.NormalizeMimeType(targetMimeType)
+	args := append([]string{"-y", "-i", fullURL}, conversionArgs...)
+	args = append(args, tmpPath)
 
-	// -y to automatically overwrite the temp file, -i to read from the loopback server
-	args := []string{"-y", "-i", fullURL}
+	if err := c.runFFmpegCommand(ctx, ffmpegPath, args, "FFmpeg stream conversion failed", normTarget); err != nil {
+		os.Remove(tmpPath)
+		return nil, err
+	}
 
-	// Get the required codec and format arguments.
-	formatArgs, err := c.buildConversionArgs(normTarget)
+	generatedFile, err := os.Open(tmpPath)
+	if err != nil {
+		os.Remove(tmpPath)
+		return nil, fmt.Errorf("failed to open generated temporary file: %w", err)
+	}
+
+	return generatedFile, nil
+}
+
+// ConvertStream transcodes small files in RAM, utilizing the HTTP loopback server for input
+// and streams the result directly into outputStream without Go heap buffering.
+func (c *FfmpegConverter) ConvertStream(ctx context.Context, inputData io.ReadSeeker, outputStream io.Writer, inputMimeType string, opts media.ConversionOptions) error {
+	generatedFile, err := c.ConvertStreamToFile(ctx, inputData, inputMimeType, opts)
 	if err != nil {
 		return err
 	}
-	args = append(args, formatArgs...)
-
-	// Point the output to our optimized temporary file
-	args = append(args, tmpPath)
-
-	// Bind the FFmpeg process to the provided context to prevent zombie processes
-	cmd := exec.CommandContext(ctx, ffmpegPath, args...)
-
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-
-	if err := cmd.Run(); err != nil {
-		c.logger.Error("FFmpeg stream conversion failed", "error", err, "stderr", stderr.String(), "target", targetMimeType)
-		return fmt.Errorf("ffmpeg conversion error: %w", err)
-	}
-
-	// FFmpeg successfully wrote the file. Open it so we can copy it to the user's requested io.Writer
-	generatedFile, err := os.Open(tmpPath)
-	if err != nil {
-		return fmt.Errorf("failed to open generated temporary file: %w", err)
-	}
-	defer generatedFile.Close()
+	defer func() {
+		generatedFile.Close()
+		os.Remove(generatedFile.Name())
+	}()
 
 	// Stream the data from our memory-backed file into the final output destination
 	if _, err := io.Copy(outputStream, generatedFile); err != nil {

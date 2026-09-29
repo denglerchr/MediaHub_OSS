@@ -191,6 +191,28 @@ export class EntryDetailModalComponent implements OnInit, OnDestroy {
     return field.id ?? field.name;
   }
 
+  hasCoordinate(val: any): boolean {
+    return (
+      val !== null &&
+      val !== undefined &&
+      typeof val === 'object' &&
+      typeof val.latitude === 'number' &&
+      typeof val.longitude === 'number' &&
+      !isNaN(val.latitude) &&
+      !isNaN(val.longitude)
+    );
+  }
+
+  formatCoordinate(val: any): string {
+    if (!this.hasCoordinate(val)) return 'N/A';
+    return `${val.latitude.toFixed(6)}, ${val.longitude.toFixed(6)}`;
+  }
+
+  getOpenStreetMapUrl(val: any): string {
+    if (!this.hasCoordinate(val)) return '#';
+    return `https://www.openstreetmap.org/?mlat=${val.latitude}&mlon=${val.longitude}#map=16/${val.latitude}/${val.longitude}`;
+  }
+
   private revokeFileObjectUrl(): void {
     if (this.currentObjectUrl) {
       URL.revokeObjectURL(this.currentObjectUrl);

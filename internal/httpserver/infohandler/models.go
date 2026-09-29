@@ -1,11 +1,17 @@
 package infohandler
 
 import (
+	"context"
 	"log/slog"
 	"time"
 
 	"mediahub_oss/internal/logging/audit"
 )
+
+// AuthEndpointProvider abstracts fetching the authorization endpoint for OIDC.
+type AuthEndpointProvider interface {
+	GetAuthEndpoint(ctx context.Context) (string, error)
+}
 
 // OIDCConfig represents the nested OIDC settings in the InfoResponse.
 type OIDCConfig struct {
@@ -14,6 +20,7 @@ type OIDCConfig struct {
 	IssuerURL         string `json:"oidc_issuer_url"`
 	ClientID          string `json:"oidc_client_id"`
 	RedirectURL       string `json:"oidc_redirect_url"`
+	AuthEndpoint      string `json:"oidc_auth_endpoint,omitempty"` //dynamically filled
 }
 
 // FeaturesConfig represents the nested features settings in the InfoResponse.
@@ -28,6 +35,7 @@ type InfoHandler struct {
 	StartTime    time.Time
 	ConversionTo map[string][]string
 	OIDC         OIDCConfig
+	OIDCProvider AuthEndpointProvider
 	Features     FeaturesConfig
 }
 

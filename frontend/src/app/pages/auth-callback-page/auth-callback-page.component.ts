@@ -23,6 +23,7 @@ export class AuthCallbackPageComponent implements OnInit {
     const error = queryParams.get('error');
     const errorDescription = queryParams.get('error_description');
     const code = queryParams.get('code');
+    const state = queryParams.get('state');
 
     if (error) {
       console.error('OIDC provider returned error:', error, errorDescription);
@@ -41,6 +42,22 @@ export class AuthCallbackPageComponent implements OnInit {
       return;
     }
 
+    // Validate CSRF state
+    const savedState = sessionStorage.getItem('oidc_state');
+    sessionStorage.removeItem('oidc_state');
+    if (!state || !savedState || state !== savedState) {
+      console.error('OIDC state verification failed: potential CSRF attack or expired state');
+      this.router.navigate(['/login'], {
+        queryParams: { error: 'sso_state_invalid' },
+        replaceUrl: true,
+      });
+      return;
+    }
+
+    // Retrieve PKCE code verifier
+    const codeVerifier = sessionStorage.getItem('oidc_code_verifier') || undefined;
+    sessionStorage.removeItem('oidc_code_verifier');
+
     this.appInfoService
       .loadInfo()
       .pipe(take(1))
@@ -49,7 +66,7 @@ export class AuthCallbackPageComponent implements OnInit {
           const redirectUri =
             info?.oidc?.oidc_redirect_url || `${window.location.origin}/auth/callback`;
 
-          this.authService.oidcLogin(code, redirectUri).subscribe({
+          this.authService.oidcLogin(code, redirectUri, codeVerifier).subscribe({
             next: () => {
               this.router.navigate(['/dashboard'], { replaceUrl: true });
             },

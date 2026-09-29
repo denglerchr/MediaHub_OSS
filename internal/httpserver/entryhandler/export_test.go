@@ -61,8 +61,8 @@ func TestExportEntries_IncludesMediaSpecificColumns(t *testing.T) {
 		Name:        "TestImageDB",
 		ContentType: "image",
 		CustomFields: []repo.CustomFieldDef{
-			{Name: "photographer", Type: "TEXT"},
-			{Name: "rating", Type: "INTEGER"},
+			{Name: "photographer", Type: repo.CustomFieldTypeText},
+			{Name: "rating", Type: repo.CustomFieldTypeInteger},
 		},
 	}
 

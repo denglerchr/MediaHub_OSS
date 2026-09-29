@@ -20,6 +20,12 @@ Administrators can manage users via the **User Management** section in the Web U
    * **Password**: User password (optional for pure API service accounts).
    * **Is Admin**: Superuser flag (grants unrestricted access across all databases).
 
+### Account Types *(New in v3.2)*
+MediaHub classifies accounts into three distinct types:
+* **Local Accounts (`local`)**: Created and authenticated directly in MediaHub using internal username/password pairs.
+* **Service Accounts (`service_account`)**: Dedicated accounts for machine ingestion and scripts; passwords are not used, and authentication relies strictly on scoped API keys.
+* **Single Sign-On Accounts (`oidc`)**: Accounts provisioned automatically when users log in via an external OpenID Connect provider. Permissions can be assigned to OIDC users just like local users.
+
 ---
 
 ## 🔑 Generating API Keys for Automated Scripts

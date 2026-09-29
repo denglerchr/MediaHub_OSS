@@ -70,7 +70,7 @@ func (am *AuthMiddleware) AuthMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
-		user, apiKey, err := am.authenticateRequest(schema, value)
+		user, apiKey, err := am.authenticateRequest(r.Context(), schema, value)
 		if err != nil {
 			log.Printf("Auth failure: %v", err)
 			utils.RespondWithError(w, http.StatusUnauthorized, "Unauthorized: Invalid credentials")
@@ -109,17 +109,17 @@ func (am *AuthMiddleware) extractAuthCredentials(r *http.Request) (string, strin
 	return "", "", fmt.Errorf("Unauthorized: Missing Authorization header or query token")
 }
 
-func (am *AuthMiddleware) authenticateRequest(schema, value string) (repository.User, repository.APIKey, error) {
+func (am *AuthMiddleware) authenticateRequest(ctx context.Context, schema, value string) (repository.User, repository.APIKey, error) {
 	switch schema {
 	case "Bearer":
 		if strings.HasPrefix(value, "srv_") {
-			user, apiKey, err := am.validateAPIKey(value)
+			user, apiKey, err := am.validateAPIKey(ctx, value)
 			return user, apiKey, err
 		}
-		user, err := am.validateJWT(value)
+		user, err := am.validateJWT(ctx, value)
 		return user, repository.APIKey{}, err
 	case "Basic":
-		user, err := am.validateBasicAuth(value)
+		user, err := am.validateBasicAuth(ctx, value)
 		return user, repository.APIKey{}, err
 	default:
 		return repository.User{}, repository.APIKey{}, fmt.Errorf("Unsupported scheme: %s", schema)

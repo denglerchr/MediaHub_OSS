@@ -10,13 +10,22 @@ import (
 	"time"
 )
 
+type colKind int
+
+const (
+	colKindStandardMedia colKind = iota
+	colKindCustomScalar
+	colKindCustomCoordLat
+	colKindCustomCoordLng
+)
+
 // entryScanner holds pre-allocated slices and pre-computed field names
 type entryScanner struct {
 	cols           []string
 	colVals        []any
 	columnPointers []any
 	cleanNames     []string // Pre-trimmed names for Custom/Media fields
-	isCustom       []bool   // True if the column is a custom field
+	colKinds       []colKind
 }
 
 // newEntryScanner initializes the scanner once per query result.
@@ -26,10 +35,17 @@ func newEntryScanner(rows *sql.Rows, customFields []repo.CustomFieldDef) (entryS
 		return entryScanner{}, err
 	}
 
-	// Create a map from column name "cf_X" to the actual custom field Name
-	cfMap := make(map[string]string)
+	scalarMap := make(map[string]string)
+	coordLatMap := make(map[string]string)
+	coordLngMap := make(map[string]string)
+
 	for _, cf := range customFields {
-		cfMap[fmt.Sprintf("%s%d", customFieldsPrefix, cf.ID)] = cf.Name
+		if cf.Type.IsCoordinate() {
+			coordLatMap[fmt.Sprintf("%s%d_lat", customFieldsPrefix, cf.ID)] = cf.Name
+			coordLngMap[fmt.Sprintf("%s%d_lng", customFieldsPrefix, cf.ID)] = cf.Name
+		} else {
+			scalarMap[fmt.Sprintf("%s%d", customFieldsPrefix, cf.ID)] = cf.Name
+		}
 	}
 
 	size := len(cols)
@@ -38,22 +54,26 @@ func newEntryScanner(rows *sql.Rows, customFields []repo.CustomFieldDef) (entryS
 		colVals:        make([]any, size),
 		columnPointers: make([]any, size),
 		cleanNames:     make([]string, size),
-		isCustom:       make([]bool, size),
+		colKinds:       make([]colKind, size),
 	}
 
 	for i, colName := range cols {
 		s.columnPointers[i] = &s.colVals[i]
 
-		// Pre-compute the prefix checks and string trims once!
-		if strings.HasPrefix(colName, customFieldsPrefix) {
-			s.isCustom[i] = true
-			if name, ok := cfMap[colName]; ok {
-				s.cleanNames[i] = name
-			} else {
-				s.cleanNames[i] = strings.TrimPrefix(colName, customFieldsPrefix)
-			}
+		if name, ok := coordLatMap[colName]; ok {
+			s.colKinds[i] = colKindCustomCoordLat
+			s.cleanNames[i] = name
+		} else if name, ok := coordLngMap[colName]; ok {
+			s.colKinds[i] = colKindCustomCoordLng
+			s.cleanNames[i] = name
+		} else if name, ok := scalarMap[colName]; ok {
+			s.colKinds[i] = colKindCustomScalar
+			s.cleanNames[i] = name
+		} else if strings.HasPrefix(colName, customFieldsPrefix) {
+			s.colKinds[i] = colKindCustomScalar
+			s.cleanNames[i] = strings.TrimPrefix(colName, customFieldsPrefix)
 		} else {
-			s.isCustom[i] = false
+			s.colKinds[i] = colKindStandardMedia
 			s.cleanNames[i] = colName
 		}
 	}
@@ -72,52 +92,107 @@ func (s entryScanner) scan(rows *sql.Rows) (repo.Entry, error) {
 		CustomFields: make(map[string]any),
 	}
 
+	var coordLats map[string]float64
+	var coordLngs map[string]float64
+	var coordHasLat map[string]bool
+	var coordHasLng map[string]bool
+
 	for i, colName := range s.cols {
 		val := s.colVals[i]
 		if val == nil {
 			continue
 		}
 
-		switch colName {
-		case "id":
-			entry.ID = asInt64(val)
-		case "timestamp":
-			tsMs := asInt64(val)
-			entry.Timestamp = time.UnixMilli(tsMs)
-		case "created_at":
-			tsMs := asInt64(val)
-			if tsMs > 0 {
-				entry.CreatedAt = time.UnixMilli(tsMs)
+		switch s.colKinds[i] {
+		case colKindCustomCoordLat:
+			if coordLats == nil {
+				coordLats = make(map[string]float64)
+				coordHasLat = make(map[string]bool)
 			}
-		case "updated_at":
-			tsMs := asInt64(val)
-			if tsMs > 0 {
-				entry.UpdatedAt = time.UnixMilli(tsMs)
+			coordLats[s.cleanNames[i]] = asFloat64(val)
+			coordHasLat[s.cleanNames[i]] = true
+		case colKindCustomCoordLng:
+			if coordLngs == nil {
+				coordLngs = make(map[string]float64)
+				coordHasLng = make(map[string]bool)
 			}
-		case "filesize":
-			entry.Size = uint64(asInt64(val))
-		case "preview_filesize":
-			entry.PreviewSize = uint64(asInt64(val))
-		case "filename":
-			entry.FileName = asString(val)
-		case "status":
-			entry.Status = repo.EntryStatus(asInt64(val))
-		case "mime_type":
-			entry.MimeType = asString(val)
-		default:
-			// We MUST convert []byte to string here to prevent Base64 JSON encoding!
+			coordLngs[s.cleanNames[i]] = asFloat64(val)
+			coordHasLng[s.cleanNames[i]] = true
+		case colKindCustomScalar:
 			if b, ok := val.([]byte); ok {
 				val = string(b)
 			}
-			if s.isCustom[i] {
-				entry.CustomFields[s.cleanNames[i]] = val
-			} else {
+			entry.CustomFields[s.cleanNames[i]] = val
+		default:
+			switch colName {
+			case "id":
+				entry.ID = asInt64(val)
+			case "timestamp":
+				tsMs := asInt64(val)
+				entry.Timestamp = time.UnixMilli(tsMs)
+			case "created_at":
+				tsMs := asInt64(val)
+				if tsMs > 0 {
+					entry.CreatedAt = time.UnixMilli(tsMs)
+				}
+			case "updated_at":
+				tsMs := asInt64(val)
+				if tsMs > 0 {
+					entry.UpdatedAt = time.UnixMilli(tsMs)
+				}
+			case "filesize":
+				entry.Size = uint64(asInt64(val))
+			case "preview_filesize":
+				entry.PreviewSize = uint64(asInt64(val))
+			case "filename":
+				entry.FileName = asString(val)
+			case "status":
+				entry.Status = repo.EntryStatus(asInt64(val))
+			case "mime_type":
+				entry.MimeType = asString(val)
+			default:
+				// We MUST convert []byte to string here to prevent Base64 JSON encoding!
+				if b, ok := val.([]byte); ok {
+					val = string(b)
+				}
 				entry.MediaFields[s.cleanNames[i]] = val
 			}
 		}
 	}
 
+	for name, hasLat := range coordHasLat {
+		if hasLat && coordHasLng[name] {
+			entry.CustomFields[name] = repo.Coordinate{
+				Latitude:  coordLats[name],
+				Longitude: coordLngs[name],
+			}
+		}
+	}
+
 	return entry, nil
+}
+
+func asFloat64(val any) float64 {
+	switch v := val.(type) {
+	case float64:
+		return v
+	case float32:
+		return float64(v)
+	case int64:
+		return float64(v)
+	case int:
+		return float64(v)
+	case int32:
+		return float64(v)
+	case []byte:
+		f, _ := strconv.ParseFloat(string(v), 64)
+		return f
+	case string:
+		f, _ := strconv.ParseFloat(v, 64)
+		return f
+	default:
+		return 0
+	}
 }
 
 // asInt64 is a safe type-assertion helper for SQLite integer scans
@@ -229,11 +304,50 @@ func (r *SQLiteRepository) validateAndFormatSearchField(field string, customFiel
 	// 3. Whitelist dynamically generated Custom Fields
 	for _, cf := range customFields {
 		if cf.Name == field {
+			if cf.Type.IsCoordinate() {
+				return "", fmt.Errorf("field '%s' is a coordinate field and cannot be used with scalar operators", field)
+			}
 			return fmt.Sprintf(`"%s%d"`, customFieldsPrefix, cf.ID), nil
 		}
 	}
 
 	return "", fmt.Errorf("field '%s' is not allowed or does not exist", field)
+}
+
+// mapCustomFieldsToSQLiteColumns maps entry custom fields into the target SQL column-data map.
+func mapCustomFieldsToSQLiteColumns(
+	customFields []repo.CustomFieldDef,
+	entryCustomFields map[string]any,
+	target map[string]any,
+) error {
+	cfMap := make(map[string]repo.CustomFieldDef, len(customFields)*3)
+	for _, cf := range customFields {
+		cfMap[cf.Name] = cf
+		cfMap[fmt.Sprintf("%s%d", customFieldsPrefix, cf.ID)] = cf
+		cfMap[fmt.Sprintf("%d", cf.ID)] = cf
+	}
+	for key, value := range entryCustomFields {
+		if cf, ok := cfMap[key]; ok {
+			if cf.Type.IsCoordinate() {
+				if value == nil {
+					target[fmt.Sprintf("%s%d_lat", customFieldsPrefix, cf.ID)] = nil
+					target[fmt.Sprintf("%s%d_lng", customFieldsPrefix, cf.ID)] = nil
+				} else {
+					coord, err := repo.ParseCoordinate(value)
+					if err != nil {
+						return fmt.Errorf("%w: %v", customerrors.ErrValidation, err)
+					}
+					target[fmt.Sprintf("%s%d_lat", customFieldsPrefix, cf.ID)] = coord.Latitude
+					target[fmt.Sprintf("%s%d_lng", customFieldsPrefix, cf.ID)] = coord.Longitude
+				}
+			} else {
+				target[fmt.Sprintf("%s%d", customFieldsPrefix, cf.ID)] = value
+			}
+		} else {
+			target[customFieldsPrefix+key] = value
+		}
+	}
+	return nil
 }
 
 // isValidOperator checks if the requested SQL operator is whitelisted.

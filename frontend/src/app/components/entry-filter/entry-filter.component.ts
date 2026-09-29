@@ -2,7 +2,7 @@ import { Component, Input, Output, EventEmitter, OnChanges, SimpleChanges, Chang
 import { FormBuilder, FormGroup, FormArray, Validators, AbstractControl } from '@angular/forms';
 import { Subject } from 'rxjs';
 import { takeUntil } from 'rxjs/operators';
-import { SearchFilter } from '../../models';
+import { SearchFilter, CustomFieldType } from '../../models';
 
 export interface FilterChangedEvent {
   filter: SearchFilter | undefined;
@@ -11,7 +11,7 @@ export interface FilterChangedEvent {
 
 export interface AvailableFilter {
   name: string;
-  type: 'TEXT' | 'INTEGER' | 'REAL' | 'BOOLEAN';
+  type: CustomFieldType;
 }
 
 @Component({
@@ -64,8 +64,16 @@ export class EntryFilterComponent implements OnInit, OnChanges, OnDestroy {
 
     formValue.customFilters.forEach((filter: any) => {
       // Only count custom filters that actually have a field and a value selected
-      if (filter.field && filter.value !== null && String(filter.value).trim() !== '') {
-        count++;
+      if (filter.field && filter.value !== null && filter.value !== undefined) {
+        if (typeof filter.value === 'object' && 'min_lat' in filter.value) {
+          const { min_lat, max_lat, min_lng, max_lng } = filter.value;
+          if (min_lat !== '' && max_lat !== '' && min_lng !== '' && max_lng !== '' &&
+              min_lat !== null && max_lat !== null && min_lng !== null && max_lng !== null) {
+            count++;
+          }
+        } else if (String(filter.value).trim() !== '') {
+          count++;
+        }
       }
     });
     
@@ -89,7 +97,7 @@ export class EntryFilterComponent implements OnInit, OnChanges, OnDestroy {
     const newGroup = this.fb.group({
       field: ['', Validators.required],
       operator: ['='],
-      value: ['', Validators.required]
+      value: this.fb.control<any>('', Validators.required)
     });
 
     newGroup.get('field')?.valueChanges.pipe(takeUntil(this.destroy$)).subscribe(() => {
@@ -100,6 +108,8 @@ export class EntryFilterComponent implements OnInit, OnChanges, OnDestroy {
       
       if (fieldType === 'BOOLEAN') {
         newGroup.get('value')?.setValue('true'); 
+      } else if (fieldType === 'COORDINATE') {
+        newGroup.get('value')?.setValue({ min_lat: '', max_lat: '', min_lng: '', max_lng: '' });
       } else {
         newGroup.get('value')?.setValue('');
       }
@@ -153,28 +163,60 @@ export class EntryFilterComponent implements OnInit, OnChanges, OnDestroy {
 
     // 2. Custom Filters
     formValue.customFilters.forEach((filter: any) => {
-      if (filter.field && filter.value !== null && String(filter.value).trim() !== '') {
+      if (filter.field && filter.value !== null && filter.value !== undefined) {
         const fieldDefinition = this.availableFilters.find(f => f.name === filter.field);
-        let filterValue: any = String(filter.value).trim();
+        let filterValue: any = filter.value;
 
         if (fieldDefinition) {
-          if (fieldDefinition.type === 'INTEGER' || fieldDefinition.type === 'REAL') {
-            const num = Number(filterValue);
-            if (!isNaN(num)) { filterValue = num; }
-          } else if (fieldDefinition.type === 'BOOLEAN') {
-            const lowerVal = filterValue.toLowerCase();
-            if (lowerVal === 'true' || lowerVal === '1') { filterValue = true; }
-            else if (lowerVal === 'false' || lowerVal === '0') { filterValue = false; }
-          } else if (fieldDefinition.type === 'TEXT' && filter.operator === 'LIKE') {
-            filterValue = `%${filterValue}%`;
+          if (fieldDefinition.type === 'COORDINATE' && filter.operator === 'in_box') {
+            if (filterValue && typeof filterValue === 'object') {
+              const { min_lat, max_lat, min_lng, max_lng } = filterValue;
+              if (min_lat !== '' && max_lat !== '' && min_lng !== '' && max_lng !== '' &&
+                  min_lat !== null && max_lat !== null && min_lng !== null && max_lng !== null) {
+                const numMinLat = Number(min_lat);
+                const numMaxLat = Number(max_lat);
+                const numMinLng = Number(min_lng);
+                const numMaxLng = Number(max_lng);
+                if (!isNaN(numMinLat) && !isNaN(numMaxLat) && !isNaN(numMinLng) && !isNaN(numMaxLng)) {
+                  filterValue = {
+                    min_lat: numMinLat,
+                    max_lat: numMaxLat,
+                    min_lng: numMinLng,
+                    max_lng: numMaxLng
+                  };
+                } else {
+                  filterValue = null;
+                }
+              } else {
+                filterValue = null;
+              }
+            } else {
+              filterValue = null;
+            }
+          } else {
+            filterValue = String(filterValue).trim();
+            if (filterValue === '') {
+              filterValue = null;
+            } else if (fieldDefinition.type === 'INTEGER' || fieldDefinition.type === 'REAL') {
+              const num = Number(filterValue);
+              if (!isNaN(num)) { filterValue = num; }
+            } else if (fieldDefinition.type === 'BOOLEAN') {
+              const lowerVal = filterValue.toLowerCase();
+              if (lowerVal === 'true' || lowerVal === '1') { filterValue = true; }
+              else if (lowerVal === 'false' || lowerVal === '0') { filterValue = false; }
+            } else if (fieldDefinition.type === 'TEXT' && filter.operator === 'LIKE') {
+              filterValue = `%${filterValue}%`;
+            }
           }
         }
         
-        conditions.push({
-          field: filter.field,
-          operator: filter.operator,
-          value: filterValue
-        });
+        if (filterValue !== null) {
+          conditions.push({
+            field: filter.field,
+            operator: filter.operator,
+            value: filterValue
+          });
+        }
       }
     });
 
@@ -201,9 +243,26 @@ export class EntryFilterComponent implements OnInit, OnChanges, OnDestroy {
         return ['=', '!='];
       case 'TEXT':
         return ['=', '!=', 'LIKE'];
+      case 'COORDINATE':
+        return ['in_box'];
       default:
         return ['=', '!='];
     }
+  }
+
+  getBboxCoord(index: number, key: 'min_lat' | 'max_lat' | 'min_lng' | 'max_lng'): any {
+    const val = this.customFilters.at(index)?.get('value')?.value;
+    return val && typeof val === 'object' && val[key] !== undefined ? val[key] : '';
+  }
+
+  setBboxCoord(index: number, key: 'min_lat' | 'max_lat' | 'min_lng' | 'max_lng', event: Event): void {
+    const input = event.target as HTMLInputElement;
+    const current = this.customFilters.at(index)?.get('value')?.value || {};
+    const updated = {
+      ...current,
+      [key]: input.value !== '' ? Number(input.value) : ''
+    };
+    this.customFilters.at(index)?.get('value')?.setValue(updated);
   }
 
   getSelectedFieldType(index: number): string | null {

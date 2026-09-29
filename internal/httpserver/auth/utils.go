@@ -16,7 +16,7 @@ import (
 )
 
 // validateJWT parses the token string, validates the signature, and retrieves the user.
-func (am *AuthMiddleware) validateJWT(tokenString string) (repository.User, error) {
+func (am *AuthMiddleware) validateJWT(ctx context.Context, tokenString string) (repository.User, error) {
 	token, err := jwt.Parse(tokenString, func(token *jwt.Token) (any, error) {
 		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
 			return repository.User{}, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
@@ -45,14 +45,14 @@ func (am *AuthMiddleware) validateJWT(tokenString string) (repository.User, erro
 		}
 
 		// Fetch fresh user data from DB to ensure they still exist / weren't banned
-		return am.Repo.GetUserByID(context.Background(), repository.ULID(userIDStr))
+		return am.Repo.GetUserByID(ctx, repository.ULID(userIDStr))
 	}
 
 	return repository.User{}, errors.New("invalid token claims")
 }
 
 // validateBasicAuth decodes base64 credentials and verifies the password hash.
-func (am *AuthMiddleware) validateBasicAuth(encodedValue string) (repository.User, error) {
+func (am *AuthMiddleware) validateBasicAuth(ctx context.Context, encodedValue string) (repository.User, error) {
 	decodedBytes, err := base64.StdEncoding.DecodeString(encodedValue)
 	if err != nil {
 		return repository.User{}, errors.New("invalid base64")
@@ -65,7 +65,7 @@ func (am *AuthMiddleware) validateBasicAuth(encodedValue string) (repository.Use
 
 	username, password := pair[0], pair[1]
 
-	user, err := am.Repo.GetUserByUsername(context.Background(), username)
+	user, err := am.Repo.GetUserByUsername(ctx, username)
 	if err != nil {
 		return repository.User{}, errors.New("user not found")
 	}
@@ -84,7 +84,7 @@ func (am *AuthMiddleware) validateBasicAuth(encodedValue string) (repository.Use
 }
 
 // validateAPIKey hashes the secret part of the token, queries the API key joined with the owner, and checks for expiry.
-func (am *AuthMiddleware) validateAPIKey(token string) (repository.User, repository.APIKey, error) {
+func (am *AuthMiddleware) validateAPIKey(ctx context.Context, token string) (repository.User, repository.APIKey, error) {
 	if len(token) <= 4 {
 		return repository.User{}, repository.APIKey{}, errors.New("invalid token length")
 	}
@@ -93,7 +93,7 @@ func (am *AuthMiddleware) validateAPIKey(token string) (repository.User, reposit
 	hashBytes := sha256.Sum256([]byte(secret))
 	keyHash := hex.EncodeToString(hashBytes[:])
 
-	key, user, err := am.Repo.GetAPIKeyWithOwnerByHash(context.Background(), keyHash)
+	key, user, err := am.Repo.GetAPIKeyWithOwnerByHash(ctx, keyHash)
 	if err != nil {
 		return repository.User{}, repository.APIKey{}, err
 	}

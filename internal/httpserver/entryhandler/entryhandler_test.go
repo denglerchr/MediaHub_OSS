@@ -183,3 +183,103 @@ func TestDeleteEntries_SuccessAndPartialSuccess(t *testing.T) {
 		t.Errorf("expected deleted_count 1, got %d", resp.DeletedCount)
 	}
 }
+
+func TestSearchEntries_CoordinateFilters(t *testing.T) {
+	r, _, handler, db := setupTestEnvironment(t)
+	defer r.Close()
+	ctx := context.Background()
+
+	addedField, err := r.AddCustomField(ctx, db.ID, repo.CustomFieldDef{
+		Name:      "location",
+		Type:      repo.CustomFieldTypeCoordinate,
+		IsIndexed: true,
+	})
+	if err != nil {
+		t.Fatalf("failed to add location field: %v", err)
+	}
+	db.CustomFields = append(db.CustomFields, addedField)
+
+	// Create entry with location
+	_, err = r.CreateEntry(ctx, db, repo.Entry{
+		FileName: "test.jpg",
+		MimeType: "image/jpeg",
+		Size:     100,
+		Status:   repo.EntryStatusReady,
+		MediaFields: map[string]any{"width": 800, "height": 600},
+		CustomFields: map[string]any{
+			"location": repo.Coordinate{Latitude: 48.137, Longitude: 11.576},
+		},
+	})
+	if err != nil {
+		t.Fatalf("failed to create entry: %v", err)
+	}
+
+	// 1. Valid in_box search matching
+	validSearch := map[string]any{
+		"filter": map[string]any{
+			"operator": "and",
+			"conditions": []map[string]any{
+				{
+					"field":    "location",
+					"operator": "in_box",
+					"value": map[string]any{
+						"min_lat": 48.0, "max_lat": 49.0,
+						"min_lng": 11.0, "max_lng": 12.0,
+					},
+				},
+			},
+		},
+		"pagination": map[string]any{"limit": 10},
+	}
+	bodyBytes, _ := json.Marshal(validSearch)
+	req := httptest.NewRequest(http.MethodPost, "/api/database/"+db.ID.String()+"/entries/search", bytes.NewReader(bodyBytes))
+	req.SetPathValue("database_id", db.ID.String())
+	req = req.WithContext(context.WithValue(req.Context(), utils.UserKey, &repo.User{Username: "admin", IsAdmin: true}))
+	w := httptest.NewRecorder()
+	handler.SearchEntries(w, req)
+	if w.Code != http.StatusOK {
+		t.Errorf("expected status 200 for valid in_box search, got %d: %s", w.Code, w.Body.String())
+	}
+
+	// 2. Invalid scalar operator on COORDINATE field -> 400
+	invalidOpSearch := map[string]any{
+		"filter": map[string]any{
+			"operator": "and",
+			"conditions": []map[string]any{
+				{
+					"field":    "location",
+					"operator": "=",
+					"value":    48.0,
+				},
+			},
+		},
+		"pagination": map[string]any{"limit": 10},
+	}
+	bodyBytes, _ = json.Marshal(invalidOpSearch)
+	req = httptest.NewRequest(http.MethodPost, "/api/database/"+db.ID.String()+"/entries/search", bytes.NewReader(bodyBytes))
+	req.SetPathValue("database_id", db.ID.String())
+	req = req.WithContext(context.WithValue(req.Context(), utils.UserKey, &repo.User{Username: "admin", IsAdmin: true}))
+	w = httptest.NewRecorder()
+	handler.SearchEntries(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected status 400 for scalar op on coordinate field, got %d", w.Code)
+	}
+
+	// 3. Sorting by COORDINATE field -> 400
+	sortCoordSearch := map[string]any{
+		"sort": map[string]any{
+			"field":     "location",
+			"direction": "asc",
+		},
+		"pagination": map[string]any{"limit": 10},
+	}
+	bodyBytes, _ = json.Marshal(sortCoordSearch)
+	req = httptest.NewRequest(http.MethodPost, "/api/database/"+db.ID.String()+"/entries/search", bytes.NewReader(bodyBytes))
+	req.SetPathValue("database_id", db.ID.String())
+	req = req.WithContext(context.WithValue(req.Context(), utils.UserKey, &repo.User{Username: "admin", IsAdmin: true}))
+	w = httptest.NewRecorder()
+	handler.SearchEntries(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected status 400 for sorting by coordinate field, got %d", w.Code)
+	}
+}

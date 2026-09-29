@@ -6,6 +6,7 @@ import { BehaviorSubject, Observable, of, throwError } from 'rxjs';
 import { catchError, map, switchMap, tap, finalize } from 'rxjs/operators';
 import { User, TokenResponse, ApiKey } from '../models';
 import { Router } from '@angular/router';
+import { generateRandomState, generateCodeVerifier, generateCodeChallenge } from '../utils/pkce.utils';
 
 /**
  * Manages user authentication using JWT (JSON Web Tokens).
@@ -83,6 +84,50 @@ export class AuthService {
         return throwError(() => err);
       })
     );
+  }
+
+  /**
+   * Generates PKCE challenge and CSRF state, stores them in sessionStorage,
+   * and navigates to the OIDC authorization endpoint.
+   */
+  async redirectToOidc(oidcConfig: {
+    oidc_issuer_url?: string;
+    oidc_client_id?: string;
+    oidc_redirect_url?: string;
+    oidc_auth_endpoint?: string;
+  }): Promise<void> {
+    if (!oidcConfig.oidc_issuer_url || !oidcConfig.oidc_client_id) {
+      throw new Error('OIDC configuration is missing issuer URL or client ID');
+    }
+
+    const authEndpoint =
+      oidcConfig.oidc_auth_endpoint ||
+      `${oidcConfig.oidc_issuer_url.replace(/\/+$/, '')}/protocol/openid-connect/auth`;
+
+    const state = generateRandomState();
+    sessionStorage.setItem('oidc_state', state);
+
+    const codeVerifier = generateCodeVerifier();
+    sessionStorage.setItem('oidc_code_verifier', codeVerifier);
+
+    const codeChallenge = await generateCodeChallenge(codeVerifier);
+
+    const clientId = encodeURIComponent(oidcConfig.oidc_client_id);
+    const redirectUri = encodeURIComponent(
+      oidcConfig.oidc_redirect_url || `${window.location.origin}/auth/callback`
+    );
+
+    const queryParams = [
+      `client_id=${clientId}`,
+      `redirect_uri=${redirectUri}`,
+      `response_type=code`,
+      `scope=${encodeURIComponent('openid profile email')}`,
+      `state=${encodeURIComponent(state)}`,
+      `code_challenge=${encodeURIComponent(codeChallenge)}`,
+      `code_challenge_method=S256`,
+    ].join('&');
+
+    window.location.href = `${authEndpoint}?${queryParams}`;
   }
 
 

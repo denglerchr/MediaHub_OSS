@@ -18,7 +18,6 @@ import (
 	"net/http"
 	"os"
 	"strconv"
-	"strings"
 	"time"
 )
 
@@ -44,24 +43,15 @@ import (
 // @Security BasicAuth
 // @Router /database/{database_id}/entry [post]
 func (h *EntryHandler) PostEntry(w http.ResponseWriter, r *http.Request) {
-
-	dbID := r.PathValue("database_id")
-	if dbID == "" {
-		utils.RespondWithError(w, http.StatusBadRequest, "Missing required path parameter: database_id")
+	dbID, ok := parseDatabasePathParam(w, r)
+	if !ok {
 		return
 	}
 
-	// Get user and db
 	user := utils.GetUserFromContext(r.Context())
 
-	db, err := h.Repo.GetDatabase(r.Context(), repo.ULID(dbID))
-	if err != nil {
-		if errors.Is(err, customerrors.ErrNotFound) {
-			utils.RespondWithError(w, http.StatusNotFound, "Database not found.")
-		} else {
-			h.Logger.Error("Failed to fetch database", "database_id", dbID, "error", err)
-			utils.RespondWithError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to fetch database. Error: %v", err))
-		}
+	db, ok := h.getDatabaseOrRespond(w, r, dbID)
+	if !ok {
 		return
 	}
 
@@ -144,7 +134,7 @@ func (h *EntryHandler) PostEntry(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Audit & Response
-	h.Auditor.Log(r.Context(), "entry.post", user.Username, fmt.Sprintf("%s:%d", dbID, responseObj.GetID()), map[string]any{"database_name": db.Name})
+	h.Auditor.Log(r.Context(), "entry.post", user.Username, entryResourceID(dbID, responseObj.GetID()), map[string]any{"database_name": db.Name})
 
 	utils.RespondWithJSON(w, status, responseObj)
 }
@@ -164,24 +154,15 @@ func (h *EntryHandler) PostEntry(w http.ResponseWriter, r *http.Request) {
 // @Security BasicAuth
 // @Router /database/{database_id}/entry/{id} [delete]
 func (h *EntryHandler) DeleteEntry(w http.ResponseWriter, r *http.Request) {
-
-	// 1. Validate Inputs
-	dbID := r.PathValue("database_id")
-	if dbID == "" {
-		utils.RespondWithError(w, http.StatusBadRequest, "Missing required path parameter: database_id")
-		return
-	}
-	idStr := r.PathValue("id")
-	id, err := strconv.ParseInt(idStr, 10, 64)
-	if err != nil {
-		utils.RespondWithError(w, http.StatusBadRequest, "Invalid ID format.")
+	dbID, id, ok := parseEntryPathParams(w, r)
+	if !ok {
 		return
 	}
 
 	user := utils.GetUserFromContext(r.Context())
 
-	// 2. Delete using the Safe 2-Phase Approach
-	_, err = shared.DeleteSafe(r.Context(), h.Repo, h.Storage, repo.ULID(dbID), id)
+	// Delete using the Safe 2-Phase Approach
+	_, err := shared.DeleteSafe(r.Context(), h.Repo, h.Storage, dbID, id)
 	if err != nil {
 		if errors.Is(err, customerrors.ErrNotFound) {
 			utils.RespondWithError(w, http.StatusNotFound, "Database or entry not found.")
@@ -192,30 +173,37 @@ func (h *EntryHandler) DeleteEntry(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 3. Audit & Response
-	h.Auditor.Log(r.Context(), "entry.delete", user.Username, fmt.Sprintf("%s:%d", dbID, id), nil)
+	// Audit & Response
+	h.Auditor.Log(r.Context(), "entry.delete", user.Username, entryResourceID(dbID, id), nil)
 
+	idStr := strconv.FormatInt(id, 10)
 	h.Logger.Info("Entry deleted", "id", idStr, "database_id", dbID)
 	utils.RespondWithJSON(w, http.StatusOK, utils.MessageResponse{Message: fmt.Sprintf("Entry '%s' from database '%s' was successfully deleted.", idStr, dbID)})
 }
 
-// @Summary Get an entry file
-// @Description Retrieves a raw entry file. Supports Content Negotiation (JSON vs Binary) and HTTP Range Requests (Streaming).
+// @Summary Download entry file or transformed derivative
+// @Description Retrieves the raw file or an on-the-fly transformed derivative. Supports Content Negotiation (JSON vs Binary), HTTP Range Requests (for raw files), and On-The-Fly Media Transformations.
 // @Tags entry
 // @Produce octet-stream
 // @Produce json
-// @Param   database_id  path    string  true  "Database ID"
-// @Param   id      path    int64   true  "Entry ID"
-// @Param   Range   header  string  false "Byte range request (e.g., bytes=0-1023)"
-// @Success 200 {file} file "The full raw file data (default)"
+// @Param   database_id   path      string  true   "Database ID"
+// @Param   id            path      int64   true   "Entry ID"
+// @Param   Range         header    string  false  "Byte range request (e.g., bytes=0-1023)"
+// @Param   format        query     string  false  "Desired output format / MIME type (e.g. webp, jpeg, opus)"
+// @Param   width         query     int     false  "Desired image width (> 0)"
+// @Param   height        query     int     false  "Desired image height (> 0)"
+// @Param   fit           query     string  false  "Scaling mode (cut, stretch, pad-white, pad-black)"
+// @Success 200 {file} file "The full raw or transformed file data (default)"
 // @Success 200 {object} FileJSONResponse "Base64 encoded file data (if Accept: application/json)"
-// @Success 206 {file} file "Partial content (streaming response)"
-// @Failure 400 {object} utils.ErrorResponse "Invalid request or ID format"
+// @Success 206 {file} file "Partial content (streaming response for untransformed files)"
+// @Failure 400 {object} utils.ErrorResponse "Invalid request, parameters, or unsupported conversion"
 // @Failure 401 {object} utils.ErrorResponse "Unauthorized"
 // @Failure 403 {object} utils.ErrorResponse "Forbidden"
 // @Failure 404 {object} utils.ErrorResponse "Database or entry not found"
 // @Failure 409 {object} utils.ErrorResponse "File is currently processing"
 // @Failure 416 {object} utils.ErrorResponse "Range Not Satisfiable"
+// @Failure 501 {object} utils.ErrorResponse "Transformation not implemented for video"
+// @Failure 503 {object} utils.ErrorResponse "Server busy (concurrency limit reached)"
 // @Failure 500 {object} utils.ErrorResponse "Internal server error"
 // @Header 200,206 {string} Accept-Ranges "bytes"
 // @Header 206 {string} Content-Range "bytes start-end/total"
@@ -223,29 +211,13 @@ func (h *EntryHandler) DeleteEntry(w http.ResponseWriter, r *http.Request) {
 // @Security BearerAuth
 // @Router /database/{database_id}/entry/{id}/file [get]
 func (h *EntryHandler) GetEntryFile(w http.ResponseWriter, r *http.Request) {
-	dbID := r.PathValue("database_id")
-	idStr := r.PathValue("id")
-	user := utils.GetUserFromContext(r.Context())
-
-	// 1. Validate Input
-	if dbID == "" {
-		utils.RespondWithError(w, http.StatusBadRequest, "Missing required path parameter: database_id")
-		return
-	}
-	id, err := strconv.ParseInt(idStr, 10, 64)
-	if err != nil {
-		utils.RespondWithError(w, http.StatusBadRequest, "Invalid ID format.")
+	dbID, id, ok := parseEntryPathParams(w, r)
+	if !ok {
 		return
 	}
 
-	// 2. Get Metadata (Crucial for File Size)
-	filemeta, err := h.Repo.GetEntry(r.Context(), repo.ULID(dbID), id)
-	if err != nil {
-		if errors.Is(err, customerrors.ErrNotFound) {
-			utils.RespondWithError(w, http.StatusNotFound, "Database or entry not found.")
-		} else {
-			utils.RespondWithError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to get entry metadata. Error: %v", err))
-		}
+	filemeta, ok := h.getEntryOrRespond(w, r, dbID, id)
+	if !ok {
 		return
 	}
 
@@ -255,97 +227,17 @@ func (h *EntryHandler) GetEntryFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Case A: JSON / Base64 Response
-	if strings.Contains(r.Header.Get("Accept"), "application/json") {
-		// Read full file (offset 0, length -1)
-		fileStream, err := h.Storage.Read(r.Context(), dbID, filemeta.ID, 0, -1)
-		if err != nil {
-			utils.RespondWithError(w, http.StatusNotFound, "File content not found.")
-			return
-		}
-		defer fileStream.Close()
-
-		if filemeta.FileName == "" {
-			filemeta.FileName = fmt.Sprintf("%d", id)
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		if err := writeJSONFileResponseStream(w, filemeta.FileName, filemeta.MimeType, filemeta.Size, fileStream); err != nil {
-			h.Logger.Error("Failed to stream JSON file to client", "entry", id, "error", err)
-		}
+	convOpts, needsConversion, ok := h.parseAndValidateTransform(w, r, dbID, filemeta)
+	if !ok {
 		return
 	}
 
-	// Determine Range (Streaming vs Full)
-	rangeHeader := r.Header.Get("Range")
-	fileSize := int64(filemeta.Size)
-
-	var offset int64 = 0
-	var length int64 = -1 // Read to end
-	isPartial := false
-
-	if rangeHeader != "" {
-		// Simple parser for "bytes=start-end"
-		ranges, err := parseRange(rangeHeader, fileSize)
-		if err != nil {
-			// 416 Range Not Satisfiable
-			w.Header().Set("Content-Range", fmt.Sprintf("bytes */%d", fileSize))
-			utils.RespondWithError(w, http.StatusRequestedRangeNotSatisfiable, "Invalid Range Header")
-			return
-		}
-
-		// We only support the first range requested (multipart ranges are rare for this use case)
-		if len(ranges) > 0 {
-			isPartial = true
-			offset = ranges[0].start
-			length = ranges[0].length
-		}
-	}
-
-	// 3. Open Stream (Partial or Full)
-	fileStream, err := h.Storage.Read(r.Context(), dbID, filemeta.ID, offset, length)
-	if err != nil {
-		utils.RespondWithError(w, http.StatusNotFound, "File content not found.")
+	if needsConversion {
+		h.serveTransformedEntryFile(w, r, dbID, filemeta, convOpts)
 		return
 	}
-	defer fileStream.Close()
 
-	// 4. Set Response Headers
-	w.Header().Set("Content-Type", filemeta.MimeType)
-	w.Header().Set("Accept-Ranges", "bytes") // Advertise support
-
-	if isPartial {
-		// Case B: 206 Partial Content
-		end := offset + length - 1
-		w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", offset, end, fileSize))
-		w.Header().Set("Content-Length", strconv.FormatInt(length, 10))
-
-		// Spec: "inline" allows playback
-		if filemeta.FileName != "" {
-			w.Header().Set("Content-Disposition", fmt.Sprintf("inline; filename=\"%s\"", filemeta.FileName))
-		}
-		w.WriteHeader(http.StatusPartialContent)
-
-	} else {
-		// Case C: 200 OK (Full Download)
-		w.Header().Set("Content-Length", strconv.FormatInt(fileSize, 10))
-
-		if filemeta.FileName != "" {
-			w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"", filemeta.FileName))
-		}
-		w.WriteHeader(http.StatusOK)
-	}
-
-	// Auditor logging
-	h.Auditor.Log(r.Context(), "entry.download", user.Username, fmt.Sprintf("%s:%d", dbID, id), nil)
-
-	// 5. Stream Data
-	_, err = io.Copy(w, fileStream)
-	if err != nil {
-		// Stream interrupted
-		return
-	}
+	h.serveStoredEntryFile(w, r, dbID, filemeta)
 }
 
 // @Summary Get entry metadata
@@ -362,45 +254,22 @@ func (h *EntryHandler) GetEntryFile(w http.ResponseWriter, r *http.Request) {
 // @Security BasicAuth
 // @Router /database/{database_id}/entry/{id} [get]
 func (h *EntryHandler) GetEntryMeta(w http.ResponseWriter, r *http.Request) {
-	dbID := r.PathValue("database_id")
-	idStr := r.PathValue("id")
-	user := utils.GetUserFromContext(r.Context())
-
-	// 1. Validate Input
-	if dbID == "" {
-		utils.RespondWithError(w, http.StatusBadRequest, "Missing required path parameter: database_id")
-		return
-	}
-	id, err := strconv.ParseInt(idStr, 10, 64)
-	if err != nil {
-		utils.RespondWithError(w, http.StatusBadRequest, "Invalid ID format.")
+	dbID, id, ok := parseEntryPathParams(w, r)
+	if !ok {
 		return
 	}
 
-	// 2. Get Metadata from Database
-	filemeta, err := h.Repo.GetEntry(r.Context(), repo.ULID(dbID), id)
-	if err != nil {
-		if errors.Is(err, customerrors.ErrNotFound) {
-			utils.RespondWithError(w, http.StatusNotFound, "Database or entry not found.")
-		} else {
-			h.Logger.Error("Failed to get entry metadata", "entry", id, "error", err)
-			utils.RespondWithError(w, http.StatusInternalServerError, "Failed to get entry metadata.")
-		}
+	filemeta, ok := h.getEntryOrRespond(w, r, dbID, id)
+	if !ok {
 		return
 	}
 
-	// 3. Map to API Response Model!
 	responseObject := mapToEntryResponse(dbID, filemeta)
+	setNoCacheHeaders(w)
 
-	// 4. Set anti-caching headers before sending the JSON
-	w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
-	w.Header().Set("Pragma", "no-cache")
-	w.Header().Set("Expires", "0")
+	user := utils.GetUserFromContext(r.Context())
+	h.Auditor.Log(r.Context(), "entry.read_meta", user.Username, entryResourceID(dbID, id), nil)
 
-	// 5. Auditor logging
-	h.Auditor.Log(r.Context(), "entry.read_meta", user.Username, fmt.Sprintf("%s:%d", dbID, id), nil)
-
-	// 6. Return the mapped response
 	utils.RespondWithJSON(w, http.StatusOK, responseObject)
 }
 
@@ -421,46 +290,26 @@ func (h *EntryHandler) GetEntryMeta(w http.ResponseWriter, r *http.Request) {
 // @Security BasicAuth
 // @Router /database/{database_id}/entry/{id}/preview [get]
 func (h *EntryHandler) GetEntryPreview(w http.ResponseWriter, r *http.Request) {
-	dbID := r.PathValue("database_id")
-	idStr := r.PathValue("id")
-
-	// 1. Validate Input
-	if dbID == "" {
-		utils.RespondWithError(w, http.StatusBadRequest, "Missing required path parameter: database_id")
-		return
-	}
-	id, err := strconv.ParseInt(idStr, 10, 64)
-	if err != nil {
-		utils.RespondWithError(w, http.StatusBadRequest, "Invalid ID format.")
+	dbID, id, ok := parseEntryPathParams(w, r)
+	if !ok {
 		return
 	}
 
-	// 2. Read the preview file from storage
-	ioReader, err := h.Storage.ReadPreview(r.Context(), dbID, id)
+	ioReader, err := h.Storage.ReadPreview(r.Context(), dbID.String(), id)
 	if err != nil {
 		utils.RespondWithError(w, http.StatusNotFound, "Preview not found")
 		return
 	}
 	defer ioReader.Close()
 
-	// 3. Set anti-caching headers (Prevents stale previews)
-	w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
-	w.Header().Set("Pragma", "no-cache")
-	w.Header().Set("Expires", "0")
+	setNoCacheHeaders(w)
 
-	// 4. Content Negotiation: Check if the client specifically requested JSON
-	acceptHeader := r.Header.Get("Accept")
-	if strings.Contains(acceptHeader, "application/json") {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
+	if wantsJSONResponse(r) {
 		filename := fmt.Sprintf("%d_preview.webp", id)
-		if err := writeJSONFileResponseStream(w, filename, "image/webp", 0, ioReader); err != nil {
-			h.Logger.Error("Failed to stream JSON preview to client", "entry", id, "error", err)
-		}
+		h.serveJSONFileStream(w, id, filename, "image/webp", 0, ioReader)
 		return
 	}
 
-	// 5. Default Response: Stream the raw binary image
 	w.Header().Set("Content-Type", "image/webp")
 	w.WriteHeader(http.StatusOK)
 
@@ -486,23 +335,13 @@ func (h *EntryHandler) GetEntryPreview(w http.ResponseWriter, r *http.Request) {
 // @Security BasicAuth
 // @Router /database/{database_id}/entry/{id} [patch]
 func (h *EntryHandler) PatchEntry(w http.ResponseWriter, r *http.Request) {
-	dbID := r.PathValue("database_id")
-	idStr := r.PathValue("id")
-
-	// 1. Validate Path Parameters
-	if dbID == "" {
-		utils.RespondWithError(w, http.StatusBadRequest, "Missing required path parameter: database_id")
-		return
-	}
-	id, err := strconv.ParseInt(idStr, 10, 64)
-	if err != nil {
-		utils.RespondWithError(w, http.StatusBadRequest, "Invalid ID format.")
+	dbID, id, ok := parseEntryPathParams(w, r)
+	if !ok {
 		return
 	}
 
 	user := utils.GetUserFromContext(r.Context())
 
-	// 2. Decode the PATCH Request Body
 	var req = PostPatchEntryRequest{
 		FileName:     "",
 		Timestamp:    math.MinInt64,
@@ -515,49 +354,27 @@ func (h *EntryHandler) PatchEntry(w http.ResponseWriter, r *http.Request) {
 	}
 	defer r.Body.Close()
 
-	// 3. Fetch the Existing Entry and Database
-	db, err := h.Repo.GetDatabase(r.Context(), repo.ULID(dbID))
-	if err != nil {
-		if errors.Is(err, customerrors.ErrRepoUnavailable) {
-			utils.RespondWithError(w, http.StatusInternalServerError, "Connection to repository failed.")
-			h.Logger.Error("Failed to connect to repository", "error", err)
-			return
-		} else if errors.Is(err, customerrors.ErrNotFound) {
-			utils.RespondWithError(w, http.StatusNotFound, fmt.Sprintf("Database with ID %s does not exist.", dbID))
-			return
-		} else {
-			utils.RespondWithError(w, http.StatusInternalServerError, fmt.Sprintf("Error fetching database: %v", err))
-			h.Logger.Error("Failed to fetch database for update", "database_id", dbID, "error", err)
-			return
-		}
-	}
-
-	existingEntry, err := h.Repo.GetEntry(r.Context(), repo.ULID(dbID), id)
-	if err != nil {
-		if errors.Is(err, customerrors.ErrNotFound) {
-			utils.RespondWithError(w, http.StatusNotFound, "Database or entry not found.")
-		} else {
-			h.Logger.Error("Failed to fetch entry for update", "entry", id, "error", err)
-			utils.RespondWithError(w, http.StatusInternalServerError, "Failed to retrieve entry.")
-		}
+	db, ok := h.getDatabaseOrRespond(w, r, dbID)
+	if !ok {
 		return
 	}
 
-	// 4. Apply Updates Safely (Ignoring Go zero-values)
+	existingEntry, ok := h.getEntryOrRespond(w, r, dbID, id)
+	if !ok {
+		return
+	}
 
-	// Only update if the string is not empty
+	// Apply Updates Safely (Ignoring Go zero-values)
 	if req.FileName != "" {
 		existingEntry.FileName = req.FileName
 	}
 
-	// Only update the timestamp if it was provided
 	if req.Timestamp != math.MinInt64 {
 		existingEntry.Timestamp = time.UnixMilli(req.Timestamp)
 	}
 
-	// Merge Custom Fields after validation
 	if req.CustomFields != nil {
-		err = validateCustomFields(req.CustomFields, db.CustomFields)
+		err := validateCustomFields(req.CustomFields, db.CustomFields)
 		if err != nil {
 			utils.RespondWithError(w, http.StatusBadRequest, "Error during custom field validation: "+err.Error())
 			return
@@ -571,18 +388,15 @@ func (h *EntryHandler) PatchEntry(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// 5. Save the Updated Entry back to the Database
-	updatedEntry, err := h.Repo.UpdateEntry(r.Context(), repo.ULID(dbID), existingEntry)
+	updatedEntry, err := h.Repo.UpdateEntry(r.Context(), dbID, existingEntry)
 	if err != nil {
 		h.Logger.Error("Failed to update entry metadata", "entry", id, "error", err)
 		utils.RespondWithError(w, http.StatusInternalServerError, "Failed to apply updates to database.")
 		return
 	}
 
-	// 6. Audit Logging
-	h.Auditor.Log(r.Context(), "entry.update", user.Username, fmt.Sprintf("%s:%d", dbID, id), nil)
+	h.Auditor.Log(r.Context(), "entry.update", user.Username, entryResourceID(dbID, id), nil)
 
-	// 7. Map to API Response Model and Return
 	responseObject := mapToEntryResponse(dbID, updatedEntry)
 	utils.RespondWithJSON(w, http.StatusOK, responseObject)
 }
@@ -604,8 +418,11 @@ func (h *EntryHandler) PatchEntry(w http.ResponseWriter, r *http.Request) {
 // @Router /database/{database_id}/entries/delete [post]
 func (h *EntryHandler) DeleteEntries(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	dbID := r.PathValue("database_id")
-	user := utils.GetUserFromContext(r.Context())
+	dbID, ok := parseDatabasePathParam(w, r)
+	if !ok {
+		return
+	}
+	user := utils.GetUserFromContext(ctx)
 
 	var req BulkDeleteRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || len(req.IDs) == 0 {
@@ -614,7 +431,7 @@ func (h *EntryHandler) DeleteEntries(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 2. Delete the files and entries
-	deletedMeta, err := shared.DeleteMultipleSafe(ctx, h.Repo, h.Storage, repo.ULID(dbID), req.IDs)
+	deletedMeta, err := shared.DeleteMultipleSafe(ctx, h.Repo, h.Storage, dbID, req.IDs)
 
 	// 3. Calculate disk space freed
 	var spaceFreed uint64 = 0
@@ -631,7 +448,7 @@ func (h *EntryHandler) DeleteEntries(w http.ResponseWriter, r *http.Request) {
 
 	// 4. Respond
 	resp := BulkDeleteResponse{
-		DatabaseID:      dbID,
+		DatabaseID:      dbID.String(),
 		DeletedCount:    deletedCount,
 		SpaceFreedBytes: spaceFreed,
 		Message:         fmt.Sprintf("Successfully deleted %d entries.", deletedCount),
@@ -648,7 +465,7 @@ func (h *EntryHandler) DeleteEntries(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	h.Auditor.Log(r.Context(), "entries.delete", user.Username, dbID, map[string]any{"count": deletedCount})
+	h.Auditor.Log(ctx, "entries.delete", user.Username, dbID.String(), map[string]any{"count": deletedCount})
 	utils.RespondWithJSON(w, status, resp)
 }
 
@@ -673,7 +490,10 @@ func (h *EntryHandler) DeleteEntries(w http.ResponseWriter, r *http.Request) {
 // @Security BasicAuth
 // @Router /database/{database_id}/entries [get]
 func (h *EntryHandler) QueryEntries(w http.ResponseWriter, r *http.Request) {
-	dbID := r.PathValue("database_id")
+	dbID, ok := parseDatabasePathParam(w, r)
+	if !ok {
+		return
+	}
 
 	user := utils.GetUserFromContext(r.Context())
 
@@ -725,20 +545,16 @@ func (h *EntryHandler) QueryEntries(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	entries, err := h.Repo.GetEntries(r.Context(), repo.ULID(dbID), opts)
+	entries, err := h.Repo.GetEntries(r.Context(), dbID, opts)
 	if err != nil {
 		h.Logger.Error("Failed to query entries", "error", err)
 		utils.RespondWithError(w, http.StatusInternalServerError, "Failed to retrieve entries")
 		return
 	}
 
-	// Map DB models to API responses
-	results := make([]EntryResponse, 0, len(entries))
-	for _, entry := range entries {
-		results = append(results, mapToEntryResponse(dbID, entry))
-	}
+	results := mapEntriesToResponses(dbID, entries)
 
-	h.Auditor.Log(r.Context(), "entries.query", user.Username, dbID, nil)
+	h.Auditor.Log(r.Context(), "entries.query", user.Username, dbID.String(), nil)
 	utils.RespondWithJSON(w, http.StatusOK, results)
 }
 
@@ -758,7 +574,10 @@ func (h *EntryHandler) QueryEntries(w http.ResponseWriter, r *http.Request) {
 // @Security BasicAuth
 // @Router /database/{database_id}/entries/search [post]
 func (h *EntryHandler) SearchEntries(w http.ResponseWriter, r *http.Request) {
-	dbID := r.PathValue("database_id")
+	dbID, ok := parseDatabasePathParam(w, r)
+	if !ok {
+		return
+	}
 
 	user := utils.GetUserFromContext(r.Context())
 
@@ -768,15 +587,13 @@ func (h *EntryHandler) SearchEntries(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Fetch database to get custom fields for query validation
-	db, err := h.Repo.GetDatabase(r.Context(), repo.ULID(dbID))
-	if err != nil {
-		utils.RespondWithError(w, http.StatusNotFound, "Database not found.")
+	db, ok := h.getDatabaseOrRespond(w, r, dbID)
+	if !ok {
 		return
 	}
 
 	searchReq := searchPayload.toModel()
-	entries, err := h.Repo.SearchEntries(r.Context(), repo.ULID(dbID), searchReq, db.CustomFields)
+	entries, err := h.Repo.SearchEntries(r.Context(), dbID, searchReq, db.CustomFields)
 	if err != nil {
 		if errors.Is(err, customerrors.ErrValidation) {
 			utils.RespondWithError(w, http.StatusBadRequest, err.Error())
@@ -787,13 +604,9 @@ func (h *EntryHandler) SearchEntries(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Map DB models to API responses
-	results := make([]EntryResponse, 0, len(entries))
-	for _, entry := range entries {
-		results = append(results, mapToEntryResponse(dbID, entry))
-	}
+	results := mapEntriesToResponses(dbID, entries)
 
-	h.Auditor.Log(r.Context(), "entries.search", user.Username, dbID, nil)
+	h.Auditor.Log(r.Context(), "entries.search", user.Username, dbID.String(), nil)
 	utils.RespondWithJSON(w, http.StatusOK, results)
 }
 
@@ -813,7 +626,10 @@ func (h *EntryHandler) SearchEntries(w http.ResponseWriter, r *http.Request) {
 // @Security BasicAuth
 // @Router /database/{database_id}/entries/export [post]
 func (h *EntryHandler) ExportEntries(w http.ResponseWriter, r *http.Request) {
-	dbID := r.PathValue("database_id")
+	dbID, ok := parseDatabasePathParam(w, r)
+	if !ok {
+		return
+	}
 
 	user := utils.GetUserFromContext(r.Context())
 
@@ -823,10 +639,8 @@ func (h *EntryHandler) ExportEntries(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Verify database existence and fetch custom fields
-	db, err := h.Repo.GetDatabase(r.Context(), repo.ULID(dbID))
-	if err != nil {
-		utils.RespondWithError(w, http.StatusNotFound, "Database not found")
+	db, ok := h.getDatabaseOrRespond(w, r, dbID)
+	if !ok {
 		return
 	}
 
@@ -870,7 +684,7 @@ func (h *EntryHandler) ExportEntries(w http.ResponseWriter, r *http.Request) {
 		// Pass 1: Fetch metadata and write all CSV rows
 		for _, id := range req.IDs {
 			// Fetch metadata
-			entry, err := h.Repo.GetEntry(r.Context(), repo.ULID(dbID), id)
+			entry, err := h.Repo.GetEntry(r.Context(), dbID, id)
 			if err != nil {
 				h.Logger.Warn("Skipping entry in export (not found)", "id", id)
 				continue
@@ -904,6 +718,12 @@ func (h *EntryHandler) ExportEntries(w http.ResponseWriter, r *http.Request) {
 				val, exists := entry.CustomFields[cf.Name]
 				if !exists || val == nil {
 					row = append(row, "") // Empty column if no value
+				} else if cf.Type.IsCoordinate() {
+					if coord, err := repo.ParseCoordinate(val); err == nil {
+						row = append(row, fmt.Sprintf("%v, %v", coord.Latitude, coord.Longitude))
+					} else {
+						row = append(row, fmt.Sprintf("%v", val))
+					}
 				} else {
 					row = append(row, fmt.Sprintf("%v", val))
 				}
@@ -918,12 +738,11 @@ func (h *EntryHandler) ExportEntries(w http.ResponseWriter, r *http.Request) {
 			h.Logger.Error("Failed to flush CSV", "error", err)
 		}
 
-		// Pass 2: Stream the files into the ZIP
 		// Pass 2: Stream the files and previews into the ZIP
 		for _, entry := range validEntries {
 			// --- 1. Stream the Main File ---
 			// Fetch file stream from storage
-			fileStream, err := h.Storage.Read(r.Context(), dbID, entry.ID, 0, -1)
+			fileStream, err := h.Storage.Read(r.Context(), dbID.String(), entry.ID, 0, -1)
 			if err != nil {
 				h.Logger.Warn("Failed to read file from storage for export", "id", entry.ID, "error", err)
 				continue // If the main file fails, we skip this entry entirely
@@ -945,7 +764,7 @@ func (h *EntryHandler) ExportEntries(w http.ResponseWriter, r *http.Request) {
 			// --- 2. Stream the Preview File (if it exists) ---
 			// We use the database metadata to quickly check if a preview was generated
 			if entry.PreviewSize > 0 {
-				previewStream, err := h.Storage.ReadPreview(r.Context(), dbID, entry.ID)
+				previewStream, err := h.Storage.ReadPreview(r.Context(), dbID.String(), entry.ID)
 				if err != nil {
 					h.Logger.Warn("Failed to read preview from storage for export", "id", entry.ID, "error", err)
 				} else {
@@ -964,7 +783,7 @@ func (h *EntryHandler) ExportEntries(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
-	h.Auditor.Log(r.Context(), "entries.export", user.Username, dbID, map[string]any{"count": len(req.IDs)})
+	h.Auditor.Log(r.Context(), "entries.export", user.Username, dbID.String(), map[string]any{"count": len(req.IDs)})
 
 	// Stream the pipe reader directly to the response writer
 	if _, err := io.Copy(w, pr); err != nil {
@@ -991,17 +810,14 @@ func (h *EntryHandler) ExportEntries(w http.ResponseWriter, r *http.Request) {
 // @Security BasicAuth
 // @Router /database/{database_id}/entries/import [post]
 func (h *EntryHandler) ImportEntries(w http.ResponseWriter, r *http.Request) {
-	dbID := r.PathValue("database_id")
-	user := utils.GetUserFromContext(r.Context())
-
-	// 1. Validate Database
-	if dbID == "" {
-		utils.RespondWithError(w, http.StatusBadRequest, "Missing required path parameter: database_id")
+	dbID, ok := parseDatabasePathParam(w, r)
+	if !ok {
 		return
 	}
-	db, err := h.Repo.GetDatabase(r.Context(), repo.ULID(dbID))
-	if err != nil {
-		utils.RespondWithError(w, http.StatusNotFound, "Database not found.")
+	user := utils.GetUserFromContext(r.Context())
+
+	db, ok := h.getDatabaseOrRespond(w, r, dbID)
+	if !ok {
 		return
 	}
 
@@ -1096,10 +912,10 @@ func (h *EntryHandler) ImportEntries(w http.ResponseWriter, r *http.Request) {
 	go h.processImportJob(context.Background(), db, user.Username, tempFilePath, importConfig)
 
 	// 7. Audit & Response
-	h.Auditor.Log(r.Context(), "entries.import", user.Username, dbID, map[string]any{"mode": importConfig.Mode})
+	h.Auditor.Log(r.Context(), "entries.import", user.Username, dbID.String(), map[string]any{"mode": importConfig.Mode})
 
 	resp := ImportResponse{
-		DatabaseID: dbID,
+		DatabaseID: dbID.String(),
 		Message:    "Import job started successfully. The archive is being processed in the background.",
 	}
 	utils.RespondWithJSON(w, http.StatusAccepted, resp)

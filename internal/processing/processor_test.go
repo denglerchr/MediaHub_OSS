@@ -36,17 +36,37 @@ func (m *testMockConverter) GetOutputMimeTypes(contentType string) []string {
 func (m *testMockConverter) CanCreatePreview(inputMimeType string) bool {
 	return true
 }
-func (m *testMockConverter) CanConvert(inputMimeType, outputMimeType string) media.ConversionCheck {
+func (m *testMockConverter) CanConvert(inputMimeType string, opts media.ConversionOptions) media.ConversionCheck {
 	return m.canConvertCheck
 }
-func (m *testMockConverter) ConvertStream(ctx context.Context, inputData io.ReadSeeker, outputStream io.Writer, inputMimeType, targetMimeType string) error {
+func (m *testMockConverter) ConvertStream(ctx context.Context, inputData io.ReadSeeker, outputStream io.Writer, inputMimeType string, opts media.ConversionOptions) error {
 	if m.convertStreamErr != nil {
 		return m.convertStreamErr
 	}
 	_, err := io.Copy(outputStream, inputData)
 	return err
 }
-func (m *testMockConverter) ConvertFile(ctx context.Context, inputPath string, outputPath string, inputMimeType, targetMimeType string) error {
+func (m *testMockConverter) ConvertStreamToFile(ctx context.Context, inputData io.ReadSeeker, inputMimeType string, opts media.ConversionOptions) (*os.File, error) {
+	if m.convertStreamErr != nil {
+		return nil, m.convertStreamErr
+	}
+	tmp, err := os.CreateTemp("", "mock-stream-*.tmp")
+	if err != nil {
+		return nil, err
+	}
+	if _, err := io.Copy(tmp, inputData); err != nil {
+		tmp.Close()
+		os.Remove(tmp.Name())
+		return nil, err
+	}
+	if _, err := tmp.Seek(0, io.SeekStart); err != nil {
+		tmp.Close()
+		os.Remove(tmp.Name())
+		return nil, err
+	}
+	return tmp, nil
+}
+func (m *testMockConverter) ConvertFile(ctx context.Context, inputPath string, outputPath string, inputMimeType string, opts media.ConversionOptions) error {
 	if m.convertFileErr != nil {
 		return m.convertFileErr
 	}
@@ -280,3 +300,95 @@ func TestGenerateAndStorePreview_StorageErrorDoesNotHang(t *testing.T) {
 		t.Fatal("generateAndStorePreview hung indefinitely due to unclosed pipe reader")
 	}
 }
+
+func TestProcessor_ConvertStream_Success(t *testing.T) {
+	conv := &testMockConverter{}
+	proc, r, _ := setupTestProcessor(t, conv, nil)
+	defer r.Close()
+
+	input := strings.NewReader("original image data")
+	opts := media.ConversionOptions{
+		TargetMimeType: "image/webp",
+		Width:          800,
+		Height:         480,
+		Fit:            "cut",
+	}
+
+	stream, size, err := proc.ConvertStream(context.Background(), input, "image/jpeg", opts)
+	if err != nil {
+		t.Fatalf("unexpected error from ConvertStream: %v", err)
+	}
+	defer stream.Close()
+
+	outBytes, err := io.ReadAll(stream)
+	if err != nil {
+		t.Fatalf("failed to read converted output: %v", err)
+	}
+	if string(outBytes) != "original image data" {
+		t.Errorf("expected %q, got %q", "original image data", string(outBytes))
+	}
+	if size != int64(len("original image data")) {
+		t.Errorf("expected size %d, got %d", len("original image data"), size)
+	}
+}
+
+func TestProcessor_ConvertStream_NonSeekerInput(t *testing.T) {
+	conv := &testMockConverter{}
+	proc, r, _ := setupTestProcessor(t, conv, nil)
+	defer r.Close()
+
+	// io.NopCloser hides the ReadSeeker interface from strings.NewReader
+	plainReader := io.NopCloser(strings.NewReader("streamed data"))
+	opts := media.ConversionOptions{TargetMimeType: "image/webp"}
+
+	stream, size, err := proc.ConvertStream(context.Background(), plainReader, "image/jpeg", opts)
+	if err != nil {
+		t.Fatalf("unexpected error from ConvertStream with non-seeker: %v", err)
+	}
+	defer stream.Close()
+
+	outBytes, err := io.ReadAll(stream)
+	if err != nil {
+		t.Fatalf("failed to read converted output: %v", err)
+	}
+	if string(outBytes) != "streamed data" {
+		t.Errorf("expected %q, got %q", "streamed data", string(outBytes))
+	}
+	if size != int64(len("streamed data")) {
+		t.Errorf("expected size %d, got %d", len("streamed data"), size)
+	}
+}
+
+func TestProcessor_ConvertStream_SlotExhaustion(t *testing.T) {
+	conv := &testMockConverter{}
+	proc, r, _ := setupTestProcessor(t, conv, nil)
+	defer r.Close()
+
+	// Fill all sync slots up to NFfmpegTotal (setupTestProcessor sets NFfmpegTotal=4)
+	proc.NFfmpegTotal = 1
+	if !proc.tryReserveSyncSlot() {
+		t.Fatal("failed to reserve initial slot")
+	}
+
+	input := strings.NewReader("image data")
+	opts := media.ConversionOptions{TargetMimeType: "image/webp"}
+
+	_, _, err := proc.ConvertStream(context.Background(), input, "image/jpeg", opts)
+	if err == nil {
+		t.Fatal("expected error due to slot exhaustion, got nil")
+	}
+
+	// Release the slot and verify subsequent ConvertStream succeeds
+	proc.releaseSyncSlot()
+
+	stream, size, err := proc.ConvertStream(context.Background(), strings.NewReader("image data"), "image/jpeg", opts)
+	if err != nil {
+		t.Fatalf("expected ConvertStream to succeed after slot release, got: %v", err)
+	}
+	defer stream.Close()
+
+	if size != int64(len("image data")) {
+		t.Errorf("expected size %d, got %d", len("image data"), size)
+	}
+}
+

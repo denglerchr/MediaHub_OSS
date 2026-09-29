@@ -30,8 +30,8 @@
             
             <select formControlName="operator" class="form-control">
               <ng-container *ngIf="getSelectedFieldType(i) as fieldType">
-                <option *ngFor="let op of getOperatorsForFieldType(fieldType)" [value]="op === 'LIKE' ? 'LIKE' : op">
-                  {{ op === 'LIKE' ? 'contains' : op }}
+                <option *ngFor="let op of getOperatorsForFieldType(fieldType)" [value]="op">
+                  {{ op === 'LIKE' ? 'contains' : (op === 'in_box' ? 'in box' : op) }}
                 </option>
               </ng-container>
               <ng-container *ngIf="!getSelectedFieldType(i)">
@@ -46,6 +46,45 @@
                 <option value="true">True</option>
                 <option value="false">False</option>
               </select>
+
+              <div *ngSwitchCase="'COORDINATE'" class="bbox-input-group">
+                <input type="number"
+                       step="any"
+                       min="-90"
+                       max="90"
+                       [value]="getBboxCoord(i, 'min_lat')"
+                       (input)="setBboxCoord(i, 'min_lat', $event)"
+                       placeholder="Min Lat"
+                       class="form-control"
+                       title="Min Latitude (-90 to 90)">
+                <input type="number"
+                       step="any"
+                       min="-90"
+                       max="90"
+                       [value]="getBboxCoord(i, 'max_lat')"
+                       (input)="setBboxCoord(i, 'max_lat', $event)"
+                       placeholder="Max Lat"
+                       class="form-control"
+                       title="Max Latitude (-90 to 90)">
+                <input type="number"
+                       step="any"
+                       min="-180"
+                       max="180"
+                       [value]="getBboxCoord(i, 'min_lng')"
+                       (input)="setBboxCoord(i, 'min_lng', $event)"
+                       placeholder="Min Lng"
+                       class="form-control"
+                       title="Min Longitude (-180 to 180)">
+                <input type="number"
+                       step="any"
+                       min="-180"
+                       max="180"
+                       [value]="getBboxCoord(i, 'max_lng')"
+                       (input)="setBboxCoord(i, 'max_lng', $event)"
+                       placeholder="Max Lng"
+                       class="form-control"
+                       title="Max Longitude (-180 to 180)">
+              </div>
               
               <input *ngSwitchCase="'INTEGER'" 
                      type="number" 

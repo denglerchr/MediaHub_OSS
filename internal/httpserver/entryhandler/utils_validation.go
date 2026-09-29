@@ -32,7 +32,7 @@ func parseUploadMetadata(metadataStr string) (PostPatchEntryRequest, error) {
 // and if their data types match.
 func validateCustomFields(provided map[string]any, defined []repository.CustomFieldDef) error {
 	// Create a lookup map for fast checking
-	allowedFields := make(map[string]string)
+	allowedFields := make(map[string]repository.CustomFieldType)
 	for _, f := range defined {
 		allowedFields[f.Name] = f.Type
 	}
@@ -47,11 +47,11 @@ func validateCustomFields(provided map[string]any, defined []repository.CustomFi
 
 		// Check if the type matches
 		switch fieldType {
-		case "TEXT":
+		case repository.CustomFieldTypeText:
 			if _, ok := val.(string); !ok {
 				return fmt.Errorf("custom field '%s' must be a string", key)
 			}
-		case "INTEGER":
+		case repository.CustomFieldTypeInteger:
 			// json.Unmarshal parses all numbers into `any` as `float64`
 			num, ok := val.(float64)
 
@@ -62,14 +62,23 @@ func validateCustomFields(provided map[string]any, defined []repository.CustomFi
 
 			// Convert it to an actual int64 in the map so the DB driver gets the right type!
 			provided[key] = int64(num)
-		case "REAL":
+		case repository.CustomFieldTypeReal:
 			if _, ok := val.(float64); !ok {
 				return fmt.Errorf("custom field '%s' must be a float", key)
 			}
-		case "BOOLEAN":
+		case repository.CustomFieldTypeBoolean:
 			if _, ok := val.(bool); !ok {
 				return fmt.Errorf("custom field '%s' must be a boolean", key)
 			}
+		case repository.CustomFieldTypeCoordinate:
+			if val == nil {
+				continue
+			}
+			coord, err := repository.ParseCoordinate(val)
+			if err != nil {
+				return fmt.Errorf("custom field '%s' must be a valid coordinate: %w", key, err)
+			}
+			provided[key] = coord
 		}
 	}
 

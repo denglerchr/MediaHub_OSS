@@ -127,6 +127,13 @@ func (m *mockOIDCProvider) ExchangeCode(ctx context.Context, code, redirectURI, 
 	return m.claims, nil
 }
 
+func (m *mockOIDCProvider) GetAuthEndpoint(ctx context.Context) (string, error) {
+	if m.err != nil {
+		return "", m.err
+	}
+	return "https://test-idp.example.com/oauth/authorize", nil
+}
+
 type mockOIDCTokenRepo struct {
 	repo.Repository
 	users      map[string]repo.User

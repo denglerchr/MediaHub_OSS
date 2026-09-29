@@ -14,7 +14,7 @@
 # ==========================================
 # STAGE 1: Frontend Builder
 # ==========================================
-FROM node:25-bookworm AS frontend-builder
+FROM node:24-bookworm AS frontend-builder
 WORKDIR /app/frontend
 
 # Cache Node modules first

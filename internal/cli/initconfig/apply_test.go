@@ -186,3 +186,193 @@ config = { create_preview = true, auto_conversion = "jpeg" }
 		t.Errorf("expected CreatePreview to be true, got false")
 	}
 }
+
+func TestApply_AccountType(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	ctx := context.Background()
+
+	t.Run("default account_type when omitted is local", func(t *testing.T) {
+		repo := newMockRepo()
+		cfg := initconfig.InitConfig{
+			Users: []initconfig.InitUser{
+				{
+					Name:     "default_user",
+					Password: "ValidPassword123",
+				},
+			},
+		}
+
+		if err := initconfig.Apply(ctx, &cfg, repo, logger, ""); err != nil {
+			t.Fatalf("Apply failed: %v", err)
+		}
+
+		user, exists := repo.users["default_user"]
+		if !exists {
+			t.Fatalf("expected user default_user to be created")
+		}
+		if user.AccountType != repository.AccountTypeLocal {
+			t.Errorf("expected AccountTypeLocal (0), got %v", user.AccountType)
+		}
+		if user.PasswordHash == "" || user.PasswordHash == "SERVICE_ACCOUNT_NO_LOGIN" {
+			t.Errorf("expected bcrypt password hash, got %q", user.PasswordHash)
+		}
+	})
+
+	t.Run("explicit local account_type", func(t *testing.T) {
+		repo := newMockRepo()
+		cfg := initconfig.InitConfig{
+			Users: []initconfig.InitUser{
+				{
+					Name:        "local_user",
+					AccountType: "local",
+					Password:    "ValidPassword123",
+				},
+			},
+		}
+
+		if err := initconfig.Apply(ctx, &cfg, repo, logger, ""); err != nil {
+			t.Fatalf("Apply failed: %v", err)
+		}
+
+		user, exists := repo.users["local_user"]
+		if !exists {
+			t.Fatalf("expected user local_user to be created")
+		}
+		if user.AccountType != repository.AccountTypeLocal {
+			t.Errorf("expected AccountTypeLocal (0), got %v", user.AccountType)
+		}
+	})
+
+	t.Run("service_account without password creates service account with SERVICE_ACCOUNT_NO_LOGIN", func(t *testing.T) {
+		repo := newMockRepo()
+		cfg := initconfig.InitConfig{
+			Users: []initconfig.InitUser{
+				{
+					Name:        "sa_user",
+					AccountType: "service_account",
+				},
+			},
+		}
+
+		if err := initconfig.Apply(ctx, &cfg, repo, logger, ""); err != nil {
+			t.Fatalf("Apply failed: %v", err)
+		}
+
+		user, exists := repo.users["sa_user"]
+		if !exists {
+			t.Fatalf("expected user sa_user to be created")
+		}
+		if user.AccountType != repository.AccountTypeService {
+			t.Errorf("expected AccountTypeService (1), got %v", user.AccountType)
+		}
+		if user.PasswordHash != "SERVICE_ACCOUNT_NO_LOGIN" {
+			t.Errorf("expected PasswordHash 'SERVICE_ACCOUNT_NO_LOGIN', got %q", user.PasswordHash)
+		}
+	})
+
+	t.Run("service_account with password sets SERVICE_ACCOUNT_NO_LOGIN and redacts password", func(t *testing.T) {
+		repo := newMockRepo()
+		tmpDir := t.TempDir()
+		configFile := filepath.Join(tmpDir, "init.toml")
+		initialTOML := `
+[[user]]
+name = "sa_with_pw"
+account_type = "service_account"
+password = "ShouldBeRedacted"
+`
+		if err := os.WriteFile(configFile, []byte(initialTOML), 0644); err != nil {
+			t.Fatalf("failed to write test toml: %v", err)
+		}
+
+		cfg, err := initconfig.ParseInitConfig(configFile)
+		if err != nil {
+			t.Fatalf("failed to parse init config: %v", err)
+		}
+
+		if err := initconfig.Apply(ctx, &cfg, repo, logger, configFile); err != nil {
+			t.Fatalf("Apply failed: %v", err)
+		}
+
+		user, exists := repo.users["sa_with_pw"]
+		if !exists {
+			t.Fatalf("expected user sa_with_pw to be created")
+		}
+		if user.AccountType != repository.AccountTypeService {
+			t.Errorf("expected AccountTypeService (1), got %v", user.AccountType)
+		}
+		if user.PasswordHash != "SERVICE_ACCOUNT_NO_LOGIN" {
+			t.Errorf("expected PasswordHash 'SERVICE_ACCOUNT_NO_LOGIN', got %q", user.PasswordHash)
+		}
+
+		content, err := os.ReadFile(configFile)
+		if err != nil {
+			t.Fatalf("failed to read config file: %v", err)
+		}
+		if strings.Contains(string(content), "ShouldBeRedacted") {
+			t.Errorf("expected password to be redacted from file, got: %s", string(content))
+		}
+	})
+
+	t.Run("local account with empty password is not created", func(t *testing.T) {
+		repo := newMockRepo()
+		cfg := initconfig.InitConfig{
+			Users: []initconfig.InitUser{
+				{
+					Name:        "empty_pw_user",
+					AccountType: "local",
+					Password:    "",
+				},
+			},
+		}
+
+		if err := initconfig.Apply(ctx, &cfg, repo, logger, ""); err != nil {
+			t.Fatalf("Apply failed: %v", err)
+		}
+
+		if _, exists := repo.users["empty_pw_user"]; exists {
+			t.Errorf("expected local user with empty password to not be created")
+		}
+	})
+
+	t.Run("oidc account_type is rejected", func(t *testing.T) {
+		repo := newMockRepo()
+		cfg := initconfig.InitConfig{
+			Users: []initconfig.InitUser{
+				{
+					Name:        "oidc_user",
+					AccountType: "oidc",
+				},
+			},
+		}
+
+		if err := initconfig.Apply(ctx, &cfg, repo, logger, ""); err != nil {
+			t.Fatalf("Apply failed: %v", err)
+		}
+
+		if _, exists := repo.users["oidc_user"]; exists {
+			t.Errorf("expected oidc user to not be created via init_config")
+		}
+	})
+
+	t.Run("invalid account_type is rejected", func(t *testing.T) {
+		repo := newMockRepo()
+		cfg := initconfig.InitConfig{
+			Users: []initconfig.InitUser{
+				{
+					Name:        "invalid_user",
+					AccountType: "superuser",
+					Password:    "password123",
+				},
+			},
+		}
+
+		if err := initconfig.Apply(ctx, &cfg, repo, logger, ""); err != nil {
+			t.Fatalf("Apply failed: %v", err)
+		}
+
+		if _, exists := repo.users["invalid_user"]; exists {
+			t.Errorf("expected user with invalid account_type to not be created")
+		}
+	})
+}
+

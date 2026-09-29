@@ -22,7 +22,11 @@ func (p *Processor) StartQueueChecker(ctx context.Context) {
 	}
 
 	for _, db := range databases {
-		queuedEntries, err := p.Repo.GetEntriesByStatus(ctx, db.ID, repo.EntryStatusQueued)
+		limit := uint64(p.NFfmpegAsync)
+		if limit == 0 {
+			limit = 10
+		}
+		queuedEntries, err := p.Repo.GetEntriesByStatus(ctx, db.ID, repo.EntryStatusQueued, limit)
 		if err != nil {
 			p.Logger.Error("QueueChecker: Failed to get queued entries", "database_id", db.ID.String(), "error", err)
 			continue
@@ -226,7 +230,9 @@ func (p *Processor) runConversionAndFinalize(
 		convertedTempPath := convertedTempFile.Name()
 		convertedTempFile.Close()
 
-		err = p.MediaConverter.ConvertFile(ctx, currentPath, convertedTempPath, plan.InitMimeType, plan.TargetMimeType)
+		err = p.MediaConverter.ConvertFile(ctx, currentPath, convertedTempPath, plan.InitMimeType, media.ConversionOptions{
+			TargetMimeType: plan.TargetMimeType,
+		})
 		if err != nil {
 			processErr = fmt.Errorf("conversion to file failed: %w", err)
 			return

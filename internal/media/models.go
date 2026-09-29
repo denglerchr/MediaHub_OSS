@@ -7,8 +7,16 @@ type FieldDef struct {
 }
 
 type ConversionCheck struct {
-	NeedsConversion bool // false if mime types are aliases or are equal
+	NeedsConversion bool // false if mime types are aliases or are equal and no resize/fit is requested
 	CanConvert      bool // indicates capability to convert to target
+}
+
+// ConversionOptions holds parameters for format conversion, resizing, and scaling.
+type ConversionOptions struct {
+	TargetMimeType string
+	Width          int
+	Height         int
+	Fit            string // "cut", "stretch", "pad-white", "pad-black"
 }
 
 var imageMimeTypes = []string{

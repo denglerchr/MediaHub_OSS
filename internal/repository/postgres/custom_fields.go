@@ -83,10 +83,10 @@ func (r *PostgresRepository) AddCustomField(ctx context.Context, dbID repo.ULID,
 		return repo.CustomFieldDef{}, fmt.Errorf("%w: field name cannot be empty", customerrors.ErrValidation)
 	}
 
-	datatype, err := repo.NormalizeCustomFieldType(field.Type)
-	if err != nil {
-		return repo.CustomFieldDef{}, fmt.Errorf("%w: %v", customerrors.ErrValidation, err)
+	if !field.Type.IsValid() {
+		return repo.CustomFieldDef{}, fmt.Errorf("%w: invalid custom field type", customerrors.ErrValidation)
 	}
+	datatype := field.Type.String()
 	pgDatatype := mapToPostgresType(datatype)
 	if pgDatatype == "" {
 		return repo.CustomFieldDef{}, fmt.Errorf("%w: unsupported custom field type '%s'", customerrors.ErrValidation, field.Type)
@@ -147,7 +147,7 @@ func (r *PostgresRepository) AddCustomField(ctx context.Context, dbID repo.ULID,
 	}
 
 	if field.IsIndexed {
-		indexSQL := fmt.Sprintf(`CREATE INDEX IF NOT EXISTS "idx_entries_%s_%s%d" ON %s("%s%d")`, dbID.String(), customFieldsPrefix, field.ID, tableName, customFieldsPrefix, field.ID)
+		indexSQL := BuildCustomFieldIndexSQL(dbID.String(), field)
 		if _, err := tx.ExecContext(ctx, indexSQL); err != nil {
 			return repo.CustomFieldDef{}, fmt.Errorf("failed to create index on custom field: %w", err)
 		}
@@ -221,15 +221,16 @@ func (r *PostgresRepository) UpdateCustomField(ctx context.Context, dbID repo.UL
 	}
 	defer tx.Rollback()
 
-	tableName := fmt.Sprintf(`"entries_%s"`, dbID.String())
 	if newIsIndexed != targetField.IsIndexed {
 		if newIsIndexed {
-			indexSQL := fmt.Sprintf(`CREATE INDEX IF NOT EXISTS "idx_entries_%s_%s%d" ON %s("%s%d")`, dbID.String(), customFieldsPrefix, fieldID, tableName, customFieldsPrefix, fieldID)
+			cfForIndex := *targetField
+			cfForIndex.IsIndexed = true
+			indexSQL := BuildCustomFieldIndexSQL(dbID.String(), cfForIndex)
 			if _, err := tx.ExecContext(ctx, indexSQL); err != nil {
 				return repo.CustomFieldDef{}, fmt.Errorf("failed to create index: %w", err)
 			}
 		} else {
-			dropIndexSQL := fmt.Sprintf(`DROP INDEX IF EXISTS "idx_entries_%s_%s%d"`, dbID.String(), customFieldsPrefix, fieldID)
+			dropIndexSQL := BuildCustomFieldDropIndexSQL(dbID.String(), fieldID)
 			if _, err := tx.ExecContext(ctx, dropIndexSQL); err != nil {
 				return repo.CustomFieldDef{}, fmt.Errorf("failed to drop index: %w", err)
 			}
@@ -302,7 +303,7 @@ func (r *PostgresRepository) DeleteCustomField(ctx context.Context, dbID repo.UL
 	}
 	defer tx.Rollback()
 
-	dropIndexSQL := fmt.Sprintf(`DROP INDEX IF EXISTS "idx_entries_%s_%s%d"`, dbID.String(), customFieldsPrefix, fieldID)
+	dropIndexSQL := BuildCustomFieldDropIndexSQL(dbID.String(), fieldID)
 	if _, err := tx.ExecContext(ctx, dropIndexSQL); err != nil {
 		return fmt.Errorf("failed to drop index: %w", err)
 	}

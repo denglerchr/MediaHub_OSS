@@ -45,7 +45,7 @@ func (cf DatabaseCustomField) toModel() (repository.CustomFieldDef, error) {
 		return repository.CustomFieldDef{}, fmt.Errorf("missing required field: name")
 	}
 
-	normType, err := repository.NormalizeCustomFieldType(cf.Type)
+	fieldType, err := repository.ParseCustomFieldType(cf.Type)
 	if err != nil {
 		return repository.CustomFieldDef{}, err
 	}
@@ -61,7 +61,7 @@ func (cf DatabaseCustomField) toModel() (repository.CustomFieldDef, error) {
 	return repository.CustomFieldDef{
 		ID:        id,
 		Name:      name,
-		Type:      normType,
+		Type:      fieldType,
 		IsIndexed: isIndexed,
 	}, nil
 }
@@ -125,7 +125,7 @@ func mapToDatabaseResponse(db repository.Database) DatabaseResponse {
 		customFields[i] = DatabaseCustomField{
 			ID:        &idVal,
 			Name:      cf.Name,
-			Type:      cf.Type,
+			Type:      cf.Type.String(),
 			IsIndexed: &isIndexedVal,
 		}
 	}

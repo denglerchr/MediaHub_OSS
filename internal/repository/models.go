@@ -43,7 +43,7 @@ type DatabaseStats struct {
 type CustomFieldDef struct {
 	ID        int
 	Name      string
-	Type      string
+	Type      CustomFieldType
 	IsIndexed bool
 }
 

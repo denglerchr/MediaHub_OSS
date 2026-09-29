@@ -181,6 +181,38 @@ func TestUpdateUser_OIDCPasswordChangeRejected(t *testing.T) {
 	}
 }
 
+func TestUpdateUser_ServiceAccountPasswordChangeRejected(t *testing.T) {
+	targetULID := repo.ULID("01HGFB9Z5W7ABCDEFGHJKMNPQR")
+	mockRepo := &mockUserRepo{
+		users: map[repo.ULID]repo.User{
+			targetULID: {
+				ID:          targetULID,
+				Username:    "svc_account",
+				AccountType: repo.AccountTypeService,
+			},
+		},
+	}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	auditor := audit.NewAuditLogger(false, "stdio", logger, mockRepo)
+	handler := userhandler.UserHandler{Logger: logger, Auditor: auditor, Repo: mockRepo}
+
+	payload := userhandler.UpdateUserPayload{
+		Password: "new_secret_password",
+	}
+	body, _ := json.Marshal(payload)
+
+	req := httptest.NewRequest(http.MethodPatch, "/api/user/"+string(targetULID), bytes.NewReader(body))
+	req.SetPathValue("user_ulid", string(targetULID))
+	req = req.WithContext(context.WithValue(req.Context(), utils.UserKey, &repo.User{Username: "admin", IsAdmin: true}))
+	rec := httptest.NewRecorder()
+
+	handler.UpdateUser(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected status 400 Bad Request when changing password for service account, got %d", rec.Code)
+	}
+}
+
 func TestUpdateMe_OIDCPasswordChangeRejected(t *testing.T) {
 	targetULID := repo.ULID("01HGFB9Z5W7ABCDEFGHJKMNPQR")
 	mockRepo := &mockUserRepo{}
@@ -201,6 +233,29 @@ func TestUpdateMe_OIDCPasswordChangeRejected(t *testing.T) {
 
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("expected status 400 Bad Request when OIDC user updates own password, got %d", rec.Code)
+	}
+}
+
+func TestUpdateMe_ServiceAccountPasswordChangeRejected(t *testing.T) {
+	targetULID := repo.ULID("01HGFB9Z5W7ABCDEFGHJKMNPQR")
+	mockRepo := &mockUserRepo{}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	auditor := audit.NewAuditLogger(false, "stdio", logger, mockRepo)
+	handler := userhandler.UserHandler{Logger: logger, Auditor: auditor, Repo: mockRepo}
+
+	body := bytes.NewReader([]byte(`{"old_password":"old","new_password":"new"}`))
+	req := httptest.NewRequest(http.MethodPatch, "/api/me", body)
+	req = req.WithContext(context.WithValue(req.Context(), utils.UserKey, &repo.User{
+		ID:          targetULID,
+		Username:    "svc_user",
+		AccountType: repo.AccountTypeService,
+	}))
+	rec := httptest.NewRecorder()
+
+	handler.UpdateMe(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected status 400 Bad Request when service account updates own password, got %d", rec.Code)
 	}
 }
 

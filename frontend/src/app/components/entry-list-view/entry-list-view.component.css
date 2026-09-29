@@ -111,3 +111,18 @@
   cursor: not-allowed;
   text-decoration: none;
 }
+
+.coordinate-table-link {
+  color: var(--text-accent, #3b82f6);
+  text-decoration: none;
+  font-weight: 500;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  white-space: nowrap;
+}
+
+.coordinate-table-link:hover {
+  text-decoration: underline;
+  color: var(--text-accent-hover, #2563eb);
+}

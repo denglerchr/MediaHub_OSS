@@ -3,6 +3,7 @@ package processing
 import (
 	"context"
 	"io"
+	"os"
 	"testing"
 
 	"mediahub_oss/internal/media"
@@ -19,18 +20,33 @@ func (m *mockConverter) CanCreatePreview(inputMimeType string) bool {
 	return true
 }
 
-func (m *mockConverter) CanConvert(inputMimeType string, outputMimeType string) media.ConversionCheck {
-	if inputMimeType == outputMimeType {
+func (m *mockConverter) CanConvert(inputMimeType string, opts media.ConversionOptions) media.ConversionCheck {
+	if inputMimeType == opts.TargetMimeType && opts.Width == 0 && opts.Height == 0 {
 		return media.ConversionCheck{CanConvert: true, NeedsConversion: false}
 	}
 	return media.ConversionCheck{CanConvert: true, NeedsConversion: true}
 }
 
-func (m *mockConverter) ConvertStream(ctx context.Context, inputData io.ReadSeeker, outputStream io.Writer, inputMimeType, targetMimeType string) error {
+func (m *mockConverter) ConvertStream(ctx context.Context, inputData io.ReadSeeker, outputStream io.Writer, inputMimeType string, opts media.ConversionOptions) error {
 	return nil
 }
 
-func (m *mockConverter) ConvertFile(ctx context.Context, inputPath string, outputPath string, inputMimeType, targetMimeType string) error {
+func (m *mockConverter) ConvertStreamToFile(ctx context.Context, inputData io.ReadSeeker, inputMimeType string, opts media.ConversionOptions) (*os.File, error) {
+	tmp, err := os.CreateTemp("", "mock-stream-*.tmp")
+	if err != nil {
+		return nil, err
+	}
+	_, err = io.Copy(tmp, inputData)
+	if err != nil {
+		tmp.Close()
+		os.Remove(tmp.Name())
+		return nil, err
+	}
+	tmp.Seek(0, io.SeekStart)
+	return tmp, nil
+}
+
+func (m *mockConverter) ConvertFile(ctx context.Context, inputPath string, outputPath string, inputMimeType string, opts media.ConversionOptions) error {
 	return nil
 }
 

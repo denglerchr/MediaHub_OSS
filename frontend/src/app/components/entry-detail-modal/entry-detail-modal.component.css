@@ -132,6 +132,27 @@
 .text-green { color: var(--text-success); font-weight: 600; }
 .text-muted { color: var(--text-muted); }
 
+/* Coordinate link to OpenStreetMap */
+.coordinate-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  color: var(--primary-color, #3b82f6);
+  text-decoration: none;
+  font-weight: 500;
+  transition: color 0.15s ease-in-out;
+}
+
+.coordinate-link:hover {
+  text-decoration: underline;
+  color: var(--primary-hover, #2563eb);
+}
+
+.coordinate-link .external-icon {
+  font-size: 0.8em;
+  opacity: 0.75;
+}
+
 /* Action bar wrapping for responsive layouts */
 .modal-actions {
   justify-content: space-between;

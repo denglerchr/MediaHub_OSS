@@ -48,7 +48,7 @@ func DetermineConversionPlan(mc media.MediaConverter, db repo.Database, original
 		targetMimeType = db.Config.AutoConversion
 
 		// check capabilities
-		convCheck = mc.CanConvert(originalMimeType, db.Config.AutoConversion)
+		convCheck = mc.CanConvert(originalMimeType, media.ConversionOptions{TargetMimeType: db.Config.AutoConversion})
 		if convCheck.CanConvert {
 			resultMimeType = targetMimeType
 		}
@@ -96,7 +96,7 @@ func DeterminePlanForEntry(mc media.MediaConverter, db repo.Database, entry repo
 	var convCheck media.ConversionCheck
 	if wantsConversion {
 		targetMimeType = db.Config.AutoConversion
-		convCheck = mc.CanConvert(originalMimeType, db.Config.AutoConversion)
+		convCheck = mc.CanConvert(originalMimeType, media.ConversionOptions{TargetMimeType: db.Config.AutoConversion})
 		if convCheck.CanConvert {
 			resultMimeType = targetMimeType
 		}

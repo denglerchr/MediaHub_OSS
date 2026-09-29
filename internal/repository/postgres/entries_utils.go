@@ -8,6 +8,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/Masterminds/squirrel"
 )
 
 type entryScanner struct {
@@ -16,6 +18,7 @@ type entryScanner struct {
 	columnPointers []any
 	cleanNames     []string
 	isCustom       []bool
+	isCoord        []bool
 }
 
 func newEntryScanner(rows *sql.Rows, customFields []repo.CustomFieldDef) (entryScanner, error) {
@@ -24,9 +27,9 @@ func newEntryScanner(rows *sql.Rows, customFields []repo.CustomFieldDef) (entryS
 		return entryScanner{}, err
 	}
 
-	cfMap := make(map[string]string)
+	cfMap := make(map[string]repo.CustomFieldDef)
 	for _, cf := range customFields {
-		cfMap[fmt.Sprintf("%s%d", customFieldsPrefix, cf.ID)] = cf.Name
+		cfMap[fmt.Sprintf("%s%d", customFieldsPrefix, cf.ID)] = cf
 	}
 
 	size := len(cols)
@@ -36,6 +39,7 @@ func newEntryScanner(rows *sql.Rows, customFields []repo.CustomFieldDef) (entryS
 		columnPointers: make([]any, size),
 		cleanNames:     make([]string, size),
 		isCustom:       make([]bool, size),
+		isCoord:        make([]bool, size),
 	}
 
 	for i, colName := range cols {
@@ -43,8 +47,11 @@ func newEntryScanner(rows *sql.Rows, customFields []repo.CustomFieldDef) (entryS
 
 		if strings.HasPrefix(colName, customFieldsPrefix) {
 			s.isCustom[i] = true
-			if name, ok := cfMap[colName]; ok {
-				s.cleanNames[i] = name
+			if cf, ok := cfMap[colName]; ok {
+				s.cleanNames[i] = cf.Name
+				if cf.Type.IsCoordinate() {
+					s.isCoord[i] = true
+				}
 			} else {
 				s.cleanNames[i] = strings.TrimPrefix(colName, customFieldsPrefix)
 			}
@@ -100,12 +107,31 @@ func (s entryScanner) scan(rows *sql.Rows) (repo.Entry, error) {
 		case "mime_type":
 			entry.MimeType = asString(val)
 		default:
-			if b, ok := val.([]byte); ok {
-				val = string(b)
-			}
 			if s.isCustom[i] {
-				entry.CustomFields[s.cleanNames[i]] = val
+				if s.isCoord[i] {
+					str := asString(val)
+					str = strings.Trim(str, "()")
+					parts := strings.Split(str, ",")
+					if len(parts) == 2 {
+						lng, err1 := strconv.ParseFloat(strings.TrimSpace(parts[0]), 64)
+						lat, err2 := strconv.ParseFloat(strings.TrimSpace(parts[1]), 64)
+						if err1 == nil && err2 == nil {
+							entry.CustomFields[s.cleanNames[i]] = repo.Coordinate{
+								Latitude:  lat,
+								Longitude: lng,
+							}
+						}
+					}
+				} else {
+					if b, ok := val.([]byte); ok {
+						val = string(b)
+					}
+					entry.CustomFields[s.cleanNames[i]] = val
+				}
 			} else {
+				if b, ok := val.([]byte); ok {
+					val = string(b)
+				}
 				entry.MediaFields[s.cleanNames[i]] = val
 			}
 		}
@@ -215,11 +241,48 @@ func (r *PostgresRepository) validateAndFormatSearchField(field string, customFi
 
 	for _, cf := range customFields {
 		if cf.Name == field {
+			if cf.Type.IsCoordinate() {
+				return "", fmt.Errorf("field '%s' is a coordinate field and cannot be used with scalar operators", field)
+			}
 			return fmt.Sprintf(`"%s%d"`, customFieldsPrefix, cf.ID), nil
 		}
 	}
 
 	return "", fmt.Errorf("field '%s' is not allowed or does not exist", field)
+}
+
+// mapCustomFieldsToPostgresColumns maps entry custom fields into the target SQL column-data map.
+func mapCustomFieldsToPostgresColumns(
+	customFields []repo.CustomFieldDef,
+	entryCustomFields map[string]any,
+	target map[string]any,
+) error {
+	cfMap := make(map[string]repo.CustomFieldDef, len(customFields)*3)
+	for _, cf := range customFields {
+		cfMap[cf.Name] = cf
+		cfMap[fmt.Sprintf("%s%d", customFieldsPrefix, cf.ID)] = cf
+		cfMap[fmt.Sprintf("%d", cf.ID)] = cf
+	}
+	for key, value := range entryCustomFields {
+		if cf, ok := cfMap[key]; ok {
+			if cf.Type.IsCoordinate() {
+				if value == nil {
+					target[fmt.Sprintf("%s%d", customFieldsPrefix, cf.ID)] = nil
+				} else {
+					coord, err := repo.ParseCoordinate(value)
+					if err != nil {
+						return fmt.Errorf("%w: %v", customerrors.ErrValidation, err)
+					}
+					target[fmt.Sprintf("%s%d", customFieldsPrefix, cf.ID)] = squirrel.Expr("point(?, ?)", coord.Longitude, coord.Latitude)
+				}
+			} else {
+				target[fmt.Sprintf("%s%d", customFieldsPrefix, cf.ID)] = value
+			}
+		} else {
+			target[customFieldsPrefix+key] = value
+		}
+	}
+	return nil
 }
 
 func isValidOperator(op string) bool {
@@ -228,3 +291,4 @@ func isValidOperator(op string) bool {
 	}
 	return valid[strings.ToUpper(op)]
 }
+

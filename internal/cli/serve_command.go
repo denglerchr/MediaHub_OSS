@@ -280,20 +280,6 @@ func buildHandlers(cfg *config.Config, repo repository.Repository, storageProvid
 		return nil, fmt.Errorf("failed to parse JWT config: %w", err)
 	}
 
-	infoH := ih.NewInfoHandler(
-		logger,
-		svcs.auditLogger,
-		docs.SwaggerInfo.Version,
-		svcs.mediaConverter,
-		cfg.Auth.OIDC.Enabled,
-		cfg.Auth.OIDC.DisableLoginPage,
-		cfg.Auth.OIDC.IssuerURL,
-		cfg.Auth.OIDC.ClientID,
-		cfg.Auth.OIDC.RedirectURL,
-		cfg.Logging.Audit.Enabled && cfg.Logging.Audit.Type == "database",
-	)
-	infoH.StartTime = startTime
-
 	oidcCfg := th.OIDCConfig{
 		Enabled:           cfg.Auth.OIDC.Enabled,
 		DisableLoginPage:  cfg.Auth.OIDC.DisableLoginPage,
@@ -308,6 +294,21 @@ func buildHandlers(cfg *config.Config, repo repository.Repository, storageProvid
 		ValidateOIDCRedirectURL(logger, oidcCfg.RedirectURL)
 		oidcProvider = th.NewHTTPOIDCProvider(oidcCfg, logger)
 	}
+
+	infoH := ih.NewInfoHandler(
+		logger,
+		svcs.auditLogger,
+		docs.SwaggerInfo.Version,
+		svcs.mediaConverter,
+		cfg.Auth.OIDC.Enabled,
+		cfg.Auth.OIDC.DisableLoginPage,
+		cfg.Auth.OIDC.IssuerURL,
+		cfg.Auth.OIDC.ClientID,
+		cfg.Auth.OIDC.RedirectURL,
+		oidcProvider,
+		cfg.Logging.Audit.Enabled && cfg.Logging.Audit.Type == "database",
+	)
+	infoH.StartTime = startTime
 
 	return &httpserver.Handlers{
 		InfoHandler: *infoH,
@@ -465,4 +466,3 @@ func ValidateOIDCRedirectURL(logger *slog.Logger, redirectURL string) bool {
 	}
 	return true
 }
-

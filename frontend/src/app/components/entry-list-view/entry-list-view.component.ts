@@ -106,6 +106,28 @@ export class EntryListViewComponent implements OnChanges {
     this.failedImageIds.add(entryId);
   }
 
+  public isCoordinate(val: any): boolean {
+    return (
+      val !== null &&
+      val !== undefined &&
+      typeof val === 'object' &&
+      typeof val.latitude === 'number' &&
+      typeof val.longitude === 'number' &&
+      !isNaN(val.latitude) &&
+      !isNaN(val.longitude)
+    );
+  }
+
+  public formatCoordinate(val: any): string {
+    if (!this.isCoordinate(val)) return '';
+    return `${val.latitude.toFixed(6)}, ${val.longitude.toFixed(6)}`;
+  }
+
+  public getOpenStreetMapUrl(val: any): string {
+    if (!this.isCoordinate(val)) return '#';
+    return `https://www.openstreetmap.org/?mlat=${val.latitude}&mlon=${val.longitude}#map=16/${val.latitude}/${val.longitude}`;
+  }
+
   public trackById(index: number, entry: Entry): number {
     return entry.id;
   }

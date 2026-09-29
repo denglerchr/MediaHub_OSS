@@ -97,9 +97,9 @@ func (h *UserHandler) UpdateMe(w http.ResponseWriter, r *http.Request) {
 	// 1. Extract the authenticated user from the request context
 	user := utils.GetUserFromContext(ctx)
 
-	// Single Sign-On users cannot change local passwords
-	if user.IsOIDC() {
-		utils.RespondWithError(w, http.StatusBadRequest, "Password management is disabled for Single Sign-On accounts")
+	// Single Sign-On users and service accounts cannot change local passwords
+	if user.IsOIDC() || user.IsServiceAccount() {
+		utils.RespondWithError(w, http.StatusBadRequest, "Password management is disabled for Single Sign-On and Service accounts")
 		return
 	}
 
@@ -437,8 +437,8 @@ func (h *UserHandler) UpdateUser(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if payload.Password != "" {
-		if existingUser.IsOIDC() {
-			utils.RespondWithError(w, http.StatusBadRequest, "Cannot set or change password for Single Sign-On accounts")
+		if existingUser.IsOIDC() || existingUser.IsServiceAccount() {
+			utils.RespondWithError(w, http.StatusBadRequest, "Cannot set or change password for Single Sign-On or Service accounts")
 			return
 		}
 		hashBytes, err := bcrypt.GenerateFromPassword([]byte(payload.Password), bcrypt.DefaultCost)

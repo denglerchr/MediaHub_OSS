@@ -107,10 +107,10 @@ func (r *SQLiteRepository) AddCustomField(ctx context.Context, dbID repo.ULID, f
 	}
 
 	// Validate type
-	datatype, err := repo.NormalizeCustomFieldType(field.Type)
-	if err != nil {
-		return repo.CustomFieldDef{}, fmt.Errorf("%w: %v", customerrors.ErrValidation, err)
+	if !field.Type.IsValid() {
+		return repo.CustomFieldDef{}, fmt.Errorf("%w: invalid custom field type", customerrors.ErrValidation)
 	}
+	datatype := field.Type.String()
 
 	// Load existing fields
 	existingFields, err := r.getCustomFields(ctx, dbID)
@@ -167,14 +167,25 @@ func (r *SQLiteRepository) AddCustomField(ctx context.Context, dbID repo.ULID, f
 
 	// 2. ALTER TABLE entries_ID ADD COLUMN cf_nextID Type
 	tableName := fmt.Sprintf(`"entries_%s"`, dbID.String())
-	alterSQL := fmt.Sprintf(`ALTER TABLE %s ADD COLUMN "%s%d" %s`, tableName, customFieldsPrefix, field.ID, datatype)
-	if _, err := tx.ExecContext(ctx, alterSQL); err != nil {
-		return repo.CustomFieldDef{}, fmt.Errorf("failed to add column to entries table: %w", err)
+	if field.Type.IsCoordinate() {
+		alterLatSQL := fmt.Sprintf(`ALTER TABLE %s ADD COLUMN "%s%d_lat" REAL`, tableName, customFieldsPrefix, field.ID)
+		if _, err := tx.ExecContext(ctx, alterLatSQL); err != nil {
+			return repo.CustomFieldDef{}, fmt.Errorf("failed to add latitude column to entries table: %w", err)
+		}
+		alterLngSQL := fmt.Sprintf(`ALTER TABLE %s ADD COLUMN "%s%d_lng" REAL`, tableName, customFieldsPrefix, field.ID)
+		if _, err := tx.ExecContext(ctx, alterLngSQL); err != nil {
+			return repo.CustomFieldDef{}, fmt.Errorf("failed to add longitude column to entries table: %w", err)
+		}
+	} else {
+		alterSQL := fmt.Sprintf(`ALTER TABLE %s ADD COLUMN "%s%d" %s`, tableName, customFieldsPrefix, field.ID, datatype)
+		if _, err := tx.ExecContext(ctx, alterSQL); err != nil {
+			return repo.CustomFieldDef{}, fmt.Errorf("failed to add column to entries table: %w", err)
+		}
 	}
 
 	// 3. Create index if is_indexed is true
 	if field.IsIndexed {
-		indexSQL := fmt.Sprintf(`CREATE INDEX IF NOT EXISTS "idx_entries_%s_%s%d" ON %s("%s%d")`, dbID.String(), customFieldsPrefix, field.ID, tableName, customFieldsPrefix, field.ID)
+		indexSQL := BuildCustomFieldIndexSQL(dbID.String(), field)
 		if _, err := tx.ExecContext(ctx, indexSQL); err != nil {
 			return repo.CustomFieldDef{}, fmt.Errorf("failed to create index on custom field: %w", err)
 		}
@@ -259,17 +270,18 @@ func (r *SQLiteRepository) UpdateCustomField(ctx context.Context, dbID repo.ULID
 	defer tx.Rollback()
 
 	// Handle index changes
-	tableName := fmt.Sprintf(`"entries_%s"`, dbID.String())
 	if newIsIndexed != targetField.IsIndexed {
 		if newIsIndexed {
 			// Create index
-			indexSQL := fmt.Sprintf(`CREATE INDEX IF NOT EXISTS "idx_entries_%s_%s%d" ON %s("%s%d")`, dbID.String(), customFieldsPrefix, fieldID, tableName, customFieldsPrefix, fieldID)
+			cfForIndex := *targetField
+			cfForIndex.IsIndexed = true
+			indexSQL := BuildCustomFieldIndexSQL(dbID.String(), cfForIndex)
 			if _, err := tx.ExecContext(ctx, indexSQL); err != nil {
 				return repo.CustomFieldDef{}, fmt.Errorf("failed to create index: %w", err)
 			}
 		} else {
 			// Drop index
-			dropIndexSQL := fmt.Sprintf(`DROP INDEX IF EXISTS "idx_entries_%s_%s%d"`, dbID.String(), customFieldsPrefix, fieldID)
+			dropIndexSQL := BuildCustomFieldDropIndexSQL(dbID.String(), fieldID)
 			if _, err := tx.ExecContext(ctx, dropIndexSQL); err != nil {
 				return repo.CustomFieldDef{}, fmt.Errorf("failed to drop index: %w", err)
 			}
@@ -331,14 +343,14 @@ func (r *SQLiteRepository) DeleteCustomField(ctx context.Context, dbID repo.ULID
 		return err
 	}
 
-	var found bool
-	for _, f := range existingFields {
-		if f.ID == fieldID {
-			found = true
+	var targetField *repo.CustomFieldDef
+	for i := range existingFields {
+		if existingFields[i].ID == fieldID {
+			targetField = &existingFields[i]
 			break
 		}
 	}
-	if !found {
+	if targetField == nil {
 		return customerrors.ErrNotFound
 	}
 
@@ -350,16 +362,27 @@ func (r *SQLiteRepository) DeleteCustomField(ctx context.Context, dbID repo.ULID
 	defer tx.Rollback()
 
 	// 1. Drop the index
-	dropIndexSQL := fmt.Sprintf(`DROP INDEX IF EXISTS "idx_entries_%s_%s%d"`, dbID.String(), customFieldsPrefix, fieldID)
+	dropIndexSQL := BuildCustomFieldDropIndexSQL(dbID.String(), fieldID)
 	if _, err := tx.ExecContext(ctx, dropIndexSQL); err != nil {
 		return fmt.Errorf("failed to drop index: %w", err)
 	}
 
-	// 2. Drop column from entries table
+	// 2. Drop column(s) from entries table
 	tableName := fmt.Sprintf(`"entries_%s"`, dbID.String())
-	dropColSQL := fmt.Sprintf(`ALTER TABLE %s DROP COLUMN "%s%d"`, tableName, customFieldsPrefix, fieldID)
-	if _, err := tx.ExecContext(ctx, dropColSQL); err != nil {
-		return fmt.Errorf("failed to drop column from entries table: %w", err)
+	if targetField.Type.IsCoordinate() {
+		dropLatSQL := fmt.Sprintf(`ALTER TABLE %s DROP COLUMN "%s%d_lat"`, tableName, customFieldsPrefix, fieldID)
+		if _, err := tx.ExecContext(ctx, dropLatSQL); err != nil {
+			return fmt.Errorf("failed to drop latitude column from entries table: %w", err)
+		}
+		dropLngSQL := fmt.Sprintf(`ALTER TABLE %s DROP COLUMN "%s%d_lng"`, tableName, customFieldsPrefix, fieldID)
+		if _, err := tx.ExecContext(ctx, dropLngSQL); err != nil {
+			return fmt.Errorf("failed to drop longitude column from entries table: %w", err)
+		}
+	} else {
+		dropColSQL := fmt.Sprintf(`ALTER TABLE %s DROP COLUMN "%s%d"`, tableName, customFieldsPrefix, fieldID)
+		if _, err := tx.ExecContext(ctx, dropColSQL); err != nil {
+			return fmt.Errorf("failed to drop column from entries table: %w", err)
+		}
 	}
 
 	// 3. Delete from database_custom_fields
