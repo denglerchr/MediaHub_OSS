@@ -98,20 +98,41 @@ Updates mutable metadata (`timestamp`, `filename`, `custom_fields`) of an existi
 
 ## `GET /api/database/{database_id}/entry/{id}/file`
 
-Retrieves the raw file binary. Supports **HTTP Range Requests** (streaming/seeking) and **Content Negotiation** (binary vs JSON Base64).
+Retrieves the raw file binary or an on-the-fly transformed derivative. Supports **HTTP Range Requests** (streaming/seeking for untransformed files), **Content Negotiation** (binary vs JSON Base64), and **On-The-Fly Media Transformations** (format conversion and image resizing).
 
 * **Role Required**: `can_view` on database
 * **Path Parameters**:
   * `database_id` (string, required): Database ULID.
   * `id` (integer, required): Unique entry ID.
+* **Query Parameters (Optional — On-The-Fly Transformations)**:
+  * `format` (string): Desired output format or MIME type. Accepts either a short format name (e.g., `webp`, `jpeg`, `png`, `flac`, `mp3`, `opus`) or a full MIME type (e.g., `image/webp`, `audio/ogg`). Common aliases like `jpg`, `tif`, and `mp3` are automatically normalized.
+    * **Supported Image Formats**: `jpeg` (`image/jpeg`), `png` (`image/png`), `webp` (`image/webp`), `gif` (`image/gif`), `bmp` (`image/bmp`), `tiff` (`image/tiff`).
+    * **Supported Audio Formats**: `mp3` (`audio/mpeg`), `wav` (`audio/wav`), `ogg` (`audio/ogg`), `flac` (`audio/flac`), `aac` (`audio/aac`), `opus` (`audio/opus`).
+  * `width` (integer, `> 0`): Target width in pixels (`image` databases only).
+  * `height` (integer, `> 0`): Target height in pixels (`image` databases only).
+    * If only one of `width` or `height` is provided, the other dimension is calculated automatically to preserve the original aspect ratio (`fit` is ignored).
+  * `fit` (string): Scaling behavior when both `width` and `height` are specified (`image` databases only). Defaults to `cut`:
+    * `cut` *(default)*: Scales the image to fill the target `width` × `height` box while preserving aspect ratio, then center-crops any overflowing edges.
+    * `stretch`: Scales the image to the exact `width` × `height` dimensions without preserving aspect ratio.
+    * `pad-white`: Scales the image to fit inside the `width` × `height` box while preserving aspect ratio, padding any remaining space with white bars.
+    * `pad-black`: Scales the image to fit inside the `width` × `height` box while preserving aspect ratio, padding any remaining space with black bars.
 * **Headers (Optional)**:
   * `Accept`: `*/*` (default binary download) or `application/json` (Base64 data wrapper).
-  * `Range`: `bytes=0-1023` (Triggers `206 Partial Content` streaming response when `Accept` is binary).
+  * `Range`: `bytes=0-1023` (Triggers `206 Partial Content` streaming response when `Accept` is binary and no transformation is requested).
+
+### Transformation Rules by Database Content Type
+* **`image`**: Supports `format`, `width`, `height`, and `fit`.
+* **`audio`**: Supports `format`. Providing `width`, `height`, or `fit` returns `400 Bad Request`.
+* **`video`**: On-the-fly transformations are not supported; providing any transformation parameter returns `501 Not Implemented`.
+* **`file`**: Transformations are not applicable; providing any transformation parameter returns `400 Bad Request`.
+
+> **Note**: On-the-fly transformations do not modify the stored entry in the database or on disk. If the requested `format` matches the stored file's MIME type and no resizing is requested, conversion is bypassed and the stored file is served directly.
 
 ### Binary Response (`200 OK` / `206 Partial Content`)
-Returns binary stream with standard headers (`Content-Type`, `Content-Length`, `Content-Range`, `Content-Disposition`).
+Returns binary stream with standard headers (`Content-Type`, `Content-Length`, `Content-Disposition` with updated file extension when transformed, plus `Accept-Ranges` / `Content-Range` for untransformed files).
 
 ### JSON Base64 Response (`200 OK` when `Accept: application/json`)
+When transformed, `filename`, `mime_type`, and `size` reflect the transformed output:
 ```json
 {
   "filename": "my_song.wav",
@@ -120,6 +141,12 @@ Returns binary stream with standard headers (`Content-Type`, `Content-Length`, `
   "data": "data:audio/wav;base64,UklGRi..."
 }
 ```
+
+### Additional Error Responses
+* `400 Bad Request`: Invalid dimensions, unknown `fit` mode, unsupported target format, or disallowed parameters for the database content type.
+* `409 Conflict`: Entry is still being processed.
+* `501 Not Implemented`: Transformation requested on a `video` database.
+* `503 Service Unavailable`: Server transformation concurrency limit reached.
 
 ---
 

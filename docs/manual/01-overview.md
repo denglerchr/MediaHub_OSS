@@ -38,6 +38,7 @@ Of course it can also be used to store media in other contexts, but in that case
   * Configure cleanup based on **maximum entry age** (e.g., 30 days, or `0` to disable) and **disk space limits** (e.g., 100GB, or `0` to disable).
 * **Automated Media Transcoding**:
   * Automatic FFmpeg-powered media conversion on ingestion (e.g., raw camera frames to `JPEG`/`WebP`, audio to `FLAC`, video to `WebM`).
+  * On-the-fly format conversion (`image` and `audio`) and dynamic image resizing (`width`, `height`, `fit`) upon download without modifying the stored original.
   * Automated preview generation for UI thumbnail viewing.
 * **Hybrid Authentication & RBAC**:
   * Support for **OpenID Connect (OIDC / SSO)** (e.g., Keycloak, Authentik, Okta) with automatic user provisioning.
