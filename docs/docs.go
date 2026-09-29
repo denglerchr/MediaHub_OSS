@@ -1251,7 +1251,7 @@ const docTemplate = `{
                         "BearerAuth": []
                     }
                 ],
-                "description": "Retrieves a raw entry file. Supports Content Negotiation (JSON vs Binary) and HTTP Range Requests (Streaming).",
+                "description": "Retrieves the raw file or an on-the-fly transformed derivative. Supports Content Negotiation (JSON vs Binary), HTTP Range Requests (for raw files), and On-The-Fly Media Transformations.",
                 "produces": [
                     "application/octet-stream",
                     "application/json"
@@ -1259,7 +1259,7 @@ const docTemplate = `{
                 "tags": [
                     "entry"
                 ],
-                "summary": "Get an entry file",
+                "summary": "Download entry file or transformed derivative",
                 "parameters": [
                     {
                         "type": "string",
@@ -1281,6 +1281,30 @@ const docTemplate = `{
                         "description": "Byte range request (e.g., bytes=0-1023)",
                         "name": "Range",
                         "in": "header"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Desired output format / MIME type (e.g. webp, jpeg, opus)",
+                        "name": "format",
+                        "in": "query"
+                    },
+                    {
+                        "type": "integer",
+                        "description": "Desired image width (\u003e 0)",
+                        "name": "width",
+                        "in": "query"
+                    },
+                    {
+                        "type": "integer",
+                        "description": "Desired image height (\u003e 0)",
+                        "name": "height",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Scaling mode (cut, stretch, pad-white, pad-black)",
+                        "name": "fit",
+                        "in": "query"
                     }
                 ],
                 "responses": {
@@ -1297,7 +1321,7 @@ const docTemplate = `{
                         }
                     },
                     "206": {
-                        "description": "Partial content (streaming response)",
+                        "description": "Partial content (streaming response for untransformed files)",
                         "schema": {
                             "type": "file"
                         },
@@ -1313,7 +1337,7 @@ const docTemplate = `{
                         }
                     },
                     "400": {
-                        "description": "Invalid request or ID format",
+                        "description": "Invalid request, parameters, or unsupported conversion",
                         "schema": {
                             "$ref": "#/definitions/utils.ErrorResponse"
                         }
@@ -1350,6 +1374,18 @@ const docTemplate = `{
                     },
                     "500": {
                         "description": "Internal server error",
+                        "schema": {
+                            "$ref": "#/definitions/utils.ErrorResponse"
+                        }
+                    },
+                    "501": {
+                        "description": "Transformation not implemented for video",
+                        "schema": {
+                            "$ref": "#/definitions/utils.ErrorResponse"
+                        }
+                    },
+                    "503": {
+                        "description": "Server busy (concurrency limit reached)",
                         "schema": {
                             "$ref": "#/definitions/utils.ErrorResponse"
                         }

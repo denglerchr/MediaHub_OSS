@@ -230,7 +230,9 @@ func (p *Processor) runConversionAndFinalize(
 		convertedTempPath := convertedTempFile.Name()
 		convertedTempFile.Close()
 
-		err = p.MediaConverter.ConvertFile(ctx, currentPath, convertedTempPath, plan.InitMimeType, plan.TargetMimeType)
+		err = p.MediaConverter.ConvertFile(ctx, currentPath, convertedTempPath, plan.InitMimeType, media.ConversionOptions{
+			TargetMimeType: plan.TargetMimeType,
+		})
 		if err != nil {
 			processErr = fmt.Errorf("conversion to file failed: %w", err)
 			return

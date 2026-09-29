@@ -99,9 +99,9 @@ func NormalizeMimeType(mime string) string {
 		return "audio/mpeg"
 	case "m4a", "audio/m4a":
 		return "audio/mp4"
-	case "wav", "audio/wav", "audio/x-wav":
+	case "wav", "wave", "audio/wav", "audio/wave", "audio/x-wav":
 		return "audio/wav"
-	case "application/ogg":
+	case "ogg", "oga", "audio/ogg", "audio/x-ogg", "application/ogg":
 		return "audio/ogg"
 
 	// Video

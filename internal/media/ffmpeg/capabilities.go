@@ -34,22 +34,33 @@ func (c *FfmpegConverter) CanCreatePreview(inputMimeType string) bool {
 		strings.HasPrefix(normalized, "audio/")
 }
 
-// CanConvert checks if a conversion is possible based on our supportedConversions map.
-func (c *FfmpegConverter) CanConvert(inputMimeType string, outputMimeType string) media.ConversionCheck {
+// CanConvert checks if a conversion is possible based on our supportedConversions map and options.
+func (c *FfmpegConverter) CanConvert(inputMimeType string, opts media.ConversionOptions) media.ConversionCheck {
 	normInput := media.NormalizeMimeType(inputMimeType)
-	normOutput := media.NormalizeMimeType(outputMimeType)
 
-	// check if we would need conversion
-	needsConversion := (normInput != normOutput)
+	normTarget := opts.TargetMimeType
+	if normTarget == "" {
+		normTarget = normInput
+	} else {
+		normTarget = media.NormalizeMimeType(normTarget)
+	}
+
+	// Check if conversion is needed: either format changes or image resizing is requested
+	needsConversion := (normInput != normTarget) || opts.Width > 0 || opts.Height > 0
 	canConvert := false
 
-	// check if we can convert
+	// Check if we can convert
 	if c.IsFFmpegAvailable() {
 		contentType, _ := media.GetContentType(normInput)
 
 		if contentType != "file" {
-			if profile, exists := c.supportedConversions[normOutput]; exists && profile.ContentType == contentType {
-				canConvert = true
+			// Video and audio do not support resolution resizing or fit options
+			if (contentType == "video" || contentType == "audio") && (opts.Width > 0 || opts.Height > 0 || opts.Fit != "") {
+				canConvert = false
+			} else {
+				if profile, exists := c.supportedConversions[normTarget]; exists && profile.ContentType == contentType {
+					canConvert = true
+				}
 			}
 		}
 	}

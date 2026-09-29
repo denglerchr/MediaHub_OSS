@@ -11,6 +11,7 @@ import (
 	"net/textproto"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -28,7 +29,10 @@ import (
 	"github.com/pressly/goose/v3"
 )
 
-type mockMediaConverter struct{}
+type mockMediaConverter struct {
+	canConvertFunc          func(inputMimeType string, opts media.ConversionOptions) media.ConversionCheck
+	convertStreamToFileFunc func(ctx context.Context, inputData io.ReadSeeker, inputMimeType string, opts media.ConversionOptions) (*os.File, error)
+}
 
 func (m *mockMediaConverter) GetOutputMimeTypes(contentType string) []string {
 	return []string{"image/jpeg"}
@@ -36,14 +40,41 @@ func (m *mockMediaConverter) GetOutputMimeTypes(contentType string) []string {
 func (m *mockMediaConverter) CanCreatePreview(inputMimeType string) bool {
 	return false
 }
-func (m *mockMediaConverter) CanConvert(inputMimeType, outputMimeType string) media.ConversionCheck {
-	return media.ConversionCheck{CanConvert: true, NeedsConversion: false}
+func (m *mockMediaConverter) CanConvert(inputMimeType string, opts media.ConversionOptions) media.ConversionCheck {
+	if m.canConvertFunc != nil {
+		return m.canConvertFunc(inputMimeType, opts)
+	}
+	if strings.Contains(opts.TargetMimeType, "unsupported") {
+		return media.ConversionCheck{CanConvert: false}
+	}
+	needs := (opts.TargetMimeType != "" && opts.TargetMimeType != inputMimeType) || opts.Width > 0 || opts.Height > 0
+	return media.ConversionCheck{CanConvert: true, NeedsConversion: needs}
 }
-func (m *mockMediaConverter) ConvertStream(ctx context.Context, inputData io.ReadSeeker, outputStream io.Writer, inputMimeType, targetMimeType string) error {
+func (m *mockMediaConverter) ConvertStream(ctx context.Context, inputData io.ReadSeeker, outputStream io.Writer, inputMimeType string, opts media.ConversionOptions) error {
 	_, err := io.Copy(outputStream, inputData)
 	return err
 }
-func (m *mockMediaConverter) ConvertFile(ctx context.Context, inputPath string, outputPath string, inputMimeType, targetMimeType string) error {
+func (m *mockMediaConverter) ConvertStreamToFile(ctx context.Context, inputData io.ReadSeeker, inputMimeType string, opts media.ConversionOptions) (*os.File, error) {
+	if m.convertStreamToFileFunc != nil {
+		return m.convertStreamToFileFunc(ctx, inputData, inputMimeType, opts)
+	}
+	tmp, err := os.CreateTemp("", "mock-stream-*.tmp")
+	if err != nil {
+		return nil, err
+	}
+	if _, err := io.Copy(tmp, inputData); err != nil {
+		tmp.Close()
+		os.Remove(tmp.Name())
+		return nil, err
+	}
+	if _, err := tmp.Seek(0, io.SeekStart); err != nil {
+		tmp.Close()
+		os.Remove(tmp.Name())
+		return nil, err
+	}
+	return tmp, nil
+}
+func (m *mockMediaConverter) ConvertFile(ctx context.Context, inputPath string, outputPath string, inputMimeType string, opts media.ConversionOptions) error {
 	in, err := os.Open(inputPath)
 	if err != nil {
 		return err

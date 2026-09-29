@@ -168,9 +168,19 @@ func (p *Processor) tryReserveSyncSlot() bool {
 	return true
 }
 
+// TryReserveSyncSlot checks limits and reserves a slot for a synchronous/small conversion.
+func (p *Processor) TryReserveSyncSlot() bool {
+	return p.tryReserveSyncSlot()
+}
+
 // releaseSyncSlot releases a reserved synchronous/small conversion slot.
 func (p *Processor) releaseSyncSlot() {
 	p.mu.Lock()
 	p.activeTotal--
 	p.mu.Unlock()
+}
+
+// ReleaseSyncSlot releases a reserved synchronous/small conversion slot.
+func (p *Processor) ReleaseSyncSlot() {
+	p.releaseSyncSlot()
 }
