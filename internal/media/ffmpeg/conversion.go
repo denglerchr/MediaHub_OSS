@@ -251,11 +251,6 @@ func (c *FfmpegConverter) initConversions() {
 		Args:          []string{"-c:a", "libmp3lame", "-b:a", "192k", "-f", "mp3"},
 		IsRecommended: false,
 	}
-	c.supportedConversions["audio/mp3"] = ConversionProfile{
-		ContentType:   "audio",
-		Args:          []string{"-c:a", "libmp3lame", "-b:a", "192k", "-f", "mp3"},
-		IsRecommended: false,
-	}
 	c.supportedConversions["audio/wav"] = ConversionProfile{
 		ContentType:   "audio",
 		Args:          []string{"-c:a", "pcm_s16le", "-f", "wav"},
