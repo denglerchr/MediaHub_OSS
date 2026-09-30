@@ -39,13 +39,6 @@ func (m *testMockConverter) CanCreatePreview(inputMimeType string) bool {
 func (m *testMockConverter) CanConvert(inputMimeType string, opts media.ConversionOptions) media.ConversionCheck {
 	return m.canConvertCheck
 }
-func (m *testMockConverter) ConvertStream(ctx context.Context, inputData io.ReadSeeker, outputStream io.Writer, inputMimeType string, opts media.ConversionOptions) error {
-	if m.convertStreamErr != nil {
-		return m.convertStreamErr
-	}
-	_, err := io.Copy(outputStream, inputData)
-	return err
-}
 func (m *testMockConverter) ConvertStreamToFile(ctx context.Context, inputData io.ReadSeeker, inputMimeType string, opts media.ConversionOptions) (*os.File, error) {
 	if m.convertStreamErr != nil {
 		return nil, m.convertStreamErr

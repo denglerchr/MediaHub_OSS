@@ -196,6 +196,7 @@ func serve(globalOptions *GlobalOptions, frontendFS fs.FS) error {
 	if err != nil {
 		return err
 	}
+	defer svcs.mediaConverter.Shutdown(ctx)
 
 	// 5. Build REST handlers.
 	handlers, err := buildHandlers(cfg, repo, storageProvider, svcs, logger, startTime)

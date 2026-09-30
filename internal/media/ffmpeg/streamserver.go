@@ -10,6 +10,8 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"os"
+	"strings"
 	"sync"
 	"time"
 )
@@ -74,23 +76,51 @@ func (l *LocalStreamServer) Shutdown(ctx context.Context) error {
 	return l.server.Shutdown(ctx)
 }
 
+// isConcurrentSafeReaderAt checks whether the stream is a known concurrent-safe io.ReaderAt
+// implementation. Network-backed streams such as *minio.Object implement io.ReaderAt by mutating
+// internal offset/HTTP reader state without synchronization, making concurrent HTTP Range requests
+// from FFmpeg unsafe unless buffered.
+func isConcurrentSafeReaderAt(stream io.ReadSeeker) (io.ReaderAt, bool) {
+	switch r := stream.(type) {
+	case *bytes.Reader:
+		return r, true
+	case *strings.Reader:
+		return r, true
+	case *io.SectionReader:
+		return r, true
+	case *os.File:
+		return r, true
+	default:
+		return nil, false
+	}
+}
+
 // Register securely mounts an in-memory stream and returns its unique ID and full FFmpeg-ready URL.
 func (l *LocalStreamServer) Register(stream io.ReadSeeker, ttl time.Duration) (string, string, error) {
 	id := generateRandomHex(16)
 	token := generateRandomHex(16)
 
-	// Determine the total size of the stream
-	size, _ := stream.Seek(0, io.SeekEnd)
-	stream.Seek(0, io.SeekStart) // Rewind
+	var readerAt io.ReaderAt
+	var size int64
 
-	// Ensure the stream supports concurrent stateless reads (io.ReaderAt)
-	readerAt, ok := stream.(io.ReaderAt)
-	if !ok {
-		// Fallback: If it's a weird stream type, read it into memory so it becomes a bytes.Reader
-		l.logger.Warn("Stream does not implement io.ReaderAt, buffering into RAM")
+	if safeReaderAt, ok := isConcurrentSafeReaderAt(stream); ok {
+		endPos, err := stream.Seek(0, io.SeekEnd)
+		if err != nil {
+			return "", "", fmt.Errorf("failed to determine stream size: %w", err)
+		}
+		if _, err := stream.Seek(0, io.SeekStart); err != nil {
+			return "", "", fmt.Errorf("failed to rewind stream: %w", err)
+		}
+		readerAt = safeReaderAt
+		size = endPos
+	} else {
+		// Fallback: For non-ReaderAt or non-concurrent-safe streams (e.g., *minio.Object),
+		// rewind if possible and buffer into memory so it becomes a concurrent-safe *bytes.Reader.
+		_, _ = stream.Seek(0, io.SeekStart)
+		l.logger.Debug("Buffering stream into RAM for concurrent-safe ReaderAt access")
 		data, err := io.ReadAll(stream)
 		if err != nil {
-			return "", "", fmt.Errorf("failed to buffer stream into memory: %w", err) // <-- Handle error safely!
+			return "", "", fmt.Errorf("failed to buffer stream into memory: %w", err)
 		}
 		readerAt = bytes.NewReader(data)
 		size = int64(len(data))

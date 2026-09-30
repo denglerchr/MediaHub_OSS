@@ -3,10 +3,12 @@ package ffmpeg
 import (
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
 	"mediahub_oss/internal/shared/customerrors"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 )
 
@@ -59,10 +61,13 @@ func NewFFMPEGConverter(ffmpegConfiguredPath string, ffprobeConfiguredPath strin
 
 	if ffprobePath == "" { // Only check PATH if not found or configured
 		if ffmpegPath != "" {
-			probePath := strings.Replace(ffmpegPath, "ffmpeg", "ffprobe", 1)
-			if _, err := os.Stat(probePath); err == nil {
-				logger.Info("Found ffprobe alongside ffmpeg in PATH", "path", probePath)
-				ffprobePath = probePath
+			base := filepath.Base(ffmpegPath)
+			if strings.Contains(base, "ffmpeg") {
+				probePath := filepath.Join(filepath.Dir(ffmpegPath), strings.Replace(base, "ffmpeg", "ffprobe", 1))
+				if _, err := os.Stat(probePath); err == nil {
+					logger.Info("Found ffprobe alongside ffmpeg in PATH", "path", probePath)
+					ffprobePath = probePath
+				}
 			}
 		}
 	}
@@ -133,4 +138,14 @@ func (ffmpegc *FfmpegConverter) GetFFprobePath() (string, error) {
 	} else {
 		return "", customerrors.ErrNotFound
 	}
+}
+
+// localFilePath checks if an io.ReadSeeker is backed by an accessible local *os.File.
+func localFilePath(r io.ReadSeeker) (string, bool) {
+	if f, ok := r.(*os.File); ok && f != nil && f.Name() != "" {
+		if _, err := os.Stat(f.Name()); err == nil {
+			return f.Name(), true
+		}
+	}
+	return "", false
 }

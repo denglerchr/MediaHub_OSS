@@ -8,19 +8,19 @@ import (
 
 // GetContentType determines the primary content category ("image", "video", "audio", "file")
 // based on the provided MIME type.
-func GetContentType(mimeType string) (string, error) {
+func GetContentType(mimeType string) string {
 	normType := NormalizeMimeType(mimeType)
 
 	if strings.HasPrefix(normType, "image/") {
-		return "image", nil
+		return "image"
 	} else if strings.HasPrefix(normType, "video/") {
-		return "video", nil
+		return "video"
 	} else if strings.HasPrefix(normType, "audio/") {
-		return "audio", nil
+		return "audio"
 	}
 
 	// If it doesn't match known media prefixes, it defaults to the generic "file" type
-	return "file", nil
+	return "file"
 }
 
 func GetContentTypes() []string {

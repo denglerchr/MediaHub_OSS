@@ -50,10 +50,6 @@ func (m *mockMediaConverter) CanConvert(inputMimeType string, opts media.Convers
 	needs := (opts.TargetMimeType != "" && opts.TargetMimeType != inputMimeType) || opts.Width > 0 || opts.Height > 0
 	return media.ConversionCheck{CanConvert: true, NeedsConversion: needs}
 }
-func (m *mockMediaConverter) ConvertStream(ctx context.Context, inputData io.ReadSeeker, outputStream io.Writer, inputMimeType string, opts media.ConversionOptions) error {
-	_, err := io.Copy(outputStream, inputData)
-	return err
-}
 func (m *mockMediaConverter) ConvertStreamToFile(ctx context.Context, inputData io.ReadSeeker, inputMimeType string, opts media.ConversionOptions) (*os.File, error) {
 	if m.convertStreamToFileFunc != nil {
 		return m.convertStreamToFileFunc(ctx, inputData, inputMimeType, opts)

@@ -6,11 +6,11 @@ import (
 	"strings"
 )
 
-// GetOutputMimeTypes dynamically returns target formats based on our supportedConversions map.
+// GetOutputMimeTypes dynamically returns recommended target formats based on our supportedConversions map.
 func (c *FfmpegConverter) GetOutputMimeTypes(contentType string) []string {
 	outputs := make([]string, 0, len(c.supportedConversions)) // Micro-optimization: pre-allocate capacity
 	for mime, profile := range c.supportedConversions {
-		if profile.ContentType == contentType {
+		if profile.ContentType == contentType && profile.IsRecommended {
 			outputs = append(outputs, mime)
 		}
 	}
@@ -51,7 +51,7 @@ func (c *FfmpegConverter) CanConvert(inputMimeType string, opts media.Conversion
 
 	// Check if we can convert
 	if c.IsFFmpegAvailable() {
-		contentType, _ := media.GetContentType(normInput)
+		contentType := media.GetContentType(normInput)
 
 		if contentType != "file" {
 			// Video and audio do not support resolution resizing or fit options

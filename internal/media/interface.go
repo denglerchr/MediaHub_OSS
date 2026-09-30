@@ -13,9 +13,6 @@ type MediaConverter interface {
 	CanConvert(inputMimeType string, opts ConversionOptions) ConversionCheck
 
 	// --- File Conversion ---
-	// ConvertStream: For small files in RAM. Uses HTTP loopback for input, pipes to output.
-	ConvertStream(ctx context.Context, inputData io.ReadSeeker, outputStream io.Writer, inputMimeType string, opts ConversionOptions) error
-
 	// ConvertStreamToFile: Converts input stream into an optimized temp file and returns an open file handle.
 	ConvertStreamToFile(ctx context.Context, inputData io.ReadSeeker, inputMimeType string, opts ConversionOptions) (*os.File, error)
 

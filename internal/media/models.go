@@ -39,9 +39,9 @@ var videoMimeTypes = []string{
 
 var audioMimeTypes = []string{
 	"audio/mpeg",
+	"audio/mp3",
 	"audio/wav",
 	"audio/flac",
-	"audio/mp3",
 	"audio/opus",
 	"audio/ogg",
 	"audio/mp4",

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"os/exec"
 	"strconv"
 	"time"
@@ -35,6 +36,10 @@ func (c *FfmpegConverter) ReadMediaFieldsFromFile(ctx context.Context, filepath 
 // ReadMediaFieldsFromStream extracts metadata purely in-memory by exposing the stream
 // via the internal HTTP loopback server.
 func (c *FfmpegConverter) ReadMediaFieldsFromStream(ctx context.Context, inputData io.ReadSeeker, contentType string) (map[string]any, error) {
+	if path, ok := localFilePath(inputData); ok {
+		return c.runFFprobe(ctx, path, contentType)
+	}
+
 	id, fullURL, err := c.localServer.Register(inputData, 2*time.Minute)
 	if err != nil {
 		return map[string]any{}, fmt.Errorf("failed to register stream: %w", err)
@@ -48,8 +53,7 @@ func (c *FfmpegConverter) ReadMediaFieldsFromStream(ctx context.Context, inputDa
 func (c *FfmpegConverter) runFFprobe(ctx context.Context, inputSource string, contentType string) (map[string]any, error) {
 	probePath, err := c.GetFFprobePath()
 	if err != nil {
-		// return default values if ffprobe is unavailable
-		return extractFields(ffprobeOutput{}, contentType)
+		return nil, fmt.Errorf("ffprobe is not available: %w", err)
 	}
 
 	args := []string{
@@ -98,24 +102,28 @@ func extractFields(probe ffprobeOutput, contentType string) (map[string]any, err
 				height = uint64(s.Height)
 			}
 			if s.Duration != "" {
-				if d, err := strconv.ParseFloat(s.Duration, 64); err == nil && duration == 0 {
+				if d, err := strconv.ParseFloat(s.Duration, 64); err == nil && d > 0 && duration == 0 {
 					duration = d
 				}
 			}
 		}
 		if s.CodecType == "audio" {
 			if s.Channels > 0 && channels == 0 {
-				channels = uint8(s.Channels)
+				if s.Channels > math.MaxUint8 {
+					channels = math.MaxUint8
+				} else {
+					channels = uint8(s.Channels)
+				}
 			}
 			if s.Duration != "" {
-				if d, err := strconv.ParseFloat(s.Duration, 64); err == nil && duration == 0 {
+				if d, err := strconv.ParseFloat(s.Duration, 64); err == nil && d > 0 && duration == 0 {
 					duration = d
 				}
 			}
 		}
 	}
 	if probe.Format.Duration != "" {
-		if d, err := strconv.ParseFloat(probe.Format.Duration, 64); err == nil {
+		if d, err := strconv.ParseFloat(probe.Format.Duration, 64); err == nil && d > 0 {
 			duration = d
 		}
 	}

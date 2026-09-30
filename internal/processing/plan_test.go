@@ -27,10 +27,6 @@ func (m *mockConverter) CanConvert(inputMimeType string, opts media.ConversionOp
 	return media.ConversionCheck{CanConvert: true, NeedsConversion: true}
 }
 
-func (m *mockConverter) ConvertStream(ctx context.Context, inputData io.ReadSeeker, outputStream io.Writer, inputMimeType string, opts media.ConversionOptions) error {
-	return nil
-}
-
 func (m *mockConverter) ConvertStreamToFile(ctx context.Context, inputData io.ReadSeeker, inputMimeType string, opts media.ConversionOptions) (*os.File, error) {
 	tmp, err := os.CreateTemp("", "mock-stream-*.tmp")
 	if err != nil {

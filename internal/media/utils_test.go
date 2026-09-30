@@ -76,7 +76,7 @@ func TestNormalizeMimeType(t *testing.T) {
 }
 
 func TestIsMimeOfType_AudioOgg(t *testing.T) {
-	for _, oggFormat := range []string{"ogg", "audio/ogg", "oga", "audio/x-ogg", "application/ogg"} {
+	for _, oggFormat := range []string{"ogg", "audio/ogg", "oga", "audio/x-ogg", "application/ogg", "mp3", "audio/mp3", "m4a", "audio/m4a"} {
 		ok, err := media.IsMimeOfType("audio", oggFormat)
 		if err != nil {
 			t.Fatalf("unexpected error for %q: %v", oggFormat, err)
@@ -84,5 +84,29 @@ func TestIsMimeOfType_AudioOgg(t *testing.T) {
 		if !ok {
 			t.Errorf("expected IsMimeOfType('audio', %q) to be true", oggFormat)
 		}
+	}
+}
+
+func TestGetContentType(t *testing.T) {
+	tests := []struct {
+		input    string
+		expected string
+	}{
+		{"image/png", "image"},
+		{"png", "image"},
+		{"audio/mpeg", "audio"},
+		{"mp3", "audio"},
+		{"video/mp4", "video"},
+		{"application/pdf", "file"},
+		{"unknown/type", "file"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.input, func(t *testing.T) {
+			actual := media.GetContentType(tc.input)
+			if actual != tc.expected {
+				t.Errorf("GetContentType(%q) = %q, expected %q", tc.input, actual, tc.expected)
+			}
+		})
 	}
 }

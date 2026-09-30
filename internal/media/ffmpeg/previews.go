@@ -23,6 +23,10 @@ func (c *FfmpegConverter) CreatePreviewFromFile(ctx context.Context, filepath st
 // CreatePreviewFromStream generates a WebP preview purely in-memory using the LocalStreamServer.
 // It bypasses physical disk writes while retaining the ability for FFmpeg to safely seek the stream.
 func (c *FfmpegConverter) CreatePreviewFromStream(ctx context.Context, inputData io.ReadSeeker, outputWriter io.Writer, inputMimeType string) error {
+	if path, ok := localFilePath(inputData); ok {
+		return c.generatePreview(ctx, path, outputWriter, inputMimeType)
+	}
+
 	// Register the stream with the local loopback server with a short Time-To-Live.
 	id, fullURL, err := c.localServer.Register(inputData, 2*time.Minute)
 	if err != nil {
@@ -43,13 +47,9 @@ func (c *FfmpegConverter) generatePreview(ctx context.Context, inputSource strin
 		return fmt.Errorf("ffmpeg is not available: %w", err)
 	}
 
-	contentType, err := media.GetContentType(inputMimeType)
-	if err != nil {
-		return fmt.Errorf("failed to get content type for preview: %w", err)
-	}
+	contentType := media.GetContentType(inputMimeType)
 
 	var filterArgs []string
-	var preInputArgs []string
 
 	switch contentType {
 	case "image":
@@ -79,7 +79,6 @@ func (c *FfmpegConverter) generatePreview(ctx context.Context, inputSource strin
 
 	// Assemble the final FFmpeg command arguments
 	args := []string{"-v", "error"} // Only output fatal errors to keep logs clean
-	args = append(args, preInputArgs...)
 	args = append(args, "-i", inputSource)
 	args = append(args, filterArgs...)
 

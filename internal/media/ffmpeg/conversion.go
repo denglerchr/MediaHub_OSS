@@ -15,8 +15,9 @@ import (
 
 // ConversionProfile defines the FFmpeg arguments required for a specific output format.
 type ConversionProfile struct {
-	ContentType string
-	Args        []string
+	ContentType   string
+	Args          []string
+	IsRecommended bool
 }
 
 // BuildImageFilter constructs the FFmpeg video filter (-vf) string for image resizing and scaling.
@@ -60,10 +61,7 @@ func BuildImageFilter(width, height int, fit string) (string, error) {
 // prepareConversion validates the conversion options and returns the normalized target MIME type
 // and the combined processing arguments (filters and format/codec flags).
 func (c *FfmpegConverter) prepareConversion(inputMimeType string, opts media.ConversionOptions) (string, []string, error) {
-	contentType, err := media.GetContentType(inputMimeType)
-	if err != nil {
-		return "", nil, fmt.Errorf("failed to determine content type: %w", err)
-	}
+	contentType := media.GetContentType(inputMimeType)
 
 	if contentType != "image" && (opts.Width > 0 || opts.Height > 0 || opts.Fit != "") {
 		return "", nil, fmt.Errorf("resolution and fit options are only supported for images, got content type: %s", contentType)
@@ -144,12 +142,16 @@ func (c *FfmpegConverter) ConvertStreamToFile(ctx context.Context, inputData io.
 		return nil, err
 	}
 
-	// Register the stream with the local loopback server.
-	id, fullURL, err := c.localServer.Register(inputData, 30*time.Minute)
-	if err != nil {
-		return nil, fmt.Errorf("failed to register stream: %w", err)
+	inputSource, isLocal := localFilePath(inputData)
+	if !isLocal {
+		// Register the stream with the local loopback server.
+		var id string
+		id, inputSource, err = c.localServer.Register(inputData, 30*time.Minute)
+		if err != nil {
+			return nil, fmt.Errorf("failed to register stream: %w", err)
+		}
+		defer c.localServer.Unregister(id)
 	}
-	defer c.localServer.Unregister(id)
 
 	// Create the highly optimized temporary file to satisfy FFmpeg's need for a seekable output
 	tmpPath, err := createInMemoryFile("", "ffmpeg-output-*.tmp")
@@ -157,7 +159,7 @@ func (c *FfmpegConverter) ConvertStreamToFile(ctx context.Context, inputData io.
 		return nil, fmt.Errorf("failed to create temporary output file: %w", err)
 	}
 
-	args := append([]string{"-y", "-i", fullURL}, conversionArgs...)
+	args := append([]string{"-y", "-i", inputSource}, conversionArgs...)
 	args = append(args, tmpPath)
 
 	if err := c.runFFmpegCommand(ctx, ffmpegPath, args, "FFmpeg stream conversion failed", normTarget); err != nil {
@@ -172,26 +174,6 @@ func (c *FfmpegConverter) ConvertStreamToFile(ctx context.Context, inputData io.
 	}
 
 	return generatedFile, nil
-}
-
-// ConvertStream transcodes small files in RAM, utilizing the HTTP loopback server for input
-// and streams the result directly into outputStream without Go heap buffering.
-func (c *FfmpegConverter) ConvertStream(ctx context.Context, inputData io.ReadSeeker, outputStream io.Writer, inputMimeType string, opts media.ConversionOptions) error {
-	generatedFile, err := c.ConvertStreamToFile(ctx, inputData, inputMimeType, opts)
-	if err != nil {
-		return err
-	}
-	defer func() {
-		generatedFile.Close()
-		os.Remove(generatedFile.Name())
-	}()
-
-	// Stream the data from our memory-backed file into the final output destination
-	if _, err := io.Copy(outputStream, generatedFile); err != nil {
-		return fmt.Errorf("failed to copy converted data to output stream: %w", err)
-	}
-
-	return nil
 }
 
 // buildConversionArgs safely retrieves a copy of the pre-computed FFmpeg arguments.
@@ -219,15 +201,16 @@ func (c *FfmpegConverter) initConversions() {
 		return
 	}
 
-	// 1. Add static Image and Audio profiles (these rely heavily on standard software encoding)
 	// 1. Image and Audio Profiles
 	c.supportedConversions["image/jpeg"] = ConversionProfile{
-		ContentType: "image",
-		Args:        []string{"-c:v", "mjpeg", "-vframes", "1", "-f", "image2"},
+		ContentType:   "image",
+		Args:          []string{"-c:v", "mjpeg", "-vframes", "1", "-f", "image2"},
+		IsRecommended: true,
 	}
 	c.supportedConversions["image/webp"] = ConversionProfile{
-		ContentType: "image",
-		Args:        []string{"-c:v", "libwebp", "-vframes", "1", "-f", "webp"},
+		ContentType:   "image",
+		Args:          []string{"-c:v", "libwebp", "-vframes", "1", "-f", "webp"},
+		IsRecommended: true,
 	}
 	c.supportedConversions["image/avif"] = ConversionProfile{
 		ContentType: "image",
@@ -240,14 +223,48 @@ func (c *FfmpegConverter) initConversions() {
 			"-row-mt", "1", // Enables Row-Based Multithreading (Use all CPU cores)
 			"-f", "avif",
 		},
+		IsRecommended: true,
 	}
+	c.supportedConversions["image/png"] = ConversionProfile{
+		ContentType:   "image",
+		Args:          []string{"-c:v", "png", "-vframes", "1", "-f", "image2"},
+		IsRecommended: false,
+	}
+	c.supportedConversions["image/gif"] = ConversionProfile{
+		ContentType:   "image",
+		Args:          []string{"-c:v", "gif", "-f", "gif"},
+		IsRecommended: false,
+	}
+
 	c.supportedConversions["audio/flac"] = ConversionProfile{
-		ContentType: "audio",
-		Args:        []string{"-c:a", "flac", "-f", "flac"},
+		ContentType:   "audio",
+		Args:          []string{"-c:a", "flac", "-f", "flac"},
+		IsRecommended: true,
 	}
 	c.supportedConversions["audio/opus"] = ConversionProfile{
-		ContentType: "audio",
-		Args:        []string{"-c:a", "libopus", "-f", "opus"},
+		ContentType:   "audio",
+		Args:          []string{"-c:a", "libopus", "-f", "opus"},
+		IsRecommended: true,
+	}
+	c.supportedConversions["audio/mpeg"] = ConversionProfile{
+		ContentType:   "audio",
+		Args:          []string{"-c:a", "libmp3lame", "-b:a", "192k", "-f", "mp3"},
+		IsRecommended: false,
+	}
+	c.supportedConversions["audio/mp3"] = ConversionProfile{
+		ContentType:   "audio",
+		Args:          []string{"-c:a", "libmp3lame", "-b:a", "192k", "-f", "mp3"},
+		IsRecommended: false,
+	}
+	c.supportedConversions["audio/wav"] = ConversionProfile{
+		ContentType:   "audio",
+		Args:          []string{"-c:a", "pcm_s16le", "-f", "wav"},
+		IsRecommended: false,
+	}
+	c.supportedConversions["audio/ogg"] = ConversionProfile{
+		ContentType:   "audio",
+		Args:          []string{"-c:a", "libvorbis", "-q:a", "4", "-f", "ogg"},
+		IsRecommended: false,
 	}
 
 	// 2. Detect available video encoders
@@ -266,8 +283,9 @@ func (c *FfmpegConverter) initConversions() {
 	mp4Args = append(mp4Args, "-f", "mp4", "-movflags", "+faststart") // Add file/muxer flags
 
 	c.supportedConversions["video/mp4"] = ConversionProfile{
-		ContentType: "video",
-		Args:        mp4Args,
+		ContentType:   "video",
+		Args:          mp4Args,
+		IsRecommended: true,
 	}
 	if h264Enc != "libx264" {
 		c.logger.Info("Hardware acceleration enabled", "format", "video/mp4", "encoder", h264Enc)
@@ -286,8 +304,9 @@ func (c *FfmpegConverter) initConversions() {
 	av1Args = append(av1Args, "-f", "webm")                       // Add file/muxer flags
 
 	c.supportedConversions["video/webm"] = ConversionProfile{
-		ContentType: "video",
-		Args:        av1Args,
+		ContentType:   "video",
+		Args:          av1Args,
+		IsRecommended: true,
 	}
 	if av1Enc != "libsvtav1" {
 		c.logger.Info("Hardware acceleration enabled", "format", "video/webm", "encoder", av1Enc)
