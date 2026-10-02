@@ -2,6 +2,7 @@ package processing
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -9,89 +10,105 @@ import (
 
 	"mediahub_oss/internal/media"
 	repo "mediahub_oss/internal/repository"
+	"mediahub_oss/internal/shared/customerrors"
 )
 
-// StartQueueChecker scans for hanging queued entries on startup and processes them.
-func (p *Processor) StartQueueChecker(ctx context.Context) {
-	p.Logger.Info("Starting background queue checker to scan for hanging queued entries...")
+// StartQueueMonitor periodically checks for queued entries across all databases
+// and spawns background workers if concurrency limits allow.
+// It runs an initial check at startup and continues on a 15-second ticker until ctx is cancelled.
+func (p *Processor) StartQueueMonitor(ctx context.Context) {
+	p.Logger.Info("Starting background queue monitor to scan for queued entries...")
 
-	databases, err := p.Repo.GetDatabases(ctx)
-	if err != nil {
-		p.Logger.Error("QueueChecker: Failed to get databases", "error", err)
-		return
-	}
+	// Initial scan at startup
+	p.TriggerQueueWorkersIfPossible(ctx)
 
-	for _, db := range databases {
-		limit := uint64(p.NFfmpegAsync)
-		if limit == 0 {
-			limit = 10
-		}
-		queuedEntries, err := p.Repo.GetEntriesByStatus(ctx, db.ID, repo.EntryStatusQueued, limit)
-		if err != nil {
-			p.Logger.Error("QueueChecker: Failed to get queued entries", "database_id", db.ID.String(), "error", err)
-			continue
-		}
+	ticker := time.NewTicker(15 * time.Second)
+	defer ticker.Stop()
 
-		for _, entry := range queuedEntries {
-			if !p.tryAcquireAndSpawn(ctx, db, entry) {
-				p.Logger.Info("QueueChecker: Concurrency limits reached, stopping initial queue scan.")
-				return
-			}
+	for {
+		select {
+		case <-ctx.Done():
+			p.Logger.Info("Stopping background queue monitor")
+			return
+		case <-ticker.C:
+			p.TriggerQueueWorkersIfPossible(ctx)
 		}
 	}
 }
 
-func (p *Processor) tryAcquireAndSpawn(ctx context.Context, db repo.Database, entry repo.Entry) bool {
+// if slots are available, try to claim a queued entry and spawn a background worker to process it.
+func (p *Processor) tryAcquireAndSpawn(ctx context.Context, dbID repo.ULID, entry repo.Entry) (bool, bool) {
 	if !p.tryReserveAsyncSlot() {
-		return false
+		return false, false
 	}
 
-	claimed, err := p.Repo.ClaimQueuedEntry(ctx, db.ID, entry.ID)
+	claimed, err := p.Repo.ClaimQueuedEntry(ctx, dbID, entry.ID)
 	if err != nil {
-		p.Logger.Error("Failed to claim queued entry", "database_id", db.ID.String(), "entry_id", entry.ID, "error", err)
-		p.releaseAsyncSlot()
-		return false
+		p.Logger.Error("Failed to claim queued entry", "database_id", dbID.String(), "entry_id", entry.ID, "error", err)
+		p.releaseAsyncSlotWithoutTrigger()
+		return false, false
 	}
 
 	if !claimed {
-		p.releaseAsyncSlot()
-		select {
-		case <-ctx.Done():
-			return false
-		case <-time.After(10 * time.Millisecond):
-		}
-		return true // continue scanning
+		p.releaseAsyncSlotWithoutTrigger()
+		return false, true // continue scanning next entry without triggering cascading dispatchers
 	}
 
-	p.Logger.Debug("Worker: Spawned background queue worker for claimed entry", "database_id", db.ID.String(), "entry_id", entry.ID)
+	p.Logger.Debug("Worker: Spawned background queue worker for claimed entry", "database_id", dbID.String(), "entry_id", entry.ID)
 	go func() {
-		defer func() {
-			p.releaseAsyncSlot()
-			p.TriggerQueueWorkersIfPossible(context.Background())
-		}()
-		p.runWorkerForClaimedEntry(context.Background(), db, entry)
+		defer p.releaseAsyncSlot()
+		p.runWorkerForClaimedEntry(context.Background(), dbID, entry)
 	}()
-	return true
+	return true, true
 }
 
-func (p *Processor) runWorkerForClaimedEntry(ctx context.Context, db repo.Database, entry repo.Entry) {
+func (p *Processor) requeueClaimedEntry(ctx context.Context, dbID repo.ULID, entry repo.Entry) {
+	entry.Status = repo.EntryStatusQueued
+	if _, updateErr := p.Repo.UpdateEntry(ctx, dbID, entry); updateErr != nil {
+		p.Logger.Error("Worker: CRITICAL: Failed to requeue claimed entry", "entry", entry.ID, "error", updateErr)
+	} else {
+		p.markEntryQueued()
+	}
+}
+
+func (p *Processor) failWorkerEntry(ctx context.Context, dbID repo.ULID, entry repo.Entry) {
+	_ = p.Storage.Delete(ctx, dbID.String(), entry.ID)
+	_ = p.Storage.DeletePreview(ctx, dbID.String(), entry.ID)
+	entry.Size = 0
+	entry.PreviewSize = 0
+	entry.Status = repo.EntryStatusError
+	if _, updateErr := p.Repo.UpdateEntry(ctx, dbID, entry); updateErr != nil {
+		p.Logger.Error("Worker: CRITICAL: Failed to set status error", "entry", entry.ID, "error", updateErr)
+	}
+}
+
+func (p *Processor) runWorkerForClaimedEntry(ctx context.Context, dbID repo.ULID, entry repo.Entry) {
+	db, err := p.Repo.GetDatabase(ctx, dbID)
+	if err != nil {
+		p.Logger.Error("Worker: Failed to retrieve database for claimed entry", "database_id", dbID.String(), "entry_id", entry.ID, "error", err)
+		p.requeueClaimedEntry(ctx, dbID, entry)
+		return
+	}
+
 	// get the file locally on disk
 	tempFile, err := os.CreateTemp(os.TempDir(), "mh-worker-queued-*")
 	if err != nil {
 		p.Logger.Error("Worker: Failed to create temp file for queued entry", "entry", entry.ID, "error", err)
-		entry.Status = repo.EntryStatusError
-		_, _ = p.Repo.UpdateEntry(ctx, db.ID, entry)
+		p.requeueClaimedEntry(ctx, dbID, entry)
 		return
 	}
 	tempFilePath := tempFile.Name()
 	defer os.Remove(tempFilePath)
 
-	stream, err := p.Storage.Read(ctx, db.ID.String(), entry.ID, 0, -1)
+	stream, err := p.Storage.Read(ctx, dbID.String(), entry.ID, 0, -1)
 	if err != nil {
 		p.Logger.Error("Worker: Failed to read queued file from storage", "entry", entry.ID, "error", err)
 		tempFile.Close()
-		entry.Status = repo.EntryStatusError
-		_, _ = p.Repo.UpdateEntry(ctx, db.ID, entry)
+		if errors.Is(err, customerrors.ErrNotFound) {
+			p.failWorkerEntry(ctx, dbID, entry)
+		} else {
+			p.requeueClaimedEntry(ctx, dbID, entry)
+		}
 		return
 	}
 
@@ -101,93 +118,16 @@ func (p *Processor) runWorkerForClaimedEntry(ctx context.Context, db repo.Databa
 
 	if err != nil {
 		p.Logger.Error("Worker: Failed to copy queued file to temp path", "entry", entry.ID, "error", err)
-		entry.Status = repo.EntryStatusError
-		_, _ = p.Repo.UpdateEntry(ctx, db.ID, entry)
+		p.requeueClaimedEntry(ctx, dbID, entry)
 		return
 	}
 
 	// Handle this file
 	plan := DeterminePlanForEntry(p.MediaConverter, db, entry)
 	p.runConversionAndFinalize(ctx, db, entry, tempFilePath, plan)
-
-	// Check the queue for next jobs and process them sequentially
-	p.runQueueWorkerLoop(ctx, db)
 }
 
-func (p *Processor) runQueueWorkerLoop(ctx context.Context, initialDB repo.Database) {
-	db := initialDB
-	for {
-		select {
-		case <-ctx.Done():
-			p.Logger.Debug("Worker: Context cancelled, terminating queue worker.")
-			return
-		default:
-		}
-
-		nextEntry, nextDB, found, err := p.findNextQueuedEntry(ctx)
-		if err != nil {
-			p.Logger.Error("Worker: Failed to scan for next queued entry", "error", err)
-			break
-		}
-		if !found {
-			break
-		}
-
-		claimed, err := p.Repo.ClaimQueuedEntry(ctx, nextDB.ID, nextEntry.ID)
-		if err != nil {
-			p.Logger.Error("Worker: Failed to claim next queued entry", "database_id", nextDB.ID.String(), "entry_id", nextEntry.ID, "error", err)
-			break
-		}
-		if !claimed {
-			select {
-			case <-ctx.Done():
-				return
-			case <-time.After(50 * time.Millisecond):
-			}
-			continue
-		}
-
-		db = nextDB
-		p.Logger.Debug("Worker: Claimed next queued entry from loop", "database_id", db.ID.String(), "entry_id", nextEntry.ID, "filename", nextEntry.FileName)
-		tempFile, err := os.CreateTemp(os.TempDir(), "mh-worker-queued-*")
-		if err != nil {
-			p.Logger.Error("Worker: Failed to create temp file for claimed entry", "entry", nextEntry.ID, "error", err)
-			nextEntry.Status = repo.EntryStatusError
-			_, _ = p.Repo.UpdateEntry(ctx, db.ID, nextEntry)
-			continue
-		}
-		tempFilePath := tempFile.Name()
-
-		stream, err := p.Storage.Read(ctx, db.ID.String(), nextEntry.ID, 0, -1)
-		if err != nil {
-			p.Logger.Error("Worker: Failed to read claimed file from storage", "entry", nextEntry.ID, "error", err)
-			tempFile.Close()
-			os.Remove(tempFilePath)
-			nextEntry.Status = repo.EntryStatusError
-			_, _ = p.Repo.UpdateEntry(ctx, db.ID, nextEntry)
-			continue
-		}
-
-		_, err = io.Copy(tempFile, stream)
-		stream.Close()
-		tempFile.Close()
-
-		if err != nil {
-			p.Logger.Error("Worker: Failed to copy claimed file to temp path", "entry", nextEntry.ID, "error", err)
-			os.Remove(tempFilePath)
-			nextEntry.Status = repo.EntryStatusError
-			_, _ = p.Repo.UpdateEntry(ctx, db.ID, nextEntry)
-			continue
-		}
-
-		plan := DeterminePlanForEntry(p.MediaConverter, db, nextEntry)
-		p.runConversionAndFinalize(ctx, db, nextEntry, tempFilePath, plan)
-		os.Remove(tempFilePath)
-	}
-
-	p.Logger.Debug("Worker: Terminating queue worker.")
-}
-
+// run conversion on a file on disk
 func (p *Processor) runConversionAndFinalize(
 	ctx context.Context,
 	db repo.Database,
@@ -206,10 +146,7 @@ func (p *Processor) runConversionAndFinalize(
 	defer func() {
 		if processErr != nil {
 			p.Logger.Error("Worker: FAILED processing", "entry", entry.ID, "error", processErr)
-			entry.Status = repo.EntryStatusError
-			if _, updateErr := p.Repo.UpdateEntry(ctx, db.ID, entry); updateErr != nil {
-				p.Logger.Error("Worker: CRITICAL: Failed to set status error", "entry", entry.ID, "error", updateErr)
-			}
+			p.failWorkerEntry(ctx, db.ID, entry)
 		}
 		for _, path := range cleanupPaths {
 			os.Remove(path)
@@ -229,6 +166,7 @@ func (p *Processor) runConversionAndFinalize(
 		}
 		convertedTempPath := convertedTempFile.Name()
 		convertedTempFile.Close()
+		cleanupPaths = append(cleanupPaths, convertedTempPath)
 
 		err = p.MediaConverter.ConvertFile(ctx, currentPath, convertedTempPath, plan.InitMimeType, media.ConversionOptions{
 			TargetMimeType: plan.TargetMimeType,
@@ -238,7 +176,6 @@ func (p *Processor) runConversionAndFinalize(
 			return
 		}
 
-		cleanupPaths = append(cleanupPaths, convertedTempPath)
 		currentPath = convertedTempPath
 	}
 
@@ -251,23 +188,10 @@ func (p *Processor) runConversionAndFinalize(
 	}
 
 	if plan.WantsPreview && plan.CanGenPreview {
-		pr, pw := io.Pipe()
-		errChan := make(chan error, 1)
-
-		go func() {
-			defer pw.Close()
-			err := p.MediaConverter.CreatePreviewFromFile(ctx, currentPath, pw, plan.TargetMimeType)
-			errChan <- err
-		}()
-
-		if previewSize, err := p.Storage.WritePreview(ctx, db.ID.String(), entry.ID, pr); err != nil {
-			pr.CloseWithError(err)
-			p.Logger.Error("Worker: Failed to save preview to storage", "entry", entry.ID, "error", err)
-			<-errChan
-		} else if genErr := <-errChan; genErr != nil {
-			p.Logger.Error("Worker: Failed to generate preview", "entry", entry.ID, "error", genErr)
+		if previewSize, err := p.generateAndStorePreviewFromFile(ctx, db, entry.ID, currentPath, plan.ResultMimeType); err != nil {
+			p.Logger.Error("Worker: Failed to generate or store preview", "entry", entry.ID, "error", err)
 		} else {
-			entry.PreviewSize = uint64(previewSize)
+			entry.PreviewSize = previewSize
 		}
 	}
 
@@ -298,9 +222,16 @@ func (p *Processor) runConversionAndFinalize(
 	p.Logger.Info("Worker: Successfully processed large entry", "entry", entry.ID)
 }
 
-// TriggerQueueWorkersIfPossible scans for any queued entries across all databases
-// and spawns background workers for them if concurrency limits allow.
+// TriggerQueueWorkersIfPossible checks for queued entries across all databases,
+// synchronizes the processor's in-memory hasQueuedEntries flag, and spawns background
+// workers in parallel up to available conversion limits (n_ffmpeg_async and n_ffmpeg_total).
+// It uses isScanningQueue to prevent multiple concurrent scan loops and stampedes.
 func (p *Processor) TriggerQueueWorkersIfPossible(ctx context.Context) {
+	if !p.isScanningQueue.CompareAndSwap(false, true) {
+		return
+	}
+	defer p.isScanningQueue.Store(false)
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -308,17 +239,59 @@ func (p *Processor) TriggerQueueWorkersIfPossible(ctx context.Context) {
 		default:
 		}
 
-		entry, db, found, err := p.findNextQueuedEntry(ctx)
+		dbIDs, err := p.Repo.GetDatabaseULIDsWithQueuedEntries(ctx)
 		if err != nil {
-			p.Logger.Error("TriggerQueueWorkers: Failed to scan for next queued entry", "error", err)
-			break
-		}
-		if !found {
-			break
+			p.Logger.Error("TriggerQueueWorkers: Failed to query database ULIDs with queued entries", "error", err)
+			return
 		}
 
-		if !p.tryAcquireAndSpawn(ctx, db, entry) {
-			break // Limits reached, stop spawning
+		hasEntries := len(dbIDs) > 0
+		p.mu.Lock()
+		p.hasQueuedEntries = hasEntries
+		freeAsync := p.NFfmpegAsync - p.activeAsync
+		freeTotal := p.NFfmpegTotal - p.activeTotal
+		p.mu.Unlock()
+
+		if !hasEntries || freeAsync <= 0 || freeTotal <= 0 {
+			return
+		}
+
+		spawnedCount := 0
+		limit := freeAsync
+		if freeTotal < limit {
+			limit = freeTotal
+		}
+
+		for _, dbID := range dbIDs {
+			if limit <= 0 {
+				break
+			}
+
+			entries, err := p.Repo.GetEntriesByStatus(ctx, dbID, repo.EntryStatusQueued, uint64(limit))
+			if err != nil {
+				p.Logger.Error("TriggerQueueWorkers: Failed to get queued entries", "database_id", dbID.String(), "error", err)
+				continue
+			}
+
+			for _, entry := range entries {
+				claimed, ok := p.tryAcquireAndSpawn(ctx, dbID, entry)
+				if !ok {
+					// Concurrency limit reached or fatal error
+					return
+				}
+				if claimed {
+					spawnedCount++
+					limit--
+					if limit <= 0 {
+						break
+					}
+				}
+			}
+		}
+
+		// If no workers could be spawned in this pass, exit to avoid busy looping
+		if spawnedCount == 0 || limit <= 0 {
+			return
 		}
 	}
 }

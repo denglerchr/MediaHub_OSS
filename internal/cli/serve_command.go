@@ -28,12 +28,14 @@ import (
 	"mediahub_oss/internal/storage"
 	"mediahub_oss/internal/storage/localstorage"
 	"mediahub_oss/internal/storage/s3storage"
+	"net/http"
+	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 
 	// Aliased imports for your sub-handlers
-
-	"net/http"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
@@ -168,7 +170,8 @@ func serve(globalOptions *GlobalOptions, frontendFS fs.FS) error {
 
 	cfg := globalOptions.Conf
 	logger := globalOptions.Logger
-	ctx := context.Background()
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
 
 	logger.Info("Bootstrapping MediaHub server...")
 
@@ -196,7 +199,7 @@ func serve(globalOptions *GlobalOptions, frontendFS fs.FS) error {
 	if err != nil {
 		return err
 	}
-	defer svcs.mediaConverter.Shutdown(ctx)
+	defer svcs.mediaConverter.Shutdown(context.Background())
 
 	// 5. Build REST handlers.
 	handlers, err := buildHandlers(cfg, repo, storageProvider, svcs, logger, startTime)
@@ -205,7 +208,7 @@ func serve(globalOptions *GlobalOptions, frontendFS fs.FS) error {
 	}
 
 	// 6. Setup router and start the HTTP server.
-	return startServer(cfg, handlers, svcs.authMiddleware, frontendFS, logger)
+	return startServer(ctx, cfg, handlers, svcs.authMiddleware, frontendFS, logger)
 }
 
 // initDatabaseAndSchema initializes the repository connection, runs version check or auto-migration,
@@ -258,7 +261,7 @@ func initServices(ctx context.Context, cfg *config.Config, repo repository.Repos
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize processing manager: %w", err)
 	}
-	go proc.StartQueueChecker(ctx)
+	go proc.StartQueueMonitor(ctx)
 
 	return &backgroundServices{
 		houseKeeper:    hk,
@@ -352,7 +355,7 @@ func buildHandlers(cfg *config.Config, repo repository.Repository, storageProvid
 }
 
 // startServer configures the routing engine and binds the HTTP listener.
-func startServer(cfg *config.Config, handlers *httpserver.Handlers, authMiddleware *auth.AuthMiddleware, frontendFS fs.FS, logger *slog.Logger) error {
+func startServer(ctx context.Context, cfg *config.Config, handlers *httpserver.Handlers, authMiddleware *auth.AuthMiddleware, frontendFS fs.FS, logger *slog.Logger) error {
 	var fileSystem http.FileSystem
 	if frontendFS != nil {
 		// TODO: Update <base href> to the MEDIAHUB_SERVER_BASEPATH
@@ -370,11 +373,26 @@ func startServer(cfg *config.Config, handlers *httpserver.Handlers, authMiddlewa
 		Handler: mux,
 	}
 
-	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		return fmt.Errorf("server failed: %w", err)
-	}
+	serverErr := make(chan error, 1)
+	go func() {
+		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			serverErr <- fmt.Errorf("server failed: %w", err)
+		}
+		close(serverErr)
+	}()
 
-	return nil
+	select {
+	case err := <-serverErr:
+		return err
+	case <-ctx.Done():
+		logger.Info("Shutting down HTTP server...")
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := server.Shutdown(shutdownCtx); err != nil {
+			logger.Error("HTTP server shutdown error", "error", err)
+		}
+		return nil
+	}
 }
 
 // handleInitialMigration checks the database version and only auto-migrates if it is a completely fresh installation (version 0).

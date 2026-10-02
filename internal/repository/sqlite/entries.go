@@ -98,9 +98,13 @@ func (r *SQLiteRepository) CreateEntry(ctx context.Context, db repo.Database, en
 	// Calculate total size delta (main file + preview)
 	totalSizeDelta := entry.Size + entry.PreviewSize
 
-	statsQuery, statsArgs, err := r.Builder.Update("databases").
+	statsBuilder := r.Builder.Update("databases").
 		Set("entry_count", squirrel.Expr("entry_count + 1")).
-		Set("total_disk_space_bytes", squirrel.Expr("total_disk_space_bytes + ?", totalSizeDelta)).
+		Set("total_disk_space_bytes", squirrel.Expr("total_disk_space_bytes + ?", totalSizeDelta))
+	if entry.Status == repo.EntryStatusQueued {
+		statsBuilder = statsBuilder.Set("queued_count", squirrel.Expr("queued_count + 1"))
+	}
+	statsQuery, statsArgs, err := statsBuilder.
 		Where(squirrel.Eq{"id": db.ID}).
 		ToSql()
 	if err != nil {
@@ -233,9 +237,10 @@ func (r *SQLiteRepository) UpdateEntry(ctx context.Context, dbID repo.ULID, entr
 	}
 	defer tx.Rollback()
 
-	// 2. Query the current size of the entry before updating
+	// 2. Query the current size and status of the entry before updating
 	var oldSize, oldPreviewSize uint64
-	queryOld, argsOld, err := r.Builder.Select("filesize", "preview_filesize").
+	var oldStatus repo.EntryStatus
+	queryOld, argsOld, err := r.Builder.Select("filesize", "preview_filesize", "status").
 		From(tableName).
 		Where(squirrel.Eq{"id": entry.ID}).
 		ToSql()
@@ -243,12 +248,12 @@ func (r *SQLiteRepository) UpdateEntry(ctx context.Context, dbID repo.ULID, entr
 		return repo.Entry{}, fmt.Errorf("failed to build select old sizes query: %w", err)
 	}
 
-	err = tx.QueryRowContext(ctx, queryOld, argsOld...).Scan(&oldSize, &oldPreviewSize)
+	err = tx.QueryRowContext(ctx, queryOld, argsOld...).Scan(&oldSize, &oldPreviewSize, &oldStatus)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return repo.Entry{}, customerrors.ErrNotFound
 		}
-		return repo.Entry{}, fmt.Errorf("failed to query old sizes: %w", err)
+		return repo.Entry{}, fmt.Errorf("failed to query old sizes and status: %w", err)
 	}
 
 	// 3. Update the entry row with new data
@@ -282,12 +287,27 @@ func (r *SQLiteRepository) UpdateEntry(ctx context.Context, dbID repo.ULID, entr
 		return repo.Entry{}, fmt.Errorf("failed to update entry: %w", err)
 	}
 
-	// 4. Calculate the delta and atomically apply it to the main database stats
+	// 4. Calculate the deltas and atomically apply them to the main database stats
 	delta := (int64(entry.Size) + int64(entry.PreviewSize)) - (int64(oldSize) + int64(oldPreviewSize))
+	var queuedDelta int64 = 0
+	if oldStatus != repo.EntryStatusQueued && entry.Status == repo.EntryStatusQueued {
+		queuedDelta = 1
+	} else if oldStatus == repo.EntryStatusQueued && entry.Status != repo.EntryStatusQueued {
+		queuedDelta = -1
+	}
 
-	if delta != 0 {
-		statsQuery, statsArgs, err := r.Builder.Update("databases").
-			Set("total_disk_space_bytes", squirrel.Expr("MAX(0, total_disk_space_bytes + ?)", delta)).
+	if delta != 0 || queuedDelta != 0 {
+		statsBuilder := r.Builder.Update("databases")
+		if delta != 0 {
+			statsBuilder = statsBuilder.Set("total_disk_space_bytes", squirrel.Expr("MAX(0, total_disk_space_bytes + ?)", delta))
+		}
+		if queuedDelta == 1 {
+			statsBuilder = statsBuilder.Set("queued_count", squirrel.Expr("queued_count + 1"))
+		} else if queuedDelta == -1 {
+			statsBuilder = statsBuilder.Set("queued_count", squirrel.Expr("MAX(0, queued_count - 1)"))
+		}
+
+		statsQuery, statsArgs, err := statsBuilder.
 			Where(squirrel.Eq{"id": dbID.String()}).
 			ToSql()
 		if err != nil {
@@ -322,6 +342,24 @@ func (r *SQLiteRepository) UpdateEntriesStatus(ctx context.Context, dbID repo.UL
 	tableName := fmt.Sprintf(`"entries_%s"`, dbID.String())
 	now := time.Now().UnixMilli()
 
+	tx, err := r.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	var currentlyQueued int64
+	countQuery, countArgs, err := r.Builder.Select("COUNT(*)").
+		From(tableName).
+		Where(squirrel.Eq{"id": entryIDs, "status": repo.EntryStatusQueued}).
+		ToSql()
+	if err != nil {
+		return fmt.Errorf("failed to build count query: %w", err)
+	}
+	if err := tx.QueryRowContext(ctx, countQuery, countArgs...).Scan(&currentlyQueued); err != nil {
+		return fmt.Errorf("failed to count currently queued entries: %w", err)
+	}
+
 	// squirrel.Eq with a slice automatically translates to an 'IN (?, ?, ...)' SQL clause
 	query, args, err := r.Builder.Update(tableName).
 		Set("status", status).
@@ -332,7 +370,7 @@ func (r *SQLiteRepository) UpdateEntriesStatus(ctx context.Context, dbID repo.UL
 		return fmt.Errorf("failed to build update status query: %w", err)
 	}
 
-	res, err := r.DB.ExecContext(ctx, query, args...)
+	res, err := tx.ExecContext(ctx, query, args...)
 	if err != nil {
 		return fmt.Errorf("failed to update entries status: %w", err)
 	}
@@ -340,6 +378,35 @@ func (r *SQLiteRepository) UpdateEntriesStatus(ctx context.Context, dbID repo.UL
 	rowsAffected, _ := res.RowsAffected()
 	if rowsAffected == 0 {
 		return customerrors.ErrNotFound
+	}
+
+	var queuedDelta int64 = 0
+	if status == repo.EntryStatusQueued {
+		queuedDelta = rowsAffected - currentlyQueued
+	} else {
+		queuedDelta = -currentlyQueued
+	}
+
+	if queuedDelta != 0 {
+		statsBuilder := r.Builder.Update("databases")
+		if queuedDelta > 0 {
+			statsBuilder = statsBuilder.Set("queued_count", squirrel.Expr("queued_count + ?", queuedDelta))
+		} else {
+			statsBuilder = statsBuilder.Set("queued_count", squirrel.Expr("MAX(0, queued_count - ?)", -queuedDelta))
+		}
+		statsQuery, statsArgs, err := statsBuilder.
+			Where(squirrel.Eq{"id": dbID.String()}).
+			ToSql()
+		if err != nil {
+			return fmt.Errorf("failed to build stats update query: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, statsQuery, statsArgs...); err != nil {
+			return fmt.Errorf("failed to update database queued_count: %w", err)
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("failed to commit transaction: %w", err)
 	}
 
 	return nil
@@ -360,17 +427,18 @@ func (r *SQLiteRepository) DeleteEntry(ctx context.Context, dbID repo.ULID, id i
 	}
 	defer tx.Rollback()
 
-	// 2. Delete the row and retrieve its sizes using RETURNING
+	// 2. Delete the row and retrieve its sizes and status using RETURNING
 	deleteQuery, deleteArgs, err := r.Builder.Delete(tableName).
 		Where(squirrel.Eq{"id": id}).
-		Suffix("RETURNING id, filesize, preview_filesize").
+		Suffix("RETURNING id, filesize, preview_filesize, status").
 		ToSql()
 	if err != nil {
 		return repo.DeletedEntryMeta{}, fmt.Errorf("failed to build delete query: %w", err)
 	}
 
 	var meta repo.DeletedEntryMeta
-	err = tx.QueryRowContext(ctx, deleteQuery, deleteArgs...).Scan(&meta.ID, &meta.Filesize, &meta.PreviewSize)
+	var entryStatus repo.EntryStatus
+	err = tx.QueryRowContext(ctx, deleteQuery, deleteArgs...).Scan(&meta.ID, &meta.Filesize, &meta.PreviewSize, &entryStatus)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return repo.DeletedEntryMeta{}, customerrors.ErrNotFound
@@ -380,9 +448,13 @@ func (r *SQLiteRepository) DeleteEntry(ctx context.Context, dbID repo.ULID, id i
 
 	// 3. Atomically decrement the parent database stats
 	totalDeletedSize := meta.Filesize + meta.PreviewSize
-	statsQuery, statsArgs, err := r.Builder.Update("databases").
+	statsBuilder := r.Builder.Update("databases").
 		Set("entry_count", squirrel.Expr("MAX(0, entry_count - 1)")).
-		Set("total_disk_space_bytes", squirrel.Expr("MAX(0, total_disk_space_bytes - ?)", totalDeletedSize)).
+		Set("total_disk_space_bytes", squirrel.Expr("MAX(0, total_disk_space_bytes - ?)", totalDeletedSize))
+	if entryStatus == repo.EntryStatusQueued {
+		statsBuilder = statsBuilder.Set("queued_count", squirrel.Expr("MAX(0, queued_count - 1)"))
+	}
+	statsQuery, statsArgs, err := statsBuilder.
 		Where(squirrel.Eq{"id": dbID.String()}).
 		ToSql()
 	if err != nil {
@@ -423,7 +495,7 @@ func (r *SQLiteRepository) DeleteEntries(ctx context.Context, dbID repo.ULID, en
 	// 2. Delete the rows and retrieve their sizes using RETURNING
 	deleteQuery, deleteArgs, err := r.Builder.Delete(tableName).
 		Where(squirrel.Eq{"id": entryIDs}).
-		Suffix("RETURNING id, filesize, preview_filesize").
+		Suffix("RETURNING id, filesize, preview_filesize, status").
 		ToSql()
 	if err != nil {
 		return nil, fmt.Errorf("failed to build bulk delete query: %w", err)
@@ -438,15 +510,20 @@ func (r *SQLiteRepository) DeleteEntries(ctx context.Context, dbID repo.ULID, en
 	var deletedMetas []repo.DeletedEntryMeta
 	var totalDeletedSize uint64
 	var deletedCount int
+	var deletedQueuedCount int
 
 	for rows.Next() {
 		var meta repo.DeletedEntryMeta
-		if err := rows.Scan(&meta.ID, &meta.Filesize, &meta.PreviewSize); err != nil {
+		var entryStatus repo.EntryStatus
+		if err := rows.Scan(&meta.ID, &meta.Filesize, &meta.PreviewSize, &entryStatus); err != nil {
 			return nil, fmt.Errorf("failed to scan deleted entry meta: %w", err)
 		}
 		deletedMetas = append(deletedMetas, meta)
 		totalDeletedSize += meta.Filesize + meta.PreviewSize
 		deletedCount++
+		if entryStatus == repo.EntryStatusQueued {
+			deletedQueuedCount++
+		}
 	}
 
 	if err := rows.Err(); err != nil {
@@ -463,13 +540,17 @@ func (r *SQLiteRepository) DeleteEntries(ctx context.Context, dbID repo.ULID, en
 	}
 
 	// 3. Atomically decrement the parent database stats in one operation
-	statsQuery, statsArgs, err := r.Builder.Update("databases").
+	statsBuilder := r.Builder.Update("databases").
 		Set("entry_count", squirrel.Expr("MAX(0, entry_count - ?)", deletedCount)).
-		Set("total_disk_space_bytes", squirrel.Expr("MAX(0, total_disk_space_bytes - ?)", totalDeletedSize)).
+		Set("total_disk_space_bytes", squirrel.Expr("MAX(0, total_disk_space_bytes - ?)", totalDeletedSize))
+	if deletedQueuedCount > 0 {
+		statsBuilder = statsBuilder.Set("queued_count", squirrel.Expr("MAX(0, queued_count - ?)", deletedQueuedCount))
+	}
+	statsQuery, statsArgs, err := statsBuilder.
 		Where(squirrel.Eq{"id": dbID.String()}).
 		ToSql()
 	if err != nil {
-		return nil, fmt.Errorf("failed to build stats bulk update query: %w", err)
+		return nil, fmt.Errorf("failed to build stats update query: %w", err)
 	}
 
 	if _, err := tx.ExecContext(ctx, statsQuery, statsArgs...); err != nil {
@@ -618,10 +699,16 @@ func (r *SQLiteRepository) ClaimQueuedEntry(ctx context.Context, dbID repo.ULID,
 		return false, fmt.Errorf("%w: invalid database id", customerrors.ErrValidation)
 	}
 
+	tx, err := r.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return false, fmt.Errorf("failed to begin claim transaction: %w", err)
+	}
+	defer tx.Rollback()
+
 	tableName := fmt.Sprintf(`"entries_%s"`, dbID.String())
 	query := fmt.Sprintf(`UPDATE %s SET status = ?, updated_at = ? WHERE id = ? AND status = ?`, tableName)
 	now := time.Now().UnixMilli()
-	res, err := r.DB.ExecContext(ctx, query, repo.EntryStatusProcessing, now, entryID, repo.EntryStatusQueued)
+	res, err := tx.ExecContext(ctx, query, repo.EntryStatusProcessing, now, entryID, repo.EntryStatusQueued)
 	if err != nil {
 		return false, fmt.Errorf("failed to execute claim update: %w", err)
 	}
@@ -629,6 +716,24 @@ func (r *SQLiteRepository) ClaimQueuedEntry(ctx context.Context, dbID repo.ULID,
 	if err != nil {
 		return false, fmt.Errorf("failed to retrieve rows affected: %w", err)
 	}
+
+	if rows == 1 {
+		statsQuery, statsArgs, err := r.Builder.Update("databases").
+			Set("queued_count", squirrel.Expr("MAX(0, queued_count - 1)")).
+			Where(squirrel.Eq{"id": dbID.String()}).
+			ToSql()
+		if err != nil {
+			return false, fmt.Errorf("failed to build stats update query: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, statsQuery, statsArgs...); err != nil {
+			return false, fmt.Errorf("failed to decrement queued_count: %w", err)
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return false, fmt.Errorf("failed to commit claim transaction: %w", err)
+	}
+
 	return rows == 1, nil
 }
 

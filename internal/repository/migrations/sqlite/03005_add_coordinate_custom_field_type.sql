@@ -1,5 +1,6 @@
--- Migration: Add COORDINATE custom field type
--- Description: Updates CHECK constraint on database_custom_fields.type to include 'COORDINATE'
+-- v3.2 changes
+-- Migration: Add COORDINATE custom field type & queued_count
+-- Description: Updates CHECK constraint on database_custom_fields.type to include 'COORDINATE' and adds queued_count to databases
 
 -- +goose Up
 CREATE TABLE database_custom_fields_new (
@@ -20,7 +21,13 @@ DROP TABLE database_custom_fields;
 
 ALTER TABLE database_custom_fields_new RENAME TO database_custom_fields;
 
+ALTER TABLE databases ADD COLUMN queued_count INTEGER NOT NULL DEFAULT 0;
+CREATE INDEX IF NOT EXISTS idx_databases_queued_count ON databases(queued_count) WHERE queued_count > 0;
+
 -- +goose Down
+DROP INDEX IF EXISTS idx_databases_queued_count;
+ALTER TABLE databases DROP COLUMN queued_count;
+
 CREATE TABLE database_custom_fields_old (
     database_id VARCHAR(26) NOT NULL,
     field_id INTEGER NOT NULL CHECK(field_id >= 0 AND field_id <= 254),
@@ -38,3 +45,4 @@ SELECT database_id, field_id, name, type, is_indexed FROM database_custom_fields
 DROP TABLE database_custom_fields;
 
 ALTER TABLE database_custom_fields_old RENAME TO database_custom_fields;
+

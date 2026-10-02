@@ -37,6 +37,7 @@ type DatabaseHK struct {
 type DatabaseStats struct {
 	EntryCount          uint64
 	TotalDiskSpaceBytes uint64
+	QueuedCount         uint64
 }
 
 // CustomFieldDef defines a custom metadata field for a database.

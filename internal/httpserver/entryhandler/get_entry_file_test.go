@@ -439,12 +439,13 @@ func TestGetEntryFile_CapacityExhausted(t *testing.T) {
 	r, _, handler, db, entry := setupFileTestEnvironment(t, "image", conv)
 	defer r.Close()
 
-	// Fill all sync slots
+	// Fill all sync slots by holding an active converted stream open
 	handler.Processor.NFfmpegTotal = 1
-	if !handler.Processor.TryReserveSyncSlot() {
-		t.Fatal("failed to reserve slot")
+	heldStream, _, err := handler.Processor.ConvertStream(context.Background(), bytes.NewReader([]byte("dummy")), "image/jpeg", media.ConversionOptions{TargetMimeType: "image/webp"})
+	if err != nil {
+		t.Fatalf("failed to reserve slot via ConvertStream: %v", err)
 	}
-	defer handler.Processor.ReleaseSyncSlot()
+	defer heldStream.Close()
 
 	req := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/api/database/%s/entry/%d/file?format=webp", db.ID, entry.ID), nil)
 	req.SetPathValue("database_id", db.ID.String())

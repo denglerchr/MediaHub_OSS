@@ -51,6 +51,13 @@ func (s *RecoveryService) IntegrityCheck(ctx context.Context) error {
 			fmt.Printf("Found discrepance in entry count. Stats: %v, Database: %v\n", db.Stats.EntryCount, entryCount)
 		}
 
+		actualQueued, err := s.repo.CountEntriesByStatus(ctx, db.ID, repository.EntryStatusQueued)
+		if err != nil {
+			s.logger.Error("Failed to count queued entries", "database_id", db.ID.String(), "database_name", db.Name, "error", err)
+		} else if uint64(actualQueued) != db.Stats.QueuedCount {
+			fmt.Printf("Found discrepancy in queued count. Stats: %v, Database: %v\n", db.Stats.QueuedCount, actualQueued)
+		}
+
 		fmt.Printf("\r- Step 2: Integrity check: 100%% (Applying DB<->Disk fixes)            \n")
 
 		// --- PHASE 2.5: Action ---
@@ -81,6 +88,11 @@ func (s *RecoveryService) IntegrityCheck(ctx context.Context) error {
 			// mathematically correct stats to fix any mutations caused by DeleteEntries.
 			db.Stats.EntryCount = trueEntryCount
 			db.Stats.TotalDiskSpaceBytes = calculatedTotalBytes
+
+			// Recalculate true queued count after any missing file deletions
+			if finalQueued, err := s.repo.CountEntriesByStatus(ctx, db.ID, repository.EntryStatusQueued); err == nil {
+				db.Stats.QueuedCount = uint64(finalQueued)
+			}
 
 			// Save it back
 			_, err = s.repo.UpdateDatabase(ctx, db)

@@ -36,6 +36,7 @@ func scanDatabaseRow(s scanner) (repo.Database, error) {
 		&HKLastRun,
 		&db.Stats.EntryCount,
 		&db.Stats.TotalDiskSpaceBytes,
+		&db.Stats.QueuedCount,
 	)
 
 	if err != nil {

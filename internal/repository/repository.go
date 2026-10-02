@@ -24,6 +24,7 @@ type Repository interface {
 	CreateDatabase(ctx context.Context, db Database) (Database, error)
 	GetDatabase(ctx context.Context, dbID ULID) (Database, error)
 	GetDatabases(ctx context.Context) ([]Database, error)
+	GetDatabaseULIDsWithQueuedEntries(ctx context.Context) ([]ULID, error)
 	UpdateDatabase(ctx context.Context, db Database) (Database, error)
 	DeleteDatabase(ctx context.Context, dbID ULID) error
 	GetDatabaseStats(ctx context.Context, dbID ULID) (DatabaseStats, error)

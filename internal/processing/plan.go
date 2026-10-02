@@ -1,7 +1,6 @@
 package processing
 
 import (
-	"fmt"
 	"path/filepath"
 	"strings"
 
@@ -45,10 +44,10 @@ func DetermineConversionPlan(mc media.MediaConverter, db repo.Database, original
 
 	var convCheck media.ConversionCheck
 	if wantsConversion {
-		targetMimeType = db.Config.AutoConversion
+		targetMimeType = media.NormalizeMimeType(db.Config.AutoConversion)
 
 		// check capabilities
-		convCheck = mc.CanConvert(originalMimeType, media.ConversionOptions{TargetMimeType: db.Config.AutoConversion})
+		convCheck = mc.CanConvert(originalMimeType, media.ConversionOptions{TargetMimeType: targetMimeType})
 		if convCheck.CanConvert {
 			resultMimeType = targetMimeType
 		}
@@ -68,7 +67,7 @@ func DetermineConversionPlan(mc media.MediaConverter, db repo.Database, original
 
 	finalFileName := initFileName
 	if convCheck.NeedsConversion && convCheck.CanConvert {
-		newExtension := GetExtensionForMimeType(db.Config.AutoConversion)
+		newExtension := GetExtensionForMimeType(targetMimeType)
 		finalFileName = ReplaceExtension(finalFileName, newExtension)
 	}
 
@@ -88,15 +87,15 @@ func DetermineConversionPlan(mc media.MediaConverter, db repo.Database, original
 
 // DeterminePlanForEntry determines the processing plan for a queued/processing database entry.
 func DeterminePlanForEntry(mc media.MediaConverter, db repo.Database, entry repo.Entry) ProcessingPlan {
-	originalMimeType := entry.MimeType
+	originalMimeType := media.NormalizeMimeType(entry.MimeType)
 	wantsConversion := (db.Config.AutoConversion != "")
 	targetMimeType := originalMimeType
 	resultMimeType := originalMimeType
 
 	var convCheck media.ConversionCheck
 	if wantsConversion {
-		targetMimeType = db.Config.AutoConversion
-		convCheck = mc.CanConvert(originalMimeType, media.ConversionOptions{TargetMimeType: db.Config.AutoConversion})
+		targetMimeType = media.NormalizeMimeType(db.Config.AutoConversion)
+		convCheck = mc.CanConvert(originalMimeType, media.ConversionOptions{TargetMimeType: targetMimeType})
 		if convCheck.CanConvert {
 			resultMimeType = targetMimeType
 		}
@@ -108,7 +107,7 @@ func DeterminePlanForEntry(mc media.MediaConverter, db repo.Database, entry repo
 	initFileName := entry.FileName
 	finalFileName := initFileName
 	if convCheck.NeedsConversion && convCheck.CanConvert {
-		newExtension := GetExtensionForMimeType(db.Config.AutoConversion)
+		newExtension := GetExtensionForMimeType(targetMimeType)
 		finalFileName = ReplaceExtension(finalFileName, newExtension)
 	}
 
@@ -176,35 +175,4 @@ func ReplaceExtension(filename string, newExt string) string {
 	ext := filepath.Ext(filename)
 	base := strings.TrimSuffix(filename, ext)
 	return base + newExt
-}
-
-// DefaultMediaFields returns dynamic defaults for media fields based on content type.
-func DefaultMediaFields(contentType string) (map[string]any, error) {
-	var val any
-
-	metadataFields, err := media.GetMetadataFields(contentType)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get metadata fields: %w", err)
-	}
-
-	mediaFields := make(map[string]any)
-	for _, field := range metadataFields {
-		switch field.Type {
-		case "uint8":
-			val = uint8(0)
-		case "uint64":
-			val = uint64(0)
-		case "int64":
-			val = int64(-1)
-		case "float64":
-			val = float64(-1.0)
-		case "bool":
-			val = false
-		default:
-			return nil, fmt.Errorf("implementation missing default value for media field type %s", field.Type)
-		}
-		mediaFields[field.Name] = val
-	}
-
-	return mediaFields, nil
 }

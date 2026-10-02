@@ -41,4 +41,7 @@ const (
 	ErrValidation       = Error("validation error")
 	ErrNotImplemented   = Error("not implemented")
 	ErrConflict         = Error("conflict")
+
+	// Processing errors
+	ErrResourceExhausted = Error("concurrency limit reached")
 )

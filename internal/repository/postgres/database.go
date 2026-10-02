@@ -122,7 +122,7 @@ func (r *PostgresRepository) GetDatabase(ctx context.Context, dbID repo.ULID) (r
 		return repo.Database{}, fmt.Errorf("%w: invalid database id", customerrors.ErrValidation)
 	}
 
-	query, args, err := r.Builder.Select("id", "name", "content_type", "hk_interval", "hk_disk_space", "hk_max_age", "create_preview", "auto_conversion", "n_max_queued", "hk_last_run", "entry_count", "total_disk_space_bytes").
+	query, args, err := r.Builder.Select("id", "name", "content_type", "hk_interval", "hk_disk_space", "hk_max_age", "create_preview", "auto_conversion", "n_max_queued", "hk_last_run", "entry_count", "total_disk_space_bytes", "queued_count").
 		From("databases").
 		Where(squirrel.Eq{"id": dbID.String()}).
 		ToSql()
@@ -147,7 +147,7 @@ func (r *PostgresRepository) GetDatabase(ctx context.Context, dbID repo.ULID) (r
 
 // GetDatabases retrieves all available database configurations.
 func (r *PostgresRepository) GetDatabases(ctx context.Context) ([]repo.Database, error) {
-	query, args, err := r.Builder.Select("id", "name", "content_type", "hk_interval", "hk_disk_space", "hk_max_age", "create_preview", "auto_conversion", "n_max_queued", "hk_last_run", "entry_count", "total_disk_space_bytes").
+	query, args, err := r.Builder.Select("id", "name", "content_type", "hk_interval", "hk_disk_space", "hk_max_age", "create_preview", "auto_conversion", "n_max_queued", "hk_last_run", "entry_count", "total_disk_space_bytes", "queued_count").
 		From("databases").
 		ToSql()
 	if err != nil {
@@ -238,6 +238,7 @@ func (r *PostgresRepository) UpdateDatabase(ctx context.Context, db repo.Databas
 		Set("n_max_queued", db.NMaxQueued).
 		Set("entry_count", db.Stats.EntryCount).
 		Set("total_disk_space_bytes", db.Stats.TotalDiskSpaceBytes).
+		Set("queued_count", db.Stats.QueuedCount).
 		Where(squirrel.Eq{"id": db.ID}).
 		ToSql()
 	if err != nil {
@@ -305,7 +306,7 @@ func (r *PostgresRepository) GetDatabaseStats(ctx context.Context, dbID repo.ULI
 		return repo.DatabaseStats{}, fmt.Errorf("%w: invalid database id", customerrors.ErrValidation)
 	}
 
-	query, args, err := r.Builder.Select("entry_count", "total_disk_space_bytes").
+	query, args, err := r.Builder.Select("entry_count", "total_disk_space_bytes", "queued_count").
 		From("databases").
 		Where(squirrel.Eq{"id": dbID.String()}).
 		ToSql()
@@ -314,7 +315,7 @@ func (r *PostgresRepository) GetDatabaseStats(ctx context.Context, dbID repo.ULI
 	}
 
 	var stats repo.DatabaseStats
-	err = r.DB.QueryRowContext(ctx, query, args...).Scan(&stats.EntryCount, &stats.TotalDiskSpaceBytes)
+	err = r.DB.QueryRowContext(ctx, query, args...).Scan(&stats.EntryCount, &stats.TotalDiskSpaceBytes, &stats.QueuedCount)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return repo.DatabaseStats{}, customerrors.ErrNotFound
@@ -324,3 +325,37 @@ func (r *PostgresRepository) GetDatabaseStats(ctx context.Context, dbID repo.ULI
 
 	return stats, nil
 }
+
+// GetDatabaseULIDsWithQueuedEntries retrieves all database ULIDs that currently have queued_count > 0.
+func (r *PostgresRepository) GetDatabaseULIDsWithQueuedEntries(ctx context.Context) ([]repo.ULID, error) {
+	query, args, err := r.Builder.Select("id").
+		From("databases").
+		Where(squirrel.Gt{"queued_count": 0}).
+		OrderBy("id ASC").
+		ToSql()
+	if err != nil {
+		return nil, fmt.Errorf("failed to build select query: %w", err)
+	}
+
+	rows, err := r.DB.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("failed to execute query: %w", err)
+	}
+	defer rows.Close()
+
+	var ulids []repo.ULID
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("failed to scan database id: %w", err)
+		}
+		ulids = append(ulids, repo.ULID(id))
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("row iteration error: %w", err)
+	}
+
+	return ulids, nil
+}
+

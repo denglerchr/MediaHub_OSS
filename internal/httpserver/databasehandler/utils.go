@@ -149,6 +149,7 @@ func mapToDatabaseResponse(db repository.Database) DatabaseResponse {
 		Stats: DatabaseResponseStats{
 			EntryCount:          db.Stats.EntryCount,
 			TotalDiskSpaceBytes: db.Stats.TotalDiskSpaceBytes,
+			QueuedCount:         db.Stats.QueuedCount,
 		},
 	}
 }

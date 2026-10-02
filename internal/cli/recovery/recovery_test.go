@@ -102,3 +102,85 @@ func TestEntryStatusCorrection_ZeroStatsScan(t *testing.T) {
 		t.Errorf("expected entry status 'ready', got %q", updatedEntry.Status)
 	}
 }
+
+func TestIntegrityCheck_QueuedCountReconciliation(t *testing.T) {
+	ctx := context.Background()
+
+	tempDir := t.TempDir()
+	storageRoot := filepath.Join(tempDir, "storage")
+	_ = os.MkdirAll(storageRoot, 0755)
+
+	r, err := sqlite.NewRepository(":memory:")
+	if err != nil {
+		t.Fatalf("failed to create repo: %v", err)
+	}
+	defer r.Close()
+
+	if err := goose.SetDialect("sqlite3"); err != nil {
+		t.Fatalf("failed to set goose dialect: %v", err)
+	}
+	goose.SetBaseFS(migrations.EmbedFS)
+	if err := goose.Up(r.DB, "sqlite"); err != nil {
+		t.Fatalf("failed to run migrations: %v", err)
+	}
+
+	dbModel := repo.Database{
+		Name:        "queued_test_db",
+		ContentType: "file",
+	}
+	createdDB, err := r.CreateDatabase(ctx, dbModel)
+	if err != nil {
+		t.Fatalf("failed to create database: %v", err)
+	}
+
+	// Create 1 entry with Queued status
+	_, err = r.CreateEntry(ctx, createdDB, repo.Entry{
+		FileName: "queued1.txt",
+		MimeType: "text/plain",
+		Size:     10,
+		Status:   repo.EntryStatusQueued,
+	})
+	if err != nil {
+		t.Fatalf("failed to create queued entry: %v", err)
+	}
+
+	// Verify initial QueuedCount is 1
+	stats, err := r.GetDatabaseStats(ctx, createdDB.ID)
+	if err != nil || stats.QueuedCount != 1 {
+		t.Fatalf("expected QueuedCount == 1, got %d, err: %v", stats.QueuedCount, err)
+	}
+
+	// Corrupt QueuedCount to 99
+	createdDB.Stats.QueuedCount = 99
+	if _, err := r.UpdateDatabase(ctx, createdDB); err != nil {
+		t.Fatalf("failed to corrupt queued_count: %v", err)
+	}
+
+	stats, err = r.GetDatabaseStats(ctx, createdDB.ID)
+	if err != nil || stats.QueuedCount != 99 {
+		t.Fatalf("expected corrupted QueuedCount == 99, got %d, err: %v", stats.QueuedCount, err)
+	}
+
+	localStorage := &localstorage.LocalStorage{RootPath: storageRoot}
+	service := &RecoveryService{
+		repo:    r,
+		storage: localStorage,
+		logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+		dryRun:  false,
+	}
+
+	// Run IntegrityCheck
+	if err := service.IntegrityCheck(ctx); err != nil {
+		t.Fatalf("IntegrityCheck failed: %v", err)
+	}
+
+	// Verify QueuedCount has been reconciled to 1
+	reconciledStats, err := r.GetDatabaseStats(ctx, createdDB.ID)
+	if err != nil {
+		t.Fatalf("failed to fetch stats: %v", err)
+	}
+	if reconciledStats.QueuedCount != 1 {
+		t.Errorf("expected reconciled QueuedCount == 1, got %d", reconciledStats.QueuedCount)
+	}
+}
+

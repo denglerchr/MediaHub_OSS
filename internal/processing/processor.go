@@ -2,11 +2,13 @@ package processing
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"os"
 	"sync"
+	"sync/atomic"
 
 	"mediahub_oss/internal/media"
 	repo "mediahub_oss/internal/repository"
@@ -28,9 +30,11 @@ type Processor struct {
 	NFfmpegTotal   int
 	Logger         *slog.Logger
 
-	mu          sync.Mutex
-	activeAsync int
-	activeTotal int
+	mu               sync.Mutex
+	activeAsync      int
+	activeTotal      int
+	hasQueuedEntries bool
+	isScanningQueue  atomic.Bool
 }
 
 func NewProcessor(
@@ -72,49 +76,37 @@ func (p *Processor) ProcessEntry(
 		diskFile = f
 	}
 
-	if isLarge {
-		// Path A: Large File, Asynchronous
-		if p.tryReserveAsyncSlot() {
-			entry, err := p.handleLargeFileAsync(ctx, diskFile, db, req, procPlan)
+	// Fast path: No conversion required (copy file + extract metadata/preview without reserving conversion slots)
+	if !procPlan.NeedsConversion {
+		if isLarge {
+			entry, err := p.storeLargeFilePassthroughAsync(ctx, diskFile, db, req, procPlan)
 			if err != nil {
-				p.releaseAsyncSlot()
 				return repo.Entry{}, false, err
 			}
 			return entry, false, nil
 		}
-
-		// Limits reached, evaluate queue limit
-		queuedCount, err := p.Repo.CountEntriesByStatus(ctx, db.ID, repo.EntryStatusQueued)
-		if err != nil {
-			return repo.Entry{}, false, fmt.Errorf("failed to count queued entries: %w", err)
-		}
-
-		if int(queuedCount) < db.NMaxQueued {
-			p.Logger.Debug("Concurrency limit reached, queueing large file", "database_id", db.ID.String(), "active_async", p.activeAsync, "active_total", p.activeTotal, "queued_count", queuedCount, "max_queued", db.NMaxQueued)
-			entry, err := p.queueLargeFile(ctx, diskFile, db, req, procPlan)
-			if err != nil {
-				return repo.Entry{}, false, err
-			}
-			p.tryAcquireAndSpawn(context.Background(), db, entry)
-			return entry, false, nil
-		}
-
-		p.Logger.Warn("Upload rejected: Concurrency limit reached and queue is full", "database_id", db.ID.String(), "active_async", p.activeAsync, "active_total", p.activeTotal, "queued_count", queuedCount, "max_queued", db.NMaxQueued)
-		return repo.Entry{}, false, customerrors.ErrUnavailable
-	}
-
-	// Path B: Small File, Synchronous
-	if p.tryReserveSyncSlot() {
-		defer func() {
-			p.releaseSyncSlot()
-			p.TriggerQueueWorkersIfPossible(context.Background())
-		}()
-
-		entry, err := p.handleSmallFileSync(ctx, file, db, req, procPlan)
+		entry, err := p.storeSmallFilePassthrough(ctx, file, db, req, procPlan)
 		if err != nil {
 			return repo.Entry{}, true, err
 		}
 		return entry, true, nil
+	}
+
+	var entry repo.Entry
+	if isLarge {
+		entry, err = p.handleLargeFileAsync(ctx, diskFile, db, req, procPlan)
+		if err == nil {
+			return entry, false, nil
+		}
+	} else {
+		entry, err = p.handleSmallFileSync(ctx, file, db, req, procPlan)
+		if err == nil {
+			return entry, true, nil
+		}
+	}
+
+	if !errors.Is(err, customerrors.ErrResourceExhausted) {
+		return repo.Entry{}, !isLarge, err
 	}
 
 	// Limits reached, evaluate queue limit
@@ -124,17 +116,28 @@ func (p *Processor) ProcessEntry(
 	}
 
 	if int(queuedCount) < db.NMaxQueued {
-		p.Logger.Debug("Concurrency limit reached, queueing small file", "database_id", db.ID.String(), "active_total", p.activeTotal, "queued_count", queuedCount, "max_queued", db.NMaxQueued)
-		entry, err := p.queueSmallFile(ctx, file, db, req, procPlan)
+		p.Logger.Debug("Concurrency limit reached, queueing file", "database_id", db.ID.String(), "is_large", isLarge, "active_async", p.activeAsync, "active_total", p.activeTotal, "queued_count", queuedCount, "max_queued", db.NMaxQueued)
+		entry, err := p.queueFile(ctx, file, db, req, procPlan)
 		if err != nil {
 			return repo.Entry{}, false, err
 		}
-		p.tryAcquireAndSpawn(context.Background(), db, entry)
 		return entry, false, nil
 	}
 
-	p.Logger.Warn("Upload rejected: Concurrency limit reached and queue is full", "database_id", db.ID.String(), "active_total", p.activeTotal, "queued_count", queuedCount, "max_queued", db.NMaxQueued)
+	p.Logger.Warn("Upload rejected: Concurrency limit reached and queue is full", "database_id", db.ID.String(), "is_large", isLarge, "active_async", p.activeAsync, "active_total", p.activeTotal, "queued_count", queuedCount, "max_queued", db.NMaxQueued)
 	return repo.Entry{}, false, customerrors.ErrUnavailable
+}
+
+// markEntryQueued records that an entry has been placed in the queue and spawns a worker if a slot is currently free.
+func (p *Processor) markEntryQueued() {
+	p.mu.Lock()
+	p.hasQueuedEntries = true
+	shouldTrigger := p.activeAsync < p.NFfmpegAsync && p.activeTotal < p.NFfmpegTotal
+	p.mu.Unlock()
+
+	if shouldTrigger {
+		go p.TriggerQueueWorkersIfPossible(context.Background())
+	}
 }
 
 // tryReserveAsyncSlot checks limits and reserves a slot for an asynchronous/large conversion.
@@ -149,8 +152,22 @@ func (p *Processor) tryReserveAsyncSlot() bool {
 	return true
 }
 
-// releaseAsyncSlot releases a reserved asynchronous/large conversion slot.
+// releaseAsyncSlot releases a reserved asynchronous/large conversion slot and triggers a queue worker if entries are waiting.
 func (p *Processor) releaseAsyncSlot() {
+	p.mu.Lock()
+	p.activeAsync--
+	p.activeTotal--
+	shouldTrigger := p.hasQueuedEntries && p.activeAsync < p.NFfmpegAsync && p.activeTotal < p.NFfmpegTotal
+	p.mu.Unlock()
+
+	if shouldTrigger {
+		go p.TriggerQueueWorkersIfPossible(context.Background())
+	}
+}
+
+// releaseAsyncSlotWithoutTrigger releases a reserved asynchronous slot without triggering a queue scan.
+// Useful during dispatch when a claim race is lost and the slot is immediately rolled back.
+func (p *Processor) releaseAsyncSlotWithoutTrigger() {
 	p.mu.Lock()
 	p.activeAsync--
 	p.activeTotal--
@@ -168,19 +185,16 @@ func (p *Processor) tryReserveSyncSlot() bool {
 	return true
 }
 
-// TryReserveSyncSlot checks limits and reserves a slot for a synchronous/small conversion.
-func (p *Processor) TryReserveSyncSlot() bool {
-	return p.tryReserveSyncSlot()
-}
-
-// releaseSyncSlot releases a reserved synchronous/small conversion slot.
+// releaseSyncSlot releases a reserved synchronous/small conversion slot and triggers a queue worker if entries are waiting.
 func (p *Processor) releaseSyncSlot() {
 	p.mu.Lock()
 	p.activeTotal--
+	shouldTrigger := p.hasQueuedEntries && p.activeAsync < p.NFfmpegAsync && p.activeTotal < p.NFfmpegTotal
 	p.mu.Unlock()
+
+	if shouldTrigger {
+		go p.TriggerQueueWorkersIfPossible(context.Background())
+	}
 }
 
-// ReleaseSyncSlot releases a reserved synchronous/small conversion slot.
-func (p *Processor) ReleaseSyncSlot() {
-	p.releaseSyncSlot()
-}
+

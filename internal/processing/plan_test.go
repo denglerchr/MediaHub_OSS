@@ -113,3 +113,46 @@ func TestDeterminePlanForEntry(t *testing.T) {
 		t.Errorf("FinalFileName = %q; want %q", plan.FinalFileName, "song.mp3")
 	}
 }
+
+func TestDeterminePlan_ShorthandAutoConversionNormalized(t *testing.T) {
+	mc := &mockConverter{}
+	db := repo.Database{
+		ContentType: "audio",
+		Config: repo.DatabaseConfig{
+			AutoConversion: "flac",
+			CreatePreview:  false,
+		},
+	}
+
+	plan, err := DetermineConversionPlan(mc, db, "audio/wav", "track.wav", "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if plan.TargetMimeType != "audio/flac" {
+		t.Errorf("TargetMimeType = %q; want %q", plan.TargetMimeType, "audio/flac")
+	}
+	if plan.ResultMimeType != "audio/flac" {
+		t.Errorf("ResultMimeType = %q; want %q", plan.ResultMimeType, "audio/flac")
+	}
+	if plan.FinalFileName != "track.flac" {
+		t.Errorf("FinalFileName = %q; want %q", plan.FinalFileName, "track.flac")
+	}
+
+	entryPlan := DeterminePlanForEntry(mc, db, repo.Entry{
+		FileName: "track.wav",
+		MimeType: "wav",
+	})
+	if entryPlan.InitMimeType != "audio/wav" {
+		t.Errorf("InitMimeType = %q; want %q", entryPlan.InitMimeType, "audio/wav")
+	}
+	if entryPlan.TargetMimeType != "audio/flac" {
+		t.Errorf("TargetMimeType = %q; want %q", entryPlan.TargetMimeType, "audio/flac")
+	}
+	if entryPlan.ResultMimeType != "audio/flac" {
+		t.Errorf("ResultMimeType = %q; want %q", entryPlan.ResultMimeType, "audio/flac")
+	}
+	if entryPlan.FinalFileName != "track.flac" {
+		t.Errorf("FinalFileName = %q; want %q", entryPlan.FinalFileName, "track.flac")
+	}
+}
+

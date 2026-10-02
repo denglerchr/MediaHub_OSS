@@ -36,7 +36,8 @@ func (t *TempFileStream) Close() error {
 	return err
 }
 
-func (p *Processor) handleSmallFileSync(
+// storeSmallFilePassthrough stores a small file synchronously without conversion or reserving an FFmpeg slot.
+func (p *Processor) storeSmallFilePassthrough(
 	ctx context.Context,
 	file io.ReadSeeker,
 	db repo.Database,
@@ -48,22 +49,25 @@ func (p *Processor) handleSmallFileSync(
 		return repo.Entry{}, err
 	}
 
-	cleanupOnError := func(uploadErr error) {
-		p.Logger.Error("Upload failed", "entry", createdEntry.ID, "error", uploadErr)
-		createdEntry.Status = repo.EntryStatusError
-		_, _ = p.Repo.UpdateEntry(ctx, db.ID, createdEntry)
-	}
+	return p.finalizeSmallFileSync(ctx, file, nil, db, createdEntry, plan)
+}
 
-	if _, err := file.Seek(0, io.SeekStart); err != nil {
-		cleanupOnError(err)
-		return repo.Entry{}, fmt.Errorf("failed to seek original file for probing: %w", err)
+// handleSmallFileSync converts (if needed) and stores a small file synchronously using a reserved FFmpeg sync slot.
+func (p *Processor) handleSmallFileSync(
+	ctx context.Context,
+	file io.ReadSeeker,
+	db repo.Database,
+	req EntryRequest,
+	plan ProcessingPlan,
+) (repo.Entry, error) {
+	if !p.tryReserveSyncSlot() {
+		return repo.Entry{}, customerrors.ErrResourceExhausted
 	}
+	defer p.releaseSyncSlot()
 
-	meta, metaErr := p.MediaConverter.ReadMediaFieldsFromStream(ctx, file, db.ContentType)
-	if metaErr == nil {
-		createdEntry.MediaFields = meta
-	} else {
-		p.Logger.Warn("could not extract metadata from original file", "entryID", createdEntry.ID, "error", metaErr)
+	createdEntry, err := p.createPreliminaryEntry(ctx, db, req, plan, repo.EntryStatusProcessing, true)
+	if err != nil {
+		return repo.Entry{}, err
 	}
 
 	var streamToUpload io.ReadSeeker = file
@@ -71,77 +75,135 @@ func (p *Processor) handleSmallFileSync(
 	if plan.WantsConversion && plan.NeedsConversion {
 		if !plan.CanConvert {
 			err := fmt.Errorf("cannot convert %v to the database mime type %v", plan.InitMimeType, db.Config.AutoConversion)
-			cleanupOnError(err)
+			p.failSyncEntry(ctx, db, createdEntry, err)
 			return repo.Entry{}, err
 		}
 
-		var err error
-		tempStream, _, err = p.convertStreamToTempFile(ctx, streamToUpload, plan.InitMimeType, media.ConversionOptions{
+		tempStream, _, err = p.convertStreamToTempFile(ctx, file, plan.InitMimeType, media.ConversionOptions{
 			TargetMimeType: plan.ResultMimeType,
 		})
 		if err != nil {
-			cleanupOnError(err)
+			p.failSyncEntry(ctx, db, createdEntry, err)
 			return repo.Entry{}, err
 		}
-		defer tempStream.Close()
-
 		streamToUpload = tempStream
 	}
 
+	return p.finalizeSmallFileSync(ctx, streamToUpload, tempStream, db, createdEntry, plan)
+}
+
+func (p *Processor) failSyncEntry(ctx context.Context, db repo.Database, entry repo.Entry, uploadErr error) {
+	p.Logger.Error("Upload failed", "entry", entry.ID, "error", uploadErr)
+	_ = p.Storage.Delete(ctx, db.ID.String(), entry.ID)
+	entry.Size = 0
+	entry.Status = repo.EntryStatusError
+	_, _ = p.Repo.UpdateEntry(ctx, db.ID, entry)
+}
+
+// finalizeSmallFileSync extracts metadata, writes the stream to storage, and triggers background preview generation if configured.
+func (p *Processor) finalizeSmallFileSync(
+	ctx context.Context,
+	streamToUpload io.ReadSeeker,
+	tempStream *TempFileStream,
+	db repo.Database,
+	createdEntry repo.Entry,
+	plan ProcessingPlan,
+) (repo.Entry, error) {
+	closeTempOnReturn := true
+	defer func() {
+		if closeTempOnReturn && tempStream != nil {
+			tempStream.Close()
+		}
+	}()
+
+	// 1. Extract media metadata (if the database content type defines metadata fields)
+	if mf, err := media.GetMetadataFields(db.ContentType); err == nil && len(mf) > 0 {
+		var meta map[string]any
+		var metaErr error
+		if tempStream != nil {
+			meta, metaErr = p.MediaConverter.ReadMediaFieldsFromFile(ctx, tempStream.Name(), db.ContentType)
+		} else {
+			if _, err := streamToUpload.Seek(0, io.SeekStart); err != nil {
+				p.failSyncEntry(ctx, db, createdEntry, err)
+				return repo.Entry{}, fmt.Errorf("failed to seek file for probing: %w", err)
+			}
+			meta, metaErr = p.MediaConverter.ReadMediaFieldsFromStream(ctx, streamToUpload, db.ContentType)
+		}
+		if metaErr == nil {
+			createdEntry.MediaFields = meta
+		} else {
+			p.Logger.Warn("could not extract metadata from file", "entryID", createdEntry.ID, "error", metaErr)
+		}
+	}
+
+	// 2. Write file to storage
 	if _, err := streamToUpload.Seek(0, io.SeekStart); err != nil {
-		cleanupOnError(err)
+		p.failSyncEntry(ctx, db, createdEntry, err)
 		return repo.Entry{}, fmt.Errorf("failed to seek file stream before storage: %w", err)
 	}
 
 	fileSize, err := p.Storage.Write(ctx, db.ID.String(), createdEntry.ID, streamToUpload)
 	if err != nil {
-		cleanupOnError(err)
+		p.failSyncEntry(ctx, db, createdEntry, err)
 		return repo.Entry{}, fmt.Errorf("failed to write to storage provider: %w", err)
 	}
 	createdEntry.Size = uint64(fileSize)
 
+	// 3. Optionally generate preview in the background
 	if plan.WantsPreview && plan.CanGenPreview {
-		streamToUpload.Seek(0, io.SeekStart)
-		fileBytes, err := io.ReadAll(streamToUpload)
-		if err != nil {
-			p.Logger.Error("Failed to read file into memory for preview generation", "entry", createdEntry.ID, "error", err)
-			createdEntry.Status = repo.EntryStatusReady
-			finalEntry, err := p.Repo.UpdateEntry(ctx, db.ID, createdEntry)
-			if err != nil {
-				return repo.Entry{}, fmt.Errorf("failed to finalize entry metadata: %w", err)
+		var fileBytes []byte
+		if tempStream == nil {
+			if _, err := streamToUpload.Seek(0, io.SeekStart); err == nil {
+				fileBytes, err = io.ReadAll(streamToUpload)
 			}
-			return finalEntry, nil
+			if err != nil {
+				p.Logger.Error("Failed to read file into memory for preview generation", "entry", createdEntry.ID, "error", err)
+				createdEntry.Status = repo.EntryStatusReady
+				finalEntry, err := p.Repo.UpdateEntry(ctx, db.ID, createdEntry)
+				if err != nil {
+					p.failSyncEntry(ctx, db, createdEntry, err)
+					return repo.Entry{}, fmt.Errorf("failed to finalize entry metadata: %w", err)
+				}
+				return finalEntry, nil
+			}
 		}
 
 		createdEntry.Status = repo.EntryStatusProcessing
 		finalEntry, err := p.Repo.UpdateEntry(ctx, db.ID, createdEntry)
 		if err != nil {
+			p.failSyncEntry(ctx, db, createdEntry, err)
 			return repo.Entry{}, fmt.Errorf("failed to finalize entry metadata: %w", err)
 		}
 
-		go func(bgEntry repo.Entry) {
+		closeTempOnReturn = false
+		go func(bgEntry repo.Entry, ts *TempFileStream, rawBytes []byte) {
+			var previewSize uint64
 			var err error
-			var previewSize uint64 = 0
-
-			reader := bytes.NewReader(fileBytes)
-			if previewSize, err = p.generateAndStorePreview(context.Background(), db, bgEntry.ID, reader, plan.ResultMimeType); err != nil {
+			if ts != nil {
+				defer ts.Close()
+				previewSize, err = p.generateAndStorePreviewFromFile(context.Background(), db, bgEntry.ID, ts.Name(), plan.ResultMimeType)
+			} else {
+				previewSize, err = p.generateAndStorePreview(context.Background(), db, bgEntry.ID, bytes.NewReader(rawBytes), plan.ResultMimeType)
+			}
+			if err != nil {
 				p.Logger.Error("Async preview generation failed", "entry", bgEntry.ID, "error", err)
 			}
 
 			bgEntry.Status = repo.EntryStatusReady
 			bgEntry.PreviewSize = previewSize
-
 			if _, err := p.Repo.UpdateEntry(context.Background(), db.ID, bgEntry); err != nil {
 				p.Logger.Error("Failed to update status to ready after async preview", "entry", bgEntry.ID, "error", err)
 			}
-		}(finalEntry)
+		}(finalEntry, tempStream, fileBytes)
 
 		return finalEntry, nil
 	}
 
+	// 4. Finalize entry as Ready
 	createdEntry.Status = repo.EntryStatusReady
 	finalEntry, err := p.Repo.UpdateEntry(ctx, db.ID, createdEntry)
 	if err != nil {
+		p.failSyncEntry(ctx, db, createdEntry, err)
 		return repo.Entry{}, fmt.Errorf("failed to finalize entry metadata: %w", err)
 	}
 
@@ -201,17 +263,14 @@ func (p *Processor) ConvertStream(
 		return nil, 0, customerrors.ErrUnavailable
 	}
 
-	cleanupSlot := func() {
-		p.releaseSyncSlot()
-		p.TriggerQueueWorkersIfPossible(context.Background())
-	}
-
 	stream, size, err := p.convertStreamToTempFile(ctx, input, inputMimeType, opts)
 	if err != nil {
-		cleanupSlot()
+		p.releaseSyncSlot()
 		return nil, 0, err
 	}
 
-	stream.onClose = cleanupSlot
+	stream.onClose = p.releaseSyncSlot
 	return stream, size, nil
 }
+
+

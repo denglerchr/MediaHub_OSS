@@ -601,3 +601,100 @@ func TestGetEntriesByStatus_Limit(t *testing.T) {
 		t.Fatalf("expected 3 entries with limit 3, got %d", len(three))
 	}
 }
+
+func TestGetDatabaseULIDsWithQueuedEntries(t *testing.T) {
+	ctx := context.Background()
+
+	r, err := sqlite.NewRepository(":memory:")
+	if err != nil {
+		t.Fatalf("failed to create repo: %v", err)
+	}
+	defer r.Close()
+
+	if err := goose.SetDialect("sqlite3"); err != nil {
+		t.Fatalf("failed to set goose dialect: %v", err)
+	}
+	goose.SetBaseFS(migrations.EmbedFS)
+	if err := goose.Up(r.DB, "sqlite"); err != nil {
+		t.Fatalf("failed to run migrations: %v", err)
+	}
+
+	// 1. Initially no databases -> empty
+	ulids, err := r.GetDatabaseULIDsWithQueuedEntries(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(ulids) != 0 {
+		t.Fatalf("expected 0 ulids, got %d", len(ulids))
+	}
+
+	db1, err := r.CreateDatabase(ctx, repo.Database{Name: "db1", ContentType: "file"})
+	if err != nil {
+		t.Fatalf("failed to create db1: %v", err)
+	}
+	db2, err := r.CreateDatabase(ctx, repo.Database{Name: "db2", ContentType: "file"})
+	if err != nil {
+		t.Fatalf("failed to create db2: %v", err)
+	}
+
+	// 2. Both databases have 0 queued entries -> still empty
+	ulids, err = r.GetDatabaseULIDsWithQueuedEntries(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(ulids) != 0 {
+		t.Fatalf("expected 0 ulids, got %d", len(ulids))
+	}
+
+	// 3. Queue an entry in db1
+	e1, err := r.CreateEntry(ctx, db1, repo.Entry{
+		FileName: "e1.jpg",
+		MimeType: "image/jpeg",
+		Size:     100,
+		Status:   repo.EntryStatusQueued,
+	})
+	if err != nil {
+		t.Fatalf("failed to create e1: %v", err)
+	}
+
+	ulids, err = r.GetDatabaseULIDsWithQueuedEntries(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(ulids) != 1 || ulids[0] != db1.ID {
+		t.Fatalf("expected [db1.ID], got %v", ulids)
+	}
+
+	// 4. Queue an entry in db2
+	_, err = r.CreateEntry(ctx, db2, repo.Entry{
+		FileName: "e2.jpg",
+		MimeType: "image/jpeg",
+		Size:     200,
+		Status:   repo.EntryStatusQueued,
+	})
+	if err != nil {
+		t.Fatalf("failed to create e2: %v", err)
+	}
+
+	ulids, err = r.GetDatabaseULIDsWithQueuedEntries(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(ulids) != 2 {
+		t.Fatalf("expected 2 ulids, got %d", len(ulids))
+	}
+
+	// 5. Claim entry from db1
+	claimed, err := r.ClaimQueuedEntry(ctx, db1.ID, e1.ID)
+	if err != nil || !claimed {
+		t.Fatalf("failed to claim e1: %v (claimed=%v)", err, claimed)
+	}
+
+	ulids, err = r.GetDatabaseULIDsWithQueuedEntries(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(ulids) != 1 || ulids[0] != db2.ID {
+		t.Fatalf("expected only db2.ID after claiming db1, got %v", ulids)
+	}
+}

@@ -86,4 +86,5 @@ type DatabaseResponseHK struct {
 type DatabaseResponseStats struct {
 	EntryCount          uint64 `json:"entry_count"`
 	TotalDiskSpaceBytes uint64 `json:"total_disk_space_bytes"`
+	QueuedCount         uint64 `json:"queued_count"`
 }
