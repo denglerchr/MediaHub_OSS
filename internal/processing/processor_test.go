@@ -441,7 +441,7 @@ func TestQueueFile_StorageFailureCleansUpDBEntry(t *testing.T) {
 	}
 }
 
-func TestRunConversionAndFinalize_FailureCleansUpStorage(t *testing.T) {
+func TestRunConversionAndFinalize_FailurePreservesStorage(t *testing.T) {
 	conv := &testMockConverter{
 		canConvertCheck: media.ConversionCheck{CanConvert: true, NeedsConversion: true},
 		convertFileErr:  errors.New("simulated ffmpeg conversion error"),
@@ -477,7 +477,7 @@ func TestRunConversionAndFinalize_FailureCleansUpStorage(t *testing.T) {
 
 	proc.runWorkerForClaimedEntry(context.Background(), db.ID, queuedEntry)
 
-	// Entry should be marked Error and storage file should be deleted
+	// Entry should be marked Error, but the original file in storage must be preserved
 	updated, err := r.GetEntry(context.Background(), db.ID, queuedEntry.ID)
 	if err != nil {
 		t.Fatalf("failed to fetch entry: %v", err)
@@ -485,8 +485,11 @@ func TestRunConversionAndFinalize_FailureCleansUpStorage(t *testing.T) {
 	if updated.Status != repo.EntryStatusError {
 		t.Fatalf("expected EntryStatusError, got %v", updated.Status)
 	}
-	if _, err := proc.Storage.Stat(context.Background(), db.ID.String(), queuedEntry.ID); err == nil {
-		t.Fatal("expected raw file in storage to be deleted after worker conversion failure")
+	if _, err := proc.Storage.Stat(context.Background(), db.ID.String(), queuedEntry.ID); err != nil {
+		t.Fatalf("expected raw file in storage to be preserved after worker conversion failure, got err: %v", err)
+	}
+	if updated.Size == 0 {
+		t.Fatalf("expected non-zero size for preserved raw file, got %d", updated.Size)
 	}
 }
 
@@ -526,6 +529,11 @@ func TestRunWorkerForClaimedEntry_TransientReadErrorRequeues(t *testing.T) {
 		InitFileName:    "test.jpg",
 		FinalFileName:   "test.jpg",
 	}
+
+	// Temporarily disable async slot capacity so queueing does not auto-dispatch in background
+	proc.mu.Lock()
+	proc.NFfmpegAsync = 0
+	proc.mu.Unlock()
 
 	// Queue entry
 	queuedEntry, err := proc.queueFile(context.Background(), strings.NewReader("queued payload"), db, req, plan)

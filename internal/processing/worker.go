@@ -72,9 +72,7 @@ func (p *Processor) requeueClaimedEntry(ctx context.Context, dbID repo.ULID, ent
 }
 
 func (p *Processor) failWorkerEntry(ctx context.Context, dbID repo.ULID, entry repo.Entry) {
-	_ = p.Storage.Delete(ctx, dbID.String(), entry.ID)
 	_ = p.Storage.DeletePreview(ctx, dbID.String(), entry.ID)
-	entry.Size = 0
 	entry.PreviewSize = 0
 	entry.Status = repo.EntryStatusError
 	if _, updateErr := p.Repo.UpdateEntry(ctx, dbID, entry); updateErr != nil {
