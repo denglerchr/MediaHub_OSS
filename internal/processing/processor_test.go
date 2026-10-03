@@ -124,6 +124,23 @@ func (f *failingPreviewStorage) WritePreview(ctx context.Context, dbID string, e
 	return 0, errors.New("simulated storage failure on preview write")
 }
 
+// partialFailingConverter writes a few preview bytes and then fails, simulating
+// an FFmpeg crash mid-generation.
+type partialFailingConverter struct {
+	*testMockConverter
+}
+
+func (m *partialFailingConverter) CreatePreviewFromStream(ctx context.Context, inputData io.ReadSeeker, outputWriter io.Writer, inputMimeType string) error {
+	if _, err := outputWriter.Write([]byte("partial-preview-")); err != nil {
+		return err
+	}
+	return errors.New("simulated ffmpeg failure mid-preview")
+}
+
+func (m *partialFailingConverter) CreatePreviewFromFile(ctx context.Context, filepath string, outputWriter io.Writer, inputMimeType string) error {
+	return m.CreatePreviewFromStream(ctx, strings.NewReader(""), outputWriter, inputMimeType)
+}
+
 type failingWriteStorage struct {
 	*localstorage.LocalStorage
 }
@@ -755,6 +772,28 @@ func TestGenerateAndStorePreview_StorageErrorDoesNotHang(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("generateAndStorePreview hung indefinitely due to unclosed pipe reader")
+	}
+}
+
+func TestGenerateAndStorePreview_PartialPreviewIsDiscardedOnGeneratorError(t *testing.T) {
+	conv := &partialFailingConverter{&testMockConverter{}}
+	proc, r, db := setupTestProcessor(t, conv, nil)
+	defer r.Close()
+
+	const entryID = int64(42)
+
+	_, err := proc.generateAndStorePreview(context.Background(), db, entryID, "image/jpeg",
+		func(ctx context.Context, w io.Writer) error {
+			return conv.CreatePreviewFromStream(ctx, strings.NewReader("image data"), w, "image/jpeg")
+		})
+	if err == nil {
+		t.Fatal("expected error when preview generation fails mid-stream, got nil")
+	}
+
+	// The partially generated preview must not be left behind in storage:
+	// otherwise it would be served to clients despite PreviewSize == 0.
+	if _, err := proc.Storage.StatPreview(context.Background(), db.ID.String(), entryID); !errors.Is(err, customerrors.ErrNotFound) {
+		t.Fatalf("expected no preview file in storage after generator failure, got err: %v", err)
 	}
 }
 

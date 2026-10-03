@@ -109,6 +109,10 @@ func (p *Processor) generateAndStorePreview(
 	}
 
 	if genErr := <-errChan; genErr != nil {
+		// The generator failed mid-stream: the storage write above already committed
+		// whatever partial bytes were produced (the pipe closes with a clean EOF).
+		// Discard the corrupted preview so no invalid file remains in storage.
+		_ = p.Storage.DeletePreview(ctx, db.ID.String(), entryID)
 		return 0, fmt.Errorf("failed to generate preview: %w", genErr)
 	}
 
