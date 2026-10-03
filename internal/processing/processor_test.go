@@ -1,13 +1,13 @@
 package processing
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"io"
 	"log/slog"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -16,22 +16,27 @@ import (
 	"mediahub_oss/internal/repository/migrations"
 	_ "mediahub_oss/internal/repository/migrations/sqlite"
 	"mediahub_oss/internal/repository/sqlite"
+	"mediahub_oss/internal/shared/customerrors"
 	"mediahub_oss/internal/storage"
 	"mediahub_oss/internal/storage/localstorage"
 
 	"github.com/pressly/goose/v3"
 )
 
+// ---------------------------------------------------------------------------
+// Test doubles
+// ---------------------------------------------------------------------------
+
 type testMockConverter struct {
-	canConvertCheck        media.ConversionCheck
-	readMetaErr            error
-	convertStreamErr       error
-	convertFileErr         error
-	previewErr             error
-	readMetaStreamCalls    int
-	readMetaFileCalls      int
-	previewFromFileCalls   int
-	lastPreviewFileMime    string
+	canConvertCheck      media.ConversionCheck
+	readMetaErr          error
+	convertStreamErr     error
+	convertFileErr       error
+	previewErr           error
+	readMetaStreamCalls  int
+	readMetaFileCalls    int
+	previewFromFileCalls int
+	lastPreviewFileMime  string
 }
 
 func (m *testMockConverter) GetOutputMimeTypes(contentType string) []string {
@@ -119,7 +124,48 @@ func (f *failingPreviewStorage) WritePreview(ctx context.Context, dbID string, e
 	return 0, errors.New("simulated storage failure on preview write")
 }
 
+type failingWriteStorage struct {
+	*localstorage.LocalStorage
+}
+
+func (f *failingWriteStorage) Write(ctx context.Context, dbID string, entryID int64, data io.Reader) (int64, error) {
+	return 0, errors.New("simulated storage write failure")
+}
+
+type failingReadStorage struct {
+	*localstorage.LocalStorage
+	failRead bool
+}
+
+func (f *failingReadStorage) Read(ctx context.Context, dbID string, entryID int64, offset int64, length int64) (io.ReadCloser, error) {
+	if f.failRead {
+		return nil, errors.New("simulated transient storage read failure")
+	}
+	return f.LocalStorage.Read(ctx, dbID, entryID, offset, length)
+}
+
+// failingUpdateRepo fails the next n UpdateEntry calls before delegating to the
+// embedded repository, simulating transient database failures.
+type failingUpdateRepo struct {
+	repo.Repository
+	failNext int
+}
+
+func (r *failingUpdateRepo) UpdateEntry(ctx context.Context, dbID repo.ULID, entry repo.Entry) (repo.Entry, error) {
+	if r.failNext > 0 {
+		r.failNext--
+		return repo.Entry{}, errors.New("simulated database failure on update")
+	}
+	return r.Repository.UpdateEntry(ctx, dbID, entry)
+}
+
+// ---------------------------------------------------------------------------
+// Test setup
+// ---------------------------------------------------------------------------
+
 func setupTestProcessor(t *testing.T, conv media.MediaConverter, customStore storage.StorageProvider) (*Processor, repo.Repository, repo.Database) {
+	t.Helper()
+
 	r, err := sqlite.NewRepository(":memory:")
 	if err != nil {
 		t.Fatalf("failed to create repo: %v", err)
@@ -133,19 +179,13 @@ func setupTestProcessor(t *testing.T, conv media.MediaConverter, customStore sto
 		t.Fatalf("failed to run migrations: %v", err)
 	}
 
-	tempDir := t.TempDir()
-	baseStorage := &localstorage.LocalStorage{RootPath: tempDir}
-
-	var storageProvider storage.StorageProvider = baseStorage
+	storageProvider := storage.StorageProvider(&localstorage.LocalStorage{RootPath: t.TempDir()})
 	if customStore != nil {
 		storageProvider = customStore
 	}
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	proc, err := NewProcessor(r, storageProvider, conv, 2, 4, logger)
-	if err != nil {
-		t.Fatalf("failed to create processor: %v", err)
-	}
+	proc := NewProcessor(r, storageProvider, conv, 2, 4, logger)
 
 	db, err := r.CreateDatabase(context.Background(), repo.Database{
 		Name:        "test_db",
@@ -162,35 +202,83 @@ func setupTestProcessor(t *testing.T, conv media.MediaConverter, customStore sto
 	return proc, r, db
 }
 
-// Test 3.7: Orphan Processing Entry on Invalid Conversion
-func TestHandleSmallFileSync_CannotConvertCleanup(t *testing.T) {
+func conversionPlan() ProcessingPlan {
+	return ProcessingPlan{
+		WantsConversion: true,
+		NeedsConversion: true,
+		CanConvert:      true,
+		InitMimeType:    "image/jpeg",
+		TargetMimeType:  "image/png",
+		ResultMimeType:  "image/png",
+		InitFileName:    "photo.jpg",
+		FinalFileName:   "photo.png",
+	}
+}
+
+func passthroughPlan() ProcessingPlan {
+	return ProcessingPlan{
+		WantsConversion: false,
+		NeedsConversion: false,
+		CanConvert:      true,
+		InitMimeType:    "image/jpeg",
+		ResultMimeType:  "image/jpeg",
+		InitFileName:    "photo.jpg",
+		FinalFileName:   "photo.jpg",
+	}
+}
+
+func writeTempFile(t *testing.T, pattern string, data []byte) string {
+	t.Helper()
+	f, err := os.CreateTemp("", pattern)
+	if err != nil {
+		t.Fatalf("failed to create temp file: %v", err)
+	}
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		os.Remove(f.Name())
+		t.Fatalf("failed to write temp file: %v", err)
+	}
+	f.Close()
+	return f.Name()
+}
+
+// waitForStatus polls until the entry reaches the desired status or the timeout expires.
+func waitForStatus(t *testing.T, r repo.Repository, dbID repo.ULID, entryID int64, status repo.EntryStatus) repo.Entry {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		entry, err := r.GetEntry(context.Background(), dbID, entryID)
+		if err == nil && entry.Status == status {
+			return entry
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	entry, _ := r.GetEntry(context.Background(), dbID, entryID)
+	t.Fatalf("entry %d did not reach status %v (current: %v)", entryID, status, entry.Status)
+	return repo.Entry{}
+}
+
+// ---------------------------------------------------------------------------
+// Incoming pipeline: synchronous path
+// ---------------------------------------------------------------------------
+
+func TestProcessSynchronously_CannotConvertMarksEntryError(t *testing.T) {
 	conv := &testMockConverter{
 		canConvertCheck: media.ConversionCheck{CanConvert: false, NeedsConversion: true},
 	}
 	proc, r, db := setupTestProcessor(t, conv, nil)
 	defer r.Close()
 
-	fileData := bytes.NewReader([]byte("sample image data"))
-	req := EntryRequest{
-		Timestamp: time.Now().UnixMilli(),
-		FileName:  "test.jpg",
-	}
-	plan := ProcessingPlan{
-		WantsConversion: true,
-		NeedsConversion: true,
-		CanConvert:      false,
-		InitMimeType:    "image/jpeg",
-		ResultMimeType:  "image/png",
-		InitFileName:    "test.jpg",
-		FinalFileName:   "test.png",
-	}
+	plan := conversionPlan()
+	plan.CanConvert = false
 
-	_, err := proc.handleSmallFileSync(context.Background(), fileData, db, req, plan)
+	_, err := proc.processSynchronously(context.Background(), strings.NewReader("sample image data"), db,
+		EntryRequest{Timestamp: time.Now().UnixMilli(), FileName: "photo.jpg"}, plan)
 	if err == nil {
-		t.Fatal("expected error from handleSmallFileSync, got nil")
+		t.Fatal("expected error from processSynchronously, got nil")
 	}
 
-	// Verify that the created entry was transitioned to EntryStatusError (3) and not left in EntryStatusProcessing (0)
+	// The entry must not be left in a phantom "processing" state.
 	entries, err := r.GetEntries(context.Background(), db.ID, repo.QueryOptions{})
 	if err != nil {
 		t.Fatalf("failed to fetch entries: %v", err)
@@ -199,64 +287,430 @@ func TestHandleSmallFileSync_CannotConvertCleanup(t *testing.T) {
 		t.Fatalf("expected 1 entry in DB, found %d", len(entries))
 	}
 	if entries[0].Status != repo.EntryStatusError {
-		t.Fatalf("expected entry status to be EntryStatusError (%v), got %v", repo.EntryStatusError, entries[0].Status)
+		t.Fatalf("expected entry status %v, got %v", repo.EntryStatusError, entries[0].Status)
 	}
 }
 
-// Test 3.9: MediaFields Preserved on Metadata Extraction Failure
-func TestRunConversionAndFinalize_PreservesDefaultMediaFieldsOnMetaError(t *testing.T) {
+func TestProcessSynchronously_ConvertedFileUsesFileProbeAndPreview(t *testing.T) {
 	conv := &testMockConverter{
-		readMetaErr: errors.New("corrupt media metadata"),
+		canConvertCheck: media.ConversionCheck{CanConvert: true, NeedsConversion: true},
 	}
 	proc, r, db := setupTestProcessor(t, conv, nil)
 	defer r.Close()
 
-	// Create preliminary entry with defaults
-	req := EntryRequest{
-		Timestamp: time.Now().UnixMilli(),
-		FileName:  "test.jpg",
-	}
-	plan := ProcessingPlan{
-		WantsConversion: false,
-		NeedsConversion: false,
-		InitMimeType:    "image/jpeg",
-		ResultMimeType:  "image/jpeg",
-		InitFileName:    "test.jpg",
-		FinalFileName:   "test.jpg",
-	}
+	plan := conversionPlan()
+	plan.WantsPreview = true
+	plan.CanGenPreview = true
 
-	entry, err := proc.createPreliminaryEntry(context.Background(), db, req, plan, repo.EntryStatusProcessing, true)
+	entry, err := proc.processSynchronously(context.Background(), strings.NewReader("image data"), db,
+		EntryRequest{Timestamp: time.Now().UnixMilli(), FileName: "photo.jpg"}, plan)
 	if err != nil {
-		t.Fatalf("failed to create preliminary entry: %v", err)
+		t.Fatalf("unexpected error: %v", err)
 	}
 
-	// Write temp file
-	tempFile, err := os.CreateTemp("", "test-file-*.jpg")
-	if err != nil {
-		t.Fatalf("failed to create temp file: %v", err)
+	// Metadata must be extracted from the converted temp file (width=300), not from the original stream (width=100).
+	if conv.readMetaFileCalls != 1 || conv.readMetaStreamCalls != 0 {
+		t.Errorf("expected 1 ReadMediaFieldsFromFile call and 0 stream calls, got file=%d stream=%d", conv.readMetaFileCalls, conv.readMetaStreamCalls)
 	}
-	tempPath := tempFile.Name()
-	tempFile.Write([]byte("image content"))
-	tempFile.Close()
-
-	proc.runConversionAndFinalize(context.Background(), db, entry, tempPath, plan)
-
-	finalEntry, err := r.GetEntry(context.Background(), db.ID, entry.ID)
-	if err != nil {
-		t.Fatalf("failed to get final entry: %v", err)
+	if entry.MediaFields["width"] != 300 {
+		t.Errorf("expected converted width 300, got %v (%T)", entry.MediaFields["width"], entry.MediaFields["width"])
 	}
 
-	if finalEntry.Status != repo.EntryStatusReady {
-		t.Fatalf("expected entry status Ready, got %v", finalEntry.Status)
-	}
+	// Wait for the background preview to finalize the entry.
+	waitForStatus(t, r, db.ID, entry.ID, repo.EntryStatusReady)
 
-	// MediaFields should have default fields (e.g. width, height) rather than empty map
-	if len(finalEntry.MediaFields) == 0 {
-		t.Fatalf("expected default MediaFields to be preserved on extraction failure, but got empty map: %v", finalEntry.MediaFields)
+	if conv.previewFromFileCalls != 1 {
+		t.Errorf("expected CreatePreviewFromFile to be called once, got %d", conv.previewFromFileCalls)
+	}
+	if conv.lastPreviewFileMime != "image/png" {
+		t.Errorf("expected preview MIME 'image/png', got %q", conv.lastPreviewFileMime)
 	}
 }
 
-// Test 3.8: Unclosed Pipe Reader on Storage Failure does not hang
+func TestProcessIncomingEntry_SmallFileSyncSuccess(t *testing.T) {
+	conv := &testMockConverter{
+		canConvertCheck: media.ConversionCheck{CanConvert: true, NeedsConversion: true},
+	}
+	proc, r, db := setupTestProcessor(t, conv, nil)
+	defer r.Close()
+
+	entry, synchronous, err := proc.ProcessIncomingEntry(context.Background(), db,
+		EntryRequest{Timestamp: time.Now().UnixMilli(), FileName: "photo.jpg"},
+		strings.NewReader("jpeg bytes"), "image/jpeg", "photo.jpg")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !synchronous {
+		t.Error("expected synchronous=true for an in-memory upload")
+	}
+	if entry.Status != repo.EntryStatusReady {
+		t.Errorf("expected status ready (no preview configured), got %v", entry.Status)
+	}
+	if entry.MimeType != "image/png" || entry.FileName != "photo.png" {
+		t.Errorf("expected converted mime/name image/png/photo.png, got %s/%s", entry.MimeType, entry.FileName)
+	}
+
+	// The stored file must contain the (mock-)converted bytes.
+	stream, err := proc.Storage.Read(context.Background(), db.ID.String(), entry.ID, 0, -1)
+	if err != nil {
+		t.Fatalf("failed to read stored file: %v", err)
+	}
+	defer stream.Close()
+	data, _ := io.ReadAll(stream)
+	if string(data) != "jpeg bytes" {
+		t.Errorf("expected stored content %q, got %q", "jpeg bytes", string(data))
+	}
+}
+
+func TestProcessIncomingEntry_NoConversionBypassesFfmpegSlots(t *testing.T) {
+	conv := &testMockConverter{
+		canConvertCheck: media.ConversionCheck{CanConvert: true, NeedsConversion: false},
+	}
+	proc, r, _ := setupTestProcessor(t, conv, nil)
+	defer r.Close()
+
+	imageDB, err := r.CreateDatabase(context.Background(), repo.Database{
+		Name:        "passthrough_images",
+		ContentType: "image",
+		NMaxQueued:  0,
+		Config:      repo.DatabaseConfig{AutoConversion: "", CreatePreview: false},
+	})
+	if err != nil {
+		t.Fatalf("failed to create image database: %v", err)
+	}
+
+	fileDB, err := r.CreateDatabase(context.Background(), repo.Database{
+		Name:        "raw_files",
+		ContentType: "file",
+		NMaxQueued:  0,
+	})
+	if err != nil {
+		t.Fatalf("failed to create file database: %v", err)
+	}
+
+	// Exhaust all conversion slots.
+	proc.NFfmpegTotal = 1
+	proc.NFfmpegAsync = 1
+	if !proc.tryReserveAsyncSlot() {
+		t.Fatal("failed to reserve slot")
+	}
+	defer proc.releaseAsyncSlot()
+
+	// 1. Image upload requiring no conversion bypasses the exhausted slots.
+	imgEntry, wasSync, err := proc.ProcessIncomingEntry(context.Background(), imageDB,
+		EntryRequest{Timestamp: time.Now().UnixMilli(), FileName: "photo.jpg"},
+		strings.NewReader("jpeg bytes"), "image/jpeg", "photo.jpg")
+	if err != nil {
+		t.Fatalf("expected unconverted image upload to bypass exhausted slots, got err: %v", err)
+	}
+	if !wasSync || imgEntry.Status != repo.EntryStatusReady {
+		t.Errorf("expected sync ready image entry, got wasSync=%v status=%v", wasSync, imgEntry.Status)
+	}
+	if conv.readMetaStreamCalls != 1 {
+		t.Errorf("expected 1 metadata probe call for image DB, got %d", conv.readMetaStreamCalls)
+	}
+
+	// 2. File database upload bypasses the slots and skips metadata probing.
+	conv.readMetaStreamCalls = 0
+	fileEntry, wasSync, err := proc.ProcessIncomingEntry(context.Background(), fileDB,
+		EntryRequest{Timestamp: time.Now().UnixMilli(), FileName: "notes.txt"},
+		strings.NewReader("hello world"), "text/plain", "notes.txt")
+	if err != nil {
+		t.Fatalf("expected file database upload to bypass exhausted slots, got err: %v", err)
+	}
+	if !wasSync || fileEntry.Status != repo.EntryStatusReady {
+		t.Errorf("expected sync ready file entry, got wasSync=%v status=%v", wasSync, fileEntry.Status)
+	}
+	if conv.readMetaStreamCalls != 0 || conv.readMetaFileCalls != 0 {
+		t.Errorf("expected 0 metadata probe calls for 'file' database, got stream=%d file=%d", conv.readMetaStreamCalls, conv.readMetaFileCalls)
+	}
+}
+
+func TestProcessIncomingEntry_BadMimeTypeRejected(t *testing.T) {
+	conv := &testMockConverter{}
+	proc, r, db := setupTestProcessor(t, conv, nil)
+	defer r.Close()
+
+	_, _, err := proc.ProcessIncomingEntry(context.Background(), db,
+		EntryRequest{Timestamp: time.Now().UnixMilli(), FileName: "evil.exe"},
+		strings.NewReader("binary"), "application/x-msdownload", "evil.exe")
+	if !errors.Is(err, customerrors.ErrBadMimeType) {
+		t.Fatalf("expected ErrBadMimeType, got %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Incoming pipeline: queueing
+// ---------------------------------------------------------------------------
+
+func TestProcessIncomingEntry_QueuesWhenSlotsExhausted(t *testing.T) {
+	conv := &testMockConverter{
+		canConvertCheck: media.ConversionCheck{CanConvert: true, NeedsConversion: true},
+	}
+	proc, r, db := setupTestProcessor(t, conv, nil)
+	defer r.Close()
+
+	db.NMaxQueued = 10
+
+	// Occupy the only sync slot so the upload cannot be processed immediately.
+	proc.NFfmpegTotal = 1
+	if !proc.tryReserveSyncSlot() {
+		t.Fatal("failed to reserve slot")
+	}
+	defer proc.releaseSyncSlot()
+
+	entry, synchronous, err := proc.ProcessIncomingEntry(context.Background(), db,
+		EntryRequest{Timestamp: time.Now().UnixMilli(), FileName: "photo.jpg"},
+		strings.NewReader("jpeg bytes"), "image/jpeg", "photo.jpg")
+	if err != nil {
+		t.Fatalf("expected upload to be queued, got err: %v", err)
+	}
+	if synchronous {
+		t.Error("expected synchronous=false for a queued upload")
+	}
+	if entry.Status != repo.EntryStatusQueued {
+		t.Errorf("expected status queued, got %v", entry.Status)
+	}
+
+	stats, err := r.GetDatabaseStats(context.Background(), db.ID)
+	if err != nil {
+		t.Fatalf("failed to get stats: %v", err)
+	}
+	if stats.QueuedCount != 1 {
+		t.Errorf("expected QueuedCount == 1, got %d", stats.QueuedCount)
+	}
+
+	// The original file must be stored so a queue worker can pick it up.
+	if _, err := proc.Storage.Stat(context.Background(), db.ID.String(), entry.ID); err != nil {
+		t.Errorf("expected queued file in storage, got err: %v", err)
+	}
+}
+
+func TestProcessIncomingEntry_QueueFullReturnsUnavailable(t *testing.T) {
+	conv := &testMockConverter{
+		canConvertCheck: media.ConversionCheck{CanConvert: true, NeedsConversion: true},
+	}
+	proc, r, db := setupTestProcessor(t, conv, nil)
+	defer r.Close()
+
+	// No queue capacity in this database (NMaxQueued defaults to 0).
+
+	// Occupy the only sync slot.
+	proc.NFfmpegTotal = 1
+	if !proc.tryReserveSyncSlot() {
+		t.Fatal("failed to reserve slot")
+	}
+	defer proc.releaseSyncSlot()
+
+	_, _, err := proc.ProcessIncomingEntry(context.Background(), db,
+		EntryRequest{Timestamp: time.Now().UnixMilli(), FileName: "photo.jpg"},
+		strings.NewReader("jpeg bytes"), "image/jpeg", "photo.jpg")
+	if !errors.Is(err, customerrors.ErrUnavailable) {
+		t.Fatalf("expected ErrUnavailable, got %v", err)
+	}
+}
+
+func TestQueueIncomingFile_StorageFailureCleansUpDBEntry(t *testing.T) {
+	conv := &testMockConverter{
+		canConvertCheck: media.ConversionCheck{CanConvert: true, NeedsConversion: true},
+	}
+	tempDir := t.TempDir()
+	store := &failingWriteStorage{LocalStorage: &localstorage.LocalStorage{RootPath: tempDir}}
+
+	proc, r, db := setupTestProcessor(t, conv, store)
+	defer r.Close()
+
+	db.NMaxQueued = 10
+
+	_, err := proc.queueIncomingFile(context.Background(), strings.NewReader("image bytes"), db,
+		EntryRequest{Timestamp: time.Now().UnixMilli(), FileName: "queued.jpg"}, conversionPlan())
+	if err == nil {
+		t.Fatal("expected error from queueIncomingFile when storage write fails, got nil")
+	}
+
+	queuedCount, err := r.CountEntriesByStatus(context.Background(), db.ID, repo.EntryStatusQueued)
+	if err != nil {
+		t.Fatalf("failed to count queued entries: %v", err)
+	}
+	if queuedCount != 0 {
+		t.Fatalf("expected 0 orphaned queued entries after storage write failure, got %d", queuedCount)
+	}
+
+	// The entry must be completely gone (or at worst marked as error), never queued.
+	entries, err := r.GetEntries(context.Background(), db.ID, repo.QueryOptions{})
+	if err != nil {
+		t.Fatalf("failed to fetch entries: %v", err)
+	}
+	for _, e := range entries {
+		if e.Status == repo.EntryStatusQueued || e.Status == repo.EntryStatusProcessing {
+			t.Errorf("found orphaned entry with status %v", e.Status)
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Incoming pipeline: asynchronous path
+// ---------------------------------------------------------------------------
+
+func TestProcessIncomingEntry_LargeFileAsyncSuccess(t *testing.T) {
+	conv := &testMockConverter{
+		canConvertCheck: media.ConversionCheck{CanConvert: true, NeedsConversion: true},
+	}
+	proc, r, db := setupTestProcessor(t, conv, nil)
+	defer r.Close()
+
+	payload := []byte("large image bytes")
+	tempPath := writeTempFile(t, "mh-upload-*.jpg", payload)
+	file, err := os.Open(tempPath)
+	if err != nil {
+		t.Fatalf("failed to open temp file: %v", err)
+	}
+
+	entry, synchronous, err := proc.ProcessIncomingEntry(context.Background(), db,
+		EntryRequest{Timestamp: time.Now().UnixMilli(), FileName: "photo.jpg"},
+		file, "image/jpeg", "photo.jpg")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if synchronous {
+		t.Error("expected synchronous=false for a disk-spooled upload")
+	}
+	if entry.Status != repo.EntryStatusProcessing {
+		t.Errorf("expected status processing, got %v", entry.Status)
+	}
+
+	finalEntry := waitForStatus(t, r, db.ID, entry.ID, repo.EntryStatusReady)
+	if finalEntry.MimeType != "image/png" || finalEntry.FileName != "photo.png" {
+		t.Errorf("expected converted mime/name image/png/photo.png, got %s/%s", finalEntry.MimeType, finalEntry.FileName)
+	}
+
+	// The original upload temp file must have been claimed (moved) by the worker.
+	if _, err := os.Stat(tempPath); !os.IsNotExist(err) {
+		t.Errorf("expected original temp file to be moved away, stat err: %v", err)
+	}
+}
+
+func TestProcessIncomingEntry_LargeFilePassthroughReservesNoSlot(t *testing.T) {
+	conv := &testMockConverter{
+		canConvertCheck: media.ConversionCheck{CanConvert: true, NeedsConversion: false},
+	}
+	proc, r, db := setupTestProcessor(t, conv, nil)
+	defer r.Close()
+
+	// Exhaust all async capacity; passthrough must still work.
+	proc.NFfmpegAsync = 0
+
+	payload := []byte("large unconverted bytes")
+	tempPath := writeTempFile(t, "mh-upload-*.jpg", payload)
+	file, err := os.Open(tempPath)
+	if err != nil {
+		t.Fatalf("failed to open temp file: %v", err)
+	}
+
+	entry, synchronous, err := proc.ProcessIncomingEntry(context.Background(), db,
+		EntryRequest{Timestamp: time.Now().UnixMilli(), FileName: "photo.jpg"},
+		file, "image/jpeg", "photo.jpg")
+	if err != nil {
+		t.Fatalf("expected large passthrough to succeed without slots, got err: %v", err)
+	}
+	if synchronous {
+		t.Error("expected synchronous=false for a disk-spooled upload")
+	}
+
+	finalEntry := waitForStatus(t, r, db.ID, entry.ID, repo.EntryStatusReady)
+	if finalEntry.MimeType != "image/jpeg" {
+		t.Errorf("expected unconverted mime image/jpeg, got %s", finalEntry.MimeType)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Outgoing pipeline
+// ---------------------------------------------------------------------------
+
+func TestProcessOutgoingEntry_Success(t *testing.T) {
+	conv := &testMockConverter{}
+	proc, r, _ := setupTestProcessor(t, conv, nil)
+	defer r.Close()
+
+	input := strings.NewReader("original image data")
+	opts := media.ConversionOptions{TargetMimeType: "image/webp", Width: 800, Height: 480, Fit: "cut"}
+
+	stream, size, err := proc.ProcessOutgoingEntry(context.Background(), input, "image/jpeg", opts)
+	if err != nil {
+		t.Fatalf("unexpected error from ProcessOutgoingEntry: %v", err)
+	}
+	defer stream.Close()
+
+	outBytes, err := io.ReadAll(stream)
+	if err != nil {
+		t.Fatalf("failed to read converted output: %v", err)
+	}
+	if string(outBytes) != "original image data" {
+		t.Errorf("expected %q, got %q", "original image data", string(outBytes))
+	}
+	if size != int64(len("original image data")) {
+		t.Errorf("expected size %d, got %d", len("original image data"), size)
+	}
+}
+
+func TestProcessOutgoingEntry_NonSeekerInput(t *testing.T) {
+	conv := &testMockConverter{}
+	proc, r, _ := setupTestProcessor(t, conv, nil)
+	defer r.Close()
+
+	// io.NopCloser hides the ReadSeeker interface from strings.NewReader.
+	plainReader := io.NopCloser(strings.NewReader("streamed data"))
+	opts := media.ConversionOptions{TargetMimeType: "image/webp"}
+
+	stream, size, err := proc.ProcessOutgoingEntry(context.Background(), plainReader, "image/jpeg", opts)
+	if err != nil {
+		t.Fatalf("unexpected error from ProcessOutgoingEntry with non-seeker: %v", err)
+	}
+	defer stream.Close()
+
+	outBytes, err := io.ReadAll(stream)
+	if err != nil {
+		t.Fatalf("failed to read converted output: %v", err)
+	}
+	if string(outBytes) != "streamed data" {
+		t.Errorf("expected %q, got %q", "streamed data", string(outBytes))
+	}
+	if size != int64(len("streamed data")) {
+		t.Errorf("expected size %d, got %d", len("streamed data"), size)
+	}
+}
+
+func TestProcessOutgoingEntry_SlotExhaustion(t *testing.T) {
+	conv := &testMockConverter{}
+	proc, r, _ := setupTestProcessor(t, conv, nil)
+	defer r.Close()
+
+	proc.NFfmpegTotal = 1
+	if !proc.tryReserveSyncSlot() {
+		t.Fatal("failed to reserve initial slot")
+	}
+
+	_, _, err := proc.ProcessOutgoingEntry(context.Background(), strings.NewReader("image data"), "image/jpeg",
+		media.ConversionOptions{TargetMimeType: "image/webp"})
+	if !errors.Is(err, customerrors.ErrUnavailable) {
+		t.Fatalf("expected ErrUnavailable due to slot exhaustion, got %v", err)
+	}
+
+	// Release the slot and verify a subsequent call succeeds.
+	proc.releaseSyncSlot()
+
+	stream, size, err := proc.ProcessOutgoingEntry(context.Background(), strings.NewReader("image data"), "image/jpeg",
+		media.ConversionOptions{TargetMimeType: "image/webp"})
+	if err != nil {
+		t.Fatalf("expected ProcessOutgoingEntry to succeed after slot release, got: %v", err)
+	}
+	defer stream.Close()
+
+	if size != int64(len("image data")) {
+		t.Errorf("expected size %d, got %d", len("image data"), size)
+	}
+}
+
 func TestGenerateAndStorePreview_StorageErrorDoesNotHang(t *testing.T) {
 	conv := &testMockConverter{}
 	r, err := sqlite.NewRepository(":memory:")
@@ -273,22 +727,24 @@ func TestGenerateAndStorePreview_StorageErrorDoesNotHang(t *testing.T) {
 		t.Fatalf("failed to run migrations: %v", err)
 	}
 
-	tempDir := t.TempDir()
-	baseStorage := &localstorage.LocalStorage{RootPath: tempDir}
-	store := &failingPreviewStorage{LocalStorage: baseStorage}
+	store := &failingPreviewStorage{LocalStorage: &localstorage.LocalStorage{RootPath: t.TempDir()}}
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	proc := NewProcessor(r, store, conv, 2, 4, logger)
 
-	proc, _ := NewProcessor(r, store, conv, 2, 4, logger)
-
-	db, _ := r.CreateDatabase(context.Background(), repo.Database{
+	db, err := r.CreateDatabase(context.Background(), repo.Database{
 		Name:        "test_db",
 		ContentType: "image",
 	})
+	if err != nil {
+		t.Fatalf("failed to create database: %v", err)
+	}
 
 	doneChan := make(chan error, 1)
 	go func() {
-		inputSeeker := strings.NewReader("sample image data")
-		_, err := proc.generateAndStorePreview(context.Background(), db, 123, inputSeeker, "image/jpeg")
+		_, err := proc.generateAndStorePreview(context.Background(), db, 123, "image/jpeg",
+			func(ctx context.Context, w io.Writer) error {
+				return conv.CreatePreviewFromStream(ctx, strings.NewReader("sample image data"), w, "image/jpeg")
+			})
 		doneChan <- err
 	}()
 
@@ -302,146 +758,74 @@ func TestGenerateAndStorePreview_StorageErrorDoesNotHang(t *testing.T) {
 	}
 }
 
-func TestProcessor_ConvertStream_Success(t *testing.T) {
-	conv := &testMockConverter{}
-	proc, r, _ := setupTestProcessor(t, conv, nil)
-	defer r.Close()
+// ---------------------------------------------------------------------------
+// Background finalization pipeline
+// ---------------------------------------------------------------------------
 
-	input := strings.NewReader("original image data")
-	opts := media.ConversionOptions{
-		TargetMimeType: "image/webp",
-		Width:          800,
-		Height:         480,
-		Fit:            "cut",
-	}
-
-	stream, size, err := proc.ConvertStream(context.Background(), input, "image/jpeg", opts)
-	if err != nil {
-		t.Fatalf("unexpected error from ConvertStream: %v", err)
-	}
-	defer stream.Close()
-
-	outBytes, err := io.ReadAll(stream)
-	if err != nil {
-		t.Fatalf("failed to read converted output: %v", err)
-	}
-	if string(outBytes) != "original image data" {
-		t.Errorf("expected %q, got %q", "original image data", string(outBytes))
-	}
-	if size != int64(len("original image data")) {
-		t.Errorf("expected size %d, got %d", len("original image data"), size)
-	}
-}
-
-func TestProcessor_ConvertStream_NonSeekerInput(t *testing.T) {
-	conv := &testMockConverter{}
-	proc, r, _ := setupTestProcessor(t, conv, nil)
-	defer r.Close()
-
-	// io.NopCloser hides the ReadSeeker interface from strings.NewReader
-	plainReader := io.NopCloser(strings.NewReader("streamed data"))
-	opts := media.ConversionOptions{TargetMimeType: "image/webp"}
-
-	stream, size, err := proc.ConvertStream(context.Background(), plainReader, "image/jpeg", opts)
-	if err != nil {
-		t.Fatalf("unexpected error from ConvertStream with non-seeker: %v", err)
-	}
-	defer stream.Close()
-
-	outBytes, err := io.ReadAll(stream)
-	if err != nil {
-		t.Fatalf("failed to read converted output: %v", err)
-	}
-	if string(outBytes) != "streamed data" {
-		t.Errorf("expected %q, got %q", "streamed data", string(outBytes))
-	}
-	if size != int64(len("streamed data")) {
-		t.Errorf("expected size %d, got %d", len("streamed data"), size)
-	}
-}
-
-func TestProcessor_ConvertStream_SlotExhaustion(t *testing.T) {
-	conv := &testMockConverter{}
-	proc, r, _ := setupTestProcessor(t, conv, nil)
-	defer r.Close()
-
-	// Fill all sync slots up to NFfmpegTotal (setupTestProcessor sets NFfmpegTotal=4)
-	proc.NFfmpegTotal = 1
-	if !proc.tryReserveSyncSlot() {
-		t.Fatal("failed to reserve initial slot")
-	}
-
-	input := strings.NewReader("image data")
-	opts := media.ConversionOptions{TargetMimeType: "image/webp"}
-
-	_, _, err := proc.ConvertStream(context.Background(), input, "image/jpeg", opts)
-	if err == nil {
-		t.Fatal("expected error due to slot exhaustion, got nil")
-	}
-
-	// Release the slot and verify subsequent ConvertStream succeeds
-	proc.releaseSyncSlot()
-
-	stream, size, err := proc.ConvertStream(context.Background(), strings.NewReader("image data"), "image/jpeg", opts)
-	if err != nil {
-		t.Fatalf("expected ConvertStream to succeed after slot release, got: %v", err)
-	}
-	defer stream.Close()
-
-	if size != int64(len("image data")) {
-		t.Errorf("expected size %d, got %d", len("image data"), size)
-	}
-}
-
-type failingWriteStorage struct {
-	*localstorage.LocalStorage
-}
-
-func (f *failingWriteStorage) Write(ctx context.Context, dbID string, entryID int64, data io.Reader) (int64, error) {
-	return 0, errors.New("simulated storage write failure")
-}
-
-func TestQueueFile_StorageFailureCleansUpDBEntry(t *testing.T) {
+func TestFinalizeEntryFile_PreservesDefaultMediaFieldsOnMetaError(t *testing.T) {
 	conv := &testMockConverter{
-		canConvertCheck: media.ConversionCheck{CanConvert: true, NeedsConversion: true},
+		readMetaErr: errors.New("corrupt media metadata"),
 	}
-	tempDir := t.TempDir()
-	baseStorage := &localstorage.LocalStorage{RootPath: tempDir}
-	store := &failingWriteStorage{LocalStorage: baseStorage}
-
-	proc, r, db := setupTestProcessor(t, conv, store)
+	proc, r, db := setupTestProcessor(t, conv, nil)
 	defer r.Close()
 
-	req := EntryRequest{
-		Timestamp: time.Now().UnixMilli(),
-		FileName:  "queued.jpg",
+	plan := passthroughPlan()
+	entry, err := proc.createPreliminaryEntry(context.Background(), db,
+		EntryRequest{Timestamp: time.Now().UnixMilli(), FileName: "photo.jpg"}, plan, true)
+	if err != nil {
+		t.Fatalf("failed to create preliminary entry: %v", err)
 	}
+
+	tempPath := writeTempFile(t, "test-file-*.jpg", []byte("image content"))
+	proc.finalizeEntryFile(context.Background(), db, entry, tempPath, plan)
+
+	finalEntry, err := r.GetEntry(context.Background(), db.ID, entry.ID)
+	if err != nil {
+		t.Fatalf("failed to get final entry: %v", err)
+	}
+	if finalEntry.Status != repo.EntryStatusReady {
+		t.Fatalf("expected entry status ready, got %v", finalEntry.Status)
+	}
+	if len(finalEntry.MediaFields) == 0 {
+		t.Fatalf("expected default MediaFields to be preserved on extraction failure, got empty map: %v", finalEntry.MediaFields)
+	}
+}
+
+func TestFinalizeEntryFile_PassesResultMimeTypeToPreview(t *testing.T) {
+	conv := &testMockConverter{}
+	proc, r, db := setupTestProcessor(t, conv, nil)
+	defer r.Close()
+
+	// WantsConversion with CanConvert=false and NeedsConversion=false: the original
+	// file is stored, so the preview must be generated from the result (= input) MIME.
 	plan := ProcessingPlan{
 		WantsConversion: true,
-		NeedsConversion: true,
-		CanConvert:      true,
+		NeedsConversion: false,
+		CanConvert:      false,
+		WantsPreview:    true,
+		CanGenPreview:   true,
 		InitMimeType:    "image/jpeg",
-		TargetMimeType:  "image/png",
-		ResultMimeType:  "image/png",
-		InitFileName:    "queued.jpg",
-		FinalFileName:   "queued.png",
+		TargetMimeType:  "image/webp",
+		ResultMimeType:  "image/jpeg",
+		InitFileName:    "photo.jpg",
+		FinalFileName:   "photo.jpg",
 	}
 
-	_, err := proc.queueFile(context.Background(), strings.NewReader("image bytes"), db, req, plan)
-	if err == nil {
-		t.Fatal("expected error from queueFile when storage write fails, got nil")
-	}
-
-	queuedCount, err := r.CountEntriesByStatus(context.Background(), db.ID, repo.EntryStatusQueued)
+	entry, err := proc.createPreliminaryEntry(context.Background(), db,
+		EntryRequest{Timestamp: time.Now().UnixMilli(), FileName: "photo.jpg"}, plan, false)
 	if err != nil {
-		t.Fatalf("failed to count queued entries: %v", err)
+		t.Fatalf("failed to create preliminary entry: %v", err)
 	}
-	if queuedCount != 0 {
-		t.Fatalf("expected 0 orphaned queued entries after storage write failure, got %d", queuedCount)
+
+	tempPath := writeTempFile(t, "test-preview-mime-*.jpg", []byte("jpeg content"))
+	proc.finalizeEntryFile(context.Background(), db, entry, tempPath, plan)
+
+	if conv.lastPreviewFileMime != "image/jpeg" {
+		t.Errorf("expected CreatePreviewFromFile to receive ResultMimeType 'image/jpeg', got %q", conv.lastPreviewFileMime)
 	}
 }
 
-func TestRunConversionAndFinalize_FailurePreservesStorage(t *testing.T) {
+func TestFinalizeEntryFile_FailurePreservesStorage(t *testing.T) {
 	conv := &testMockConverter{
 		canConvertCheck: media.ConversionCheck{CanConvert: true, NeedsConversion: true},
 		convertFileErr:  errors.New("simulated ffmpeg conversion error"),
@@ -449,35 +833,22 @@ func TestRunConversionAndFinalize_FailurePreservesStorage(t *testing.T) {
 	proc, r, db := setupTestProcessor(t, conv, nil)
 	defer r.Close()
 
-	req := EntryRequest{
-		Timestamp: time.Now().UnixMilli(),
-		FileName:  "queued.jpg",
-	}
-	plan := ProcessingPlan{
-		WantsConversion: true,
-		NeedsConversion: true,
-		CanConvert:      true,
-		InitMimeType:    "image/jpeg",
-		TargetMimeType:  "image/png",
-		ResultMimeType:  "image/png",
-		InitFileName:    "queued.jpg",
-		FinalFileName:   "queued.png",
-	}
+	db.NMaxQueued = 10
 
-	// Queue the entry so raw file is written to storage
-	queuedEntry, err := proc.queueFile(context.Background(), strings.NewReader("raw queued bytes"), db, req, plan)
+	// Queue the entry so the raw original file is written to storage.
+	queuedEntry, err := proc.queueIncomingFile(context.Background(), strings.NewReader("raw queued bytes"), db,
+		EntryRequest{Timestamp: time.Now().UnixMilli(), FileName: "queued.jpg"}, conversionPlan())
 	if err != nil {
 		t.Fatalf("failed to queue file: %v", err)
 	}
 
-	// Verify file exists in storage before worker runs
 	if _, err := proc.Storage.Stat(context.Background(), db.ID.String(), queuedEntry.ID); err != nil {
 		t.Fatalf("expected queued file in storage before worker failure, got err: %v", err)
 	}
 
-	proc.runWorkerForClaimedEntry(context.Background(), db.ID, queuedEntry)
+	proc.runClaimedEntry(context.Background(), db.ID, queuedEntry)
 
-	// Entry should be marked Error, but the original file in storage must be preserved
+	// The entry must be marked as erroneous, but the original file in storage must be preserved.
 	updated, err := r.GetEntry(context.Background(), db.ID, queuedEntry.ID)
 	if err != nil {
 		t.Fatalf("failed to fetch entry: %v", err)
@@ -493,55 +864,79 @@ func TestRunConversionAndFinalize_FailurePreservesStorage(t *testing.T) {
 	}
 }
 
-type failingReadStorage struct {
-	*localstorage.LocalStorage
-	failRead bool
-}
-
-func (f *failingReadStorage) Read(ctx context.Context, dbID string, entryID int64, offset int64, length int64) (io.ReadCloser, error) {
-	if f.failRead {
-		return nil, errors.New("simulated transient storage read failure")
-	}
-	return f.LocalStorage.Read(ctx, dbID, entryID, offset, length)
-}
-
-func TestRunWorkerForClaimedEntry_TransientReadErrorRequeues(t *testing.T) {
+func TestFinalizeEntryFile_FinalUpdateFailurePreservesStorage(t *testing.T) {
 	conv := &testMockConverter{
-		canConvertCheck: media.ConversionCheck{CanConvert: true, NeedsConversion: false},
+		canConvertCheck: media.ConversionCheck{CanConvert: true, NeedsConversion: true},
 	}
-	tempDir := t.TempDir()
-	baseStorage := &localstorage.LocalStorage{RootPath: tempDir}
-	store := &failingReadStorage{LocalStorage: baseStorage, failRead: true}
-
-	proc, r, db := setupTestProcessor(t, conv, store)
+	proc, r, db := setupTestProcessor(t, conv, nil)
 	defer r.Close()
 
-	req := EntryRequest{
-		Timestamp: time.Now().UnixMilli(),
-		FileName:  "test.jpg",
-	}
-	plan := ProcessingPlan{
-		WantsConversion: false,
-		NeedsConversion: false,
-		CanConvert:      true,
-		InitMimeType:    "image/jpeg",
-		ResultMimeType:  "image/jpeg",
-		InitFileName:    "test.jpg",
-		FinalFileName:   "test.jpg",
-	}
+	db.NMaxQueued = 10
 
-	// Temporarily disable async slot capacity so queueing does not auto-dispatch in background
-	proc.mu.Lock()
-	proc.NFfmpegAsync = 0
-	proc.mu.Unlock()
-
-	// Queue entry
-	queuedEntry, err := proc.queueFile(context.Background(), strings.NewReader("queued payload"), db, req, plan)
+	// Queue the entry so the raw original file is written to storage.
+	queuedEntry, err := proc.queueIncomingFile(context.Background(), strings.NewReader("raw queued bytes"), db,
+		EntryRequest{Timestamp: time.Now().UnixMilli(), FileName: "queued.jpg"}, conversionPlan())
 	if err != nil {
 		t.Fatalf("failed to queue file: %v", err)
 	}
 
-	// Simulate claiming the entry
+	claimed, err := r.ClaimQueuedEntry(context.Background(), db.ID, queuedEntry.ID)
+	if err != nil || !claimed {
+		t.Fatalf("failed to claim entry: %v", err)
+	}
+	claimedEntry, err := r.GetEntry(context.Background(), db.ID, queuedEntry.ID)
+	if err != nil {
+		t.Fatalf("failed to get claimed entry: %v", err)
+	}
+
+	// Let the final metadata update fail; the follow-up status update from
+	// failProcessedEntry must succeed.
+	failingRepo := &failingUpdateRepo{Repository: r, failNext: 1}
+	proc.Repo = failingRepo
+
+	proc.runClaimedEntry(context.Background(), db.ID, claimedEntry)
+
+	if failingRepo.failNext != 0 {
+		t.Fatal("expected the final UpdateEntry call to fail exactly once")
+	}
+
+	// The entry must be marked as erroneous, but the stored file must be preserved:
+	// a failing final database update must never delete user data.
+	updated, err := r.GetEntry(context.Background(), db.ID, queuedEntry.ID)
+	if err != nil {
+		t.Fatalf("failed to fetch entry: %v", err)
+	}
+	if updated.Status != repo.EntryStatusError {
+		t.Fatalf("expected EntryStatusError, got %v", updated.Status)
+	}
+	if _, err := proc.Storage.Stat(context.Background(), db.ID.String(), queuedEntry.ID); err != nil {
+		t.Fatalf("expected stored file to be preserved after final update failure, got err: %v", err)
+	}
+	if updated.Size == 0 {
+		t.Fatalf("expected non-zero size for preserved file, got %d", updated.Size)
+	}
+}
+
+func TestRunClaimedEntry_TransientReadErrorRequeues(t *testing.T) {
+	conv := &testMockConverter{
+		canConvertCheck: media.ConversionCheck{CanConvert: true, NeedsConversion: false},
+	}
+	store := &failingReadStorage{LocalStorage: &localstorage.LocalStorage{RootPath: t.TempDir()}, failRead: true}
+
+	proc, r, db := setupTestProcessor(t, conv, store)
+	defer r.Close()
+
+	// Disable async capacity so queueing does not immediately auto-dispatch.
+	proc.NFfmpegAsync = 0
+	db.NMaxQueued = 10
+
+	queuedEntry, err := proc.queueIncomingFile(context.Background(), strings.NewReader("queued payload"), db,
+		EntryRequest{Timestamp: time.Now().UnixMilli(), FileName: "photo.jpg"}, passthroughPlan())
+	if err != nil {
+		t.Fatalf("failed to queue file: %v", err)
+	}
+
+	// Simulate claiming the entry.
 	claimed, err := r.ClaimQueuedEntry(context.Background(), db.ID, queuedEntry.ID)
 	if err != nil || !claimed {
 		t.Fatalf("failed to claim entry: %v", err)
@@ -552,10 +947,9 @@ func TestRunWorkerForClaimedEntry_TransientReadErrorRequeues(t *testing.T) {
 		t.Fatalf("failed to get claimed entry: %v", err)
 	}
 
-	// Worker encounters transient read error
-	proc.runWorkerForClaimedEntry(context.Background(), db.ID, claimedEntry)
+	// The worker encounters a transient read error and must requeue the entry.
+	proc.runClaimedEntry(context.Background(), db.ID, claimedEntry)
 
-	// Entry must be requeued (EntryStatusQueued), NOT marked Error, and file must NOT be deleted from storage
 	updated, err := r.GetEntry(context.Background(), db.ID, queuedEntry.ID)
 	if err != nil {
 		t.Fatalf("failed to fetch entry: %v", err)
@@ -568,175 +962,21 @@ func TestRunWorkerForClaimedEntry_TransientReadErrorRequeues(t *testing.T) {
 	if _, err := proc.Storage.Stat(context.Background(), db.ID.String(), queuedEntry.ID); err != nil {
 		t.Fatalf("expected queued file to be preserved in storage, got err: %v", err)
 	}
-}
 
-func TestProcessEntry_NoConversionBypassesFfmpegSlots(t *testing.T) {
-	conv := &testMockConverter{
-		canConvertCheck: media.ConversionCheck{CanConvert: true, NeedsConversion: false},
-	}
-	proc, r, _ := setupTestProcessor(t, conv, nil)
-	defer r.Close()
-
-	imageDB, err := r.CreateDatabase(context.Background(), repo.Database{
-		Name:        "passthrough_images",
-		ContentType: "image",
-		NMaxQueued:  0,
-		Config: repo.DatabaseConfig{
-			AutoConversion: "",
-			CreatePreview:  false,
-		},
-	})
+	stats, err := r.GetDatabaseStats(context.Background(), db.ID)
 	if err != nil {
-		t.Fatalf("failed to create image database: %v", err)
+		t.Fatalf("failed to get stats: %v", err)
 	}
-
-	fileDB, err := r.CreateDatabase(context.Background(), repo.Database{
-		Name:        "raw_files",
-		ContentType: "file",
-		NMaxQueued:  0,
-	})
-	if err != nil {
-		t.Fatalf("failed to create file database: %v", err)
-	}
-
-	// Exhaust all FFmpeg sync & async conversion slots
-	proc.NFfmpegTotal = 1
-	proc.NFfmpegAsync = 1
-	if !proc.tryReserveAsyncSlot() {
-		t.Fatal("failed to reserve slot")
-	}
-	defer proc.releaseAsyncSlot()
-
-	// 1. Image upload requiring no conversion bypasses exhausted conversion slots
-	imgEntry, wasSync, err := proc.ProcessEntry(context.Background(), imageDB, EntryRequest{
-		Timestamp: time.Now().UnixMilli(),
-		FileName:  "photo.jpg",
-	}, strings.NewReader("jpeg bytes"), "image/jpeg", "photo.jpg")
-	if err != nil {
-		t.Fatalf("expected unconverted image upload to bypass exhausted conversion slots, got err: %v", err)
-	}
-	if !wasSync || imgEntry.Status != repo.EntryStatusReady {
-		t.Errorf("expected sync Ready image entry, got wasSync=%v status=%v", wasSync, imgEntry.Status)
-	}
-	if conv.readMetaStreamCalls != 1 {
-		t.Errorf("expected 1 metadata probe call for image DB, got %d", conv.readMetaStreamCalls)
-	}
-
-	// 2. File database upload bypasses exhausted conversion slots and skips metadata probing
-	conv.readMetaStreamCalls = 0
-	fileEntry, wasSync, err := proc.ProcessEntry(context.Background(), fileDB, EntryRequest{
-		Timestamp: time.Now().UnixMilli(),
-		FileName:  "notes.txt",
-	}, strings.NewReader("hello world"), "text/plain", "notes.txt")
-	if err != nil {
-		t.Fatalf("expected file database upload to bypass exhausted FFmpeg slots, got err: %v", err)
-	}
-	if !wasSync || fileEntry.Status != repo.EntryStatusReady {
-		t.Errorf("expected sync Ready file entry, got wasSync=%v status=%v", wasSync, fileEntry.Status)
-	}
-	if conv.readMetaStreamCalls != 0 || conv.readMetaFileCalls != 0 {
-		t.Errorf("expected 0 metadata probe calls for 'file' database, got stream=%d file=%d", conv.readMetaStreamCalls, conv.readMetaFileCalls)
+	if stats.QueuedCount != 1 {
+		t.Errorf("expected QueuedCount == 1 after requeue, got %d", stats.QueuedCount)
 	}
 }
 
-func TestHandleSmallFileSync_ConvertedFileUsesFileProbeAndPreview(t *testing.T) {
-	conv := &testMockConverter{
-		canConvertCheck: media.ConversionCheck{CanConvert: true, NeedsConversion: true},
-	}
-	proc, r, db := setupTestProcessor(t, conv, nil)
-	defer r.Close()
+// ---------------------------------------------------------------------------
+// Queue dispatching
+// ---------------------------------------------------------------------------
 
-	req := EntryRequest{
-		Timestamp: time.Now().UnixMilli(),
-		FileName:  "photo.jpg",
-	}
-	plan := ProcessingPlan{
-		WantsConversion: true,
-		NeedsConversion: true,
-		CanConvert:      true,
-		WantsPreview:    true,
-		CanGenPreview:   true,
-		InitMimeType:    "image/jpeg",
-		TargetMimeType:  "image/png",
-		ResultMimeType:  "image/png",
-		InitFileName:    "photo.jpg",
-		FinalFileName:   "photo.png",
-	}
-
-	entry, err := proc.handleSmallFileSync(context.Background(), strings.NewReader("image data"), db, req, plan)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	// Metadata must be extracted from converted file (width=300, height=400), not stream (width=100, height=200)
-	if conv.readMetaFileCalls != 1 || conv.readMetaStreamCalls != 0 {
-		t.Errorf("expected 1 ReadMediaFieldsFromFile call and 0 stream calls, got file=%d stream=%d", conv.readMetaFileCalls, conv.readMetaStreamCalls)
-	}
-	if entry.MediaFields["width"] != 300 && entry.MediaFields["width"] != uint64(300) && entry.MediaFields["width"] != int64(300) {
-		t.Errorf("expected converted width 300, got %v (%T)", entry.MediaFields["width"], entry.MediaFields["width"])
-	}
-
-	// Wait for background preview from temp file to finish
-	for i := 0; i < 50; i++ {
-		updated, err := r.GetEntry(context.Background(), db.ID, entry.ID)
-		if err == nil && updated.Status == repo.EntryStatusReady {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-
-	if conv.previewFromFileCalls != 1 {
-		t.Errorf("expected CreatePreviewFromFile to be called once using converted tempStream, got %d", conv.previewFromFileCalls)
-	}
-	if conv.lastPreviewFileMime != "image/png" {
-		t.Errorf("expected preview MIME 'image/png', got %q", conv.lastPreviewFileMime)
-	}
-}
-
-func TestRunConversionAndFinalize_PassesResultMimeTypeToPreview(t *testing.T) {
-	conv := &testMockConverter{}
-	proc, r, db := setupTestProcessor(t, conv, nil)
-	defer r.Close()
-
-	req := EntryRequest{
-		Timestamp: time.Now().UnixMilli(),
-		FileName:  "photo.jpg",
-	}
-	// Simulate case where WantsConversion was true (TargetMimeType="image/webp") but conversion was not performed (ResultMimeType="image/jpeg")
-	plan := ProcessingPlan{
-		WantsConversion: true,
-		NeedsConversion: false,
-		CanConvert:      false,
-		WantsPreview:    true,
-		CanGenPreview:   true,
-		InitMimeType:    "image/jpeg",
-		TargetMimeType:  "image/webp",
-		ResultMimeType:  "image/jpeg",
-		InitFileName:    "photo.jpg",
-		FinalFileName:   "photo.jpg",
-	}
-
-	entry, err := proc.createPreliminaryEntry(context.Background(), db, req, plan, repo.EntryStatusProcessing, false)
-	if err != nil {
-		t.Fatalf("failed to create preliminary entry: %v", err)
-	}
-
-	tempFile, err := os.CreateTemp("", "test-preview-mime-*.jpg")
-	if err != nil {
-		t.Fatalf("failed to create temp file: %v", err)
-	}
-	tempPath := tempFile.Name()
-	tempFile.Write([]byte("jpeg content"))
-	tempFile.Close()
-
-	proc.runConversionAndFinalize(context.Background(), db, entry, tempPath, plan)
-
-	if conv.lastPreviewFileMime != "image/jpeg" {
-		t.Errorf("expected CreatePreviewFromFile to receive ResultMimeType 'image/jpeg', got %q", conv.lastPreviewFileMime)
-	}
-}
-
-func TestQueueMonitor_TriggersAndProcessesQueuedEntries(t *testing.T) {
+func TestDispatchQueuedWorkers_ProcessesQueuedEntries(t *testing.T) {
 	conv := &testMockConverter{
 		canConvertCheck: media.ConversionCheck{CanConvert: true, NeedsConversion: false},
 	}
@@ -744,28 +984,18 @@ func TestQueueMonitor_TriggersAndProcessesQueuedEntries(t *testing.T) {
 	defer r.Close()
 
 	ctx := context.Background()
+	db.NMaxQueued = 10
 
-	plan := ProcessingPlan{
-		WantsConversion: false,
-		NeedsConversion: false,
-		CanConvert:      true,
-		InitMimeType:    "image/jpeg",
-		ResultMimeType:  "image/jpeg",
-		InitFileName:    "test.jpg",
-		FinalFileName:   "test.jpg",
-	}
-
-	// Temporarily disable async slot capacity so queueing does not immediately auto-dispatch
-	proc.mu.Lock()
+	// Disable async capacity so queueing does not immediately auto-dispatch.
 	proc.NFfmpegAsync = 0
-	proc.mu.Unlock()
 
-	// Queue 2 entries
-	e1, err := proc.queueFile(ctx, strings.NewReader("fake-image-1"), db, EntryRequest{Timestamp: time.Now().UnixMilli(), FileName: "e1.jpg"}, plan)
+	e1, err := proc.queueIncomingFile(ctx, strings.NewReader("fake-image-1"), db,
+		EntryRequest{Timestamp: time.Now().UnixMilli(), FileName: "e1.jpg"}, passthroughPlan())
 	if err != nil {
 		t.Fatalf("failed to queue e1: %v", err)
 	}
-	e2, err := proc.queueFile(ctx, strings.NewReader("fake-image-2"), db, EntryRequest{Timestamp: time.Now().UnixMilli(), FileName: "e2.jpg"}, plan)
+	e2, err := proc.queueIncomingFile(ctx, strings.NewReader("fake-image-2"), db,
+		EntryRequest{Timestamp: time.Now().UnixMilli(), FileName: "e2.jpg"}, passthroughPlan())
 	if err != nil {
 		t.Fatalf("failed to queue e2: %v", err)
 	}
@@ -778,29 +1008,12 @@ func TestQueueMonitor_TriggersAndProcessesQueuedEntries(t *testing.T) {
 		t.Fatalf("expected QueuedCount == 2, got %d", stats.QueuedCount)
 	}
 
-	// Restore capacity and trigger queue check
-	proc.mu.Lock()
+	// Restore capacity and dispatch.
 	proc.NFfmpegAsync = 2
-	proc.mu.Unlock()
+	proc.dispatchQueuedWorkers(ctx)
 
-	proc.TriggerQueueWorkersIfPossible(ctx)
-
-	// Wait for workers to process both entries
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		ent1, err1 := r.GetEntry(ctx, db.ID, e1.ID)
-		ent2, err2 := r.GetEntry(ctx, db.ID, e2.ID)
-		if err1 == nil && err2 == nil && ent1.Status == repo.EntryStatusReady && ent2.Status == repo.EntryStatusReady {
-			break
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-
-	ent1, _ := r.GetEntry(ctx, db.ID, e1.ID)
-	ent2, _ := r.GetEntry(ctx, db.ID, e2.ID)
-	if ent1.Status != repo.EntryStatusReady || ent2.Status != repo.EntryStatusReady {
-		t.Fatalf("entries not ready: e1=%v, e2=%v", ent1.Status, ent2.Status)
-	}
+	waitForStatus(t, r, db.ID, e1.ID, repo.EntryStatusReady)
+	waitForStatus(t, r, db.ID, e2.ID, repo.EntryStatusReady)
 
 	stats, _ = r.GetDatabaseStats(ctx, db.ID)
 	if stats.QueuedCount != 0 {
@@ -808,7 +1021,7 @@ func TestQueueMonitor_TriggersAndProcessesQueuedEntries(t *testing.T) {
 	}
 }
 
-func TestParallelQueueWorkerDispatch(t *testing.T) {
+func TestDispatchQueuedWorkers_ParallelAcrossDatabases(t *testing.T) {
 	conv := &testMockConverter{
 		canConvertCheck: media.ConversionCheck{CanConvert: true, NeedsConversion: false},
 	}
@@ -824,50 +1037,125 @@ func TestParallelQueueWorkerDispatch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create db2: %v", err)
 	}
+	db1.NMaxQueued = 10
+	db2.NMaxQueued = 10
 
-	plan := ProcessingPlan{
-		WantsConversion: false,
-		NeedsConversion: false,
-		CanConvert:      true,
-		InitMimeType:    "image/jpeg",
-		ResultMimeType:  "image/jpeg",
-		InitFileName:    "test.jpg",
-		FinalFileName:   "test.jpg",
-	}
-
-	// Queue entries in both databases
-	e1, err := proc.queueFile(ctx, strings.NewReader("fake-image-1"), db1, EntryRequest{Timestamp: time.Now().UnixMilli(), FileName: "e1.jpg"}, plan)
+	e1, err := proc.queueIncomingFile(ctx, strings.NewReader("fake-image-1"), db1,
+		EntryRequest{Timestamp: time.Now().UnixMilli(), FileName: "e1.jpg"}, passthroughPlan())
 	if err != nil {
 		t.Fatalf("failed to queue e1: %v", err)
 	}
-	e2, err := proc.queueFile(ctx, strings.NewReader("fake-image-2"), db2, EntryRequest{Timestamp: time.Now().UnixMilli(), FileName: "e2.jpg"}, plan)
+	e2, err := proc.queueIncomingFile(ctx, strings.NewReader("fake-image-2"), db2,
+		EntryRequest{Timestamp: time.Now().UnixMilli(), FileName: "e2.jpg"}, passthroughPlan())
 	if err != nil {
 		t.Fatalf("failed to queue e2: %v", err)
 	}
 
-	// Trigger queue workers
-	proc.TriggerQueueWorkersIfPossible(ctx)
+	proc.dispatchQueuedWorkers(ctx)
 
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		ent1, _ := r.GetEntry(ctx, db1.ID, e1.ID)
-		ent2, _ := r.GetEntry(ctx, db2.ID, e2.ID)
-		if ent1.Status == repo.EntryStatusReady && ent2.Status == repo.EntryStatusReady {
-			break
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-
-	ent1, _ := r.GetEntry(ctx, db1.ID, e1.ID)
-	ent2, _ := r.GetEntry(ctx, db2.ID, e2.ID)
-	if ent1.Status != repo.EntryStatusReady || ent2.Status != repo.EntryStatusReady {
-		t.Fatalf("entries not ready: e1=%v, e2=%v", ent1.Status, ent2.Status)
-	}
+	waitForStatus(t, r, db1.ID, e1.ID, repo.EntryStatusReady)
+	waitForStatus(t, r, db2.ID, e2.ID, repo.EntryStatusReady)
 
 	stats1, _ := r.GetDatabaseStats(ctx, db1.ID)
 	stats2, _ := r.GetDatabaseStats(ctx, db2.ID)
 	if stats1.QueuedCount != 0 || stats2.QueuedCount != 0 {
 		t.Errorf("expected QueuedCount == 0, got db1=%d db2=%d", stats1.QueuedCount, stats2.QueuedCount)
+	}
+}
+
+func TestDispatchQueuedWorkers_RespectsAsyncLimit(t *testing.T) {
+	conv := &testMockConverter{
+		canConvertCheck: media.ConversionCheck{CanConvert: true, NeedsConversion: false},
+	}
+	proc, r, db := setupTestProcessor(t, conv, nil)
+	defer r.Close()
+
+	ctx := context.Background()
+	db.NMaxQueued = 10
+
+	// Queue 3 entries without auto-dispatch.
+	proc.NFfmpegAsync = 0
+	var ids []int64
+	for _, name := range []string{"a.jpg", "b.jpg", "c.jpg"} {
+		e, err := proc.queueIncomingFile(ctx, strings.NewReader("img-"+name), db,
+			EntryRequest{Timestamp: time.Now().UnixMilli(), FileName: name}, passthroughPlan())
+		if err != nil {
+			t.Fatalf("failed to queue %s: %v", name, err)
+		}
+		ids = append(ids, e.ID)
+	}
+
+	// Allow only a single async worker at a time and occupy that slot:
+	// the dispatch pass must not spawn anything while the slot is held.
+	proc.NFfmpegAsync = 1
+	if !proc.tryReserveAsyncSlot() {
+		t.Fatal("failed to reserve slot")
+	}
+	proc.dispatchQueuedWorkers(ctx)
+
+	for _, id := range ids {
+		entry, err := r.GetEntry(ctx, db.ID, id)
+		if err != nil {
+			t.Fatalf("failed to fetch entry: %v", err)
+		}
+		if entry.Status != repo.EntryStatusQueued {
+			t.Errorf("expected entry %d to remain queued while slot is held, got %v", id, entry.Status)
+		}
+	}
+
+	// Freeing the slot triggers a dispatch pass which drains the queue.
+	proc.releaseAsyncSlot()
+	for _, id := range ids {
+		waitForStatus(t, r, db.ID, id, repo.EntryStatusReady)
+	}
+}
+
+func TestDispatchQueuedWorkers_ConcurrentTriggersDrainQueue(t *testing.T) {
+	conv := &testMockConverter{
+		canConvertCheck: media.ConversionCheck{CanConvert: true, NeedsConversion: false},
+	}
+	proc, r, db := setupTestProcessor(t, conv, nil)
+	defer r.Close()
+
+	ctx := context.Background()
+	db.NMaxQueued = 20
+
+	// Queue 12 entries without auto-dispatch.
+	proc.NFfmpegAsync = 0
+	var ids []int64
+	for i := 0; i < 12; i++ {
+		e, err := proc.queueIncomingFile(ctx, strings.NewReader("queued image"), db,
+			EntryRequest{Timestamp: time.Now().UnixMilli(), FileName: "e.jpg"}, passthroughPlan())
+		if err != nil {
+			t.Fatalf("failed to queue entry %d: %v", i, err)
+		}
+		ids = append(ids, e.ID)
+	}
+
+	// Restore capacity and hammer the dispatcher from many goroutines at once,
+	// like concurrent slot releases and queue inserts would. No trigger may be
+	// lost, regardless of how the passes interleave.
+	proc.NFfmpegAsync = 4
+	var wg sync.WaitGroup
+	for i := 0; i < 20; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			proc.dispatchQueuedWorkers(ctx)
+		}()
+	}
+	wg.Wait()
+
+	for _, id := range ids {
+		waitForStatus(t, r, db.ID, id, repo.EntryStatusReady)
+	}
+
+	stats, err := r.GetDatabaseStats(ctx, db.ID)
+	if err != nil {
+		t.Fatalf("failed to get stats: %v", err)
+	}
+	if stats.QueuedCount != 0 {
+		t.Errorf("expected QueuedCount == 0, got %d", stats.QueuedCount)
 	}
 }
 
@@ -884,18 +1172,13 @@ func TestStartQueueMonitor_ContextCancel(t *testing.T) {
 		close(done)
 	}()
 
-	// Cancel context after short duration
 	time.Sleep(50 * time.Millisecond)
 	cancel()
 
 	select {
 	case <-done:
-		// Succeeded: StartQueueMonitor exited cleanly
+		// StartQueueMonitor exited cleanly.
 	case <-time.After(2 * time.Second):
 		t.Fatal("StartQueueMonitor did not terminate after context cancellation")
 	}
 }
-
-
-
-

@@ -11,64 +11,53 @@ import (
 
 // ProcessingPlan holds the details needed for file conversion and preview generation.
 type ProcessingPlan struct {
-	WantsConversion bool
-	NeedsConversion bool
-	CanConvert      bool
+	WantsConversion bool // database is configured with an auto-conversion target
+	NeedsConversion bool // the converter would actually transform the file
+	CanConvert      bool // the converter is capable of performing the conversion
 
-	WantsPreview  bool
-	CanGenPreview bool
+	WantsPreview  bool // database is configured to create previews
+	CanGenPreview bool // the converter can generate a preview for the input type
 
-	InitMimeType   string
-	TargetMimeType string
-	ResultMimeType string
+	InitMimeType   string // normalized MIME type of the uploaded file
+	TargetMimeType string // configured auto-conversion target (normalized)
+	ResultMimeType string // MIME type of the finally stored file
 
-	InitFileName  string
-	FinalFileName string
+	InitFileName  string // file name before conversion (user name preferred)
+	FinalFileName string // file name after a potential conversion (extension adjusted)
 }
 
-// DetermineConversionPlan evaluates if a file needs conversion based on the database configuration.
-func DetermineConversionPlan(mc media.MediaConverter, db repo.Database, originalMimeType string, originalFileName string, userFileName string) (ProcessingPlan, error) {
+// determinePlan computes the processing plan for a file with the given MIME type
+// and file name. If userFileName is non-empty, it overrides the original file name
+// (inheriting the original extension when missing).
+func determinePlan(mc media.MediaConverter, db repo.Database, originalMimeType, originalFileName, userFileName string) ProcessingPlan {
 	originalMimeType = media.NormalizeMimeType(originalMimeType)
 
-	isValid, err := media.IsMimeOfType(db.ContentType, originalMimeType)
-	if !isValid {
-		return ProcessingPlan{InitMimeType: originalMimeType}, customerrors.ErrBadMimeType
-	}
-	if err != nil {
-		return ProcessingPlan{InitMimeType: originalMimeType}, err
-	}
-
-	wantsConversion := (db.Config.AutoConversion != "")
 	targetMimeType := originalMimeType
 	resultMimeType := originalMimeType
 
+	wantsConversion := db.Config.AutoConversion != ""
 	var convCheck media.ConversionCheck
 	if wantsConversion {
 		targetMimeType = media.NormalizeMimeType(db.Config.AutoConversion)
-
-		// check capabilities
 		convCheck = mc.CanConvert(originalMimeType, media.ConversionOptions{TargetMimeType: targetMimeType})
-		if convCheck.CanConvert {
+		if convCheck.CanConvert && convCheck.NeedsConversion {
+			// Only when a conversion will actually be performed does the stored
+			// file end up in the target format.
 			resultMimeType = targetMimeType
 		}
 	}
 
-	canGenPreview := mc.CanCreatePreview(originalMimeType)
-
-	// derive file name
 	initFileName := originalFileName
 	if userFileName != "" {
 		initFileName = userFileName
 		if filepath.Ext(initFileName) == "" {
-			originalExt := filepath.Ext(originalFileName)
-			initFileName = initFileName + originalExt
+			initFileName += filepath.Ext(originalFileName)
 		}
 	}
 
 	finalFileName := initFileName
 	if convCheck.NeedsConversion && convCheck.CanConvert {
-		newExtension := GetExtensionForMimeType(targetMimeType)
-		finalFileName = ReplaceExtension(finalFileName, newExtension)
+		finalFileName = ReplaceExtension(finalFileName, GetExtensionForMimeType(targetMimeType))
 	}
 
 	return ProcessingPlan{
@@ -76,53 +65,37 @@ func DetermineConversionPlan(mc media.MediaConverter, db repo.Database, original
 		NeedsConversion: convCheck.NeedsConversion,
 		CanConvert:      convCheck.CanConvert,
 		WantsPreview:    db.Config.CreatePreview,
-		CanGenPreview:   canGenPreview,
+		CanGenPreview:   mc.CanCreatePreview(originalMimeType),
 		InitMimeType:    originalMimeType,
 		TargetMimeType:  targetMimeType,
 		ResultMimeType:  resultMimeType,
 		InitFileName:    initFileName,
 		FinalFileName:   finalFileName,
-	}, nil
+	}
 }
 
-// DeterminePlanForEntry determines the processing plan for a queued/processing database entry.
+// DetermineConversionPlan evaluates the processing plan for a newly uploaded file.
+// It returns customerrors.ErrBadMimeType if the file's MIME type does not match
+// the database content type.
+func DetermineConversionPlan(mc media.MediaConverter, db repo.Database, originalMimeType string, originalFileName string, userFileName string) (ProcessingPlan, error) {
+	normalizedMime := media.NormalizeMimeType(originalMimeType)
+
+	isValid, err := media.IsMimeOfType(db.ContentType, normalizedMime)
+	if err != nil {
+		return ProcessingPlan{InitMimeType: normalizedMime}, err
+	}
+	if !isValid {
+		return ProcessingPlan{InitMimeType: normalizedMime}, customerrors.ErrBadMimeType
+	}
+
+	return determinePlan(mc, db, normalizedMime, originalFileName, userFileName), nil
+}
+
+// DeterminePlanForEntry evaluates the processing plan for an entry that is already
+// stored in the database (e.g. a queued entry picked up by a worker). The MIME type
+// was validated at upload time, so no validation error can occur here.
 func DeterminePlanForEntry(mc media.MediaConverter, db repo.Database, entry repo.Entry) ProcessingPlan {
-	originalMimeType := media.NormalizeMimeType(entry.MimeType)
-	wantsConversion := (db.Config.AutoConversion != "")
-	targetMimeType := originalMimeType
-	resultMimeType := originalMimeType
-
-	var convCheck media.ConversionCheck
-	if wantsConversion {
-		targetMimeType = media.NormalizeMimeType(db.Config.AutoConversion)
-		convCheck = mc.CanConvert(originalMimeType, media.ConversionOptions{TargetMimeType: targetMimeType})
-		if convCheck.CanConvert {
-			resultMimeType = targetMimeType
-		}
-	}
-
-	canGenPreview := mc.CanCreatePreview(originalMimeType)
-
-	// Derive initial and final file names
-	initFileName := entry.FileName
-	finalFileName := initFileName
-	if convCheck.NeedsConversion && convCheck.CanConvert {
-		newExtension := GetExtensionForMimeType(targetMimeType)
-		finalFileName = ReplaceExtension(finalFileName, newExtension)
-	}
-
-	return ProcessingPlan{
-		WantsConversion: wantsConversion,
-		NeedsConversion: convCheck.NeedsConversion,
-		CanConvert:      convCheck.CanConvert,
-		WantsPreview:    db.Config.CreatePreview,
-		CanGenPreview:   canGenPreview,
-		InitMimeType:    originalMimeType,
-		TargetMimeType:  targetMimeType,
-		ResultMimeType:  resultMimeType,
-		InitFileName:    initFileName,
-		FinalFileName:   finalFileName,
-	}
+	return determinePlan(mc, db, entry.MimeType, entry.FileName, "")
 }
 
 // GetExtensionForMimeType returns the preferred file extension for a given MIME type (e.g., ".opus")

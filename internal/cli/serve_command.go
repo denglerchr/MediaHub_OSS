@@ -257,10 +257,7 @@ func initServices(ctx context.Context, cfg *config.Config, repo repository.Repos
 		return nil, fmt.Errorf("failed to parse server config: %w", err)
 	}
 
-	proc, err := processing.NewProcessor(repo, storageProvider, converter, serverCfg.NFfmpegAsync, serverCfg.NFfmpegTotal, logger)
-	if err != nil {
-		return nil, fmt.Errorf("failed to initialize processing manager: %w", err)
-	}
+	proc := processing.NewProcessor(repo, storageProvider, converter, serverCfg.NFfmpegAsync, serverCfg.NFfmpegTotal, logger)
 	go proc.StartQueueMonitor(ctx)
 
 	return &backgroundServices{

@@ -62,10 +62,7 @@ func setupFileTestEnvironment(t *testing.T, contentType string, conv *mockMediaC
 	if conv == nil {
 		conv = &mockMediaConverter{}
 	}
-	proc, err := processing.NewProcessor(r, store, conv, 2, 4, logger)
-	if err != nil {
-		t.Fatalf("failed to create processor: %v", err)
-	}
+	proc := processing.NewProcessor(r, store, conv, 2, 4, logger)
 
 	handler := &entryhandler.EntryHandler{
 		Repo:                   r,
@@ -441,9 +438,9 @@ func TestGetEntryFile_CapacityExhausted(t *testing.T) {
 
 	// Fill all sync slots by holding an active converted stream open
 	handler.Processor.NFfmpegTotal = 1
-	heldStream, _, err := handler.Processor.ConvertStream(context.Background(), bytes.NewReader([]byte("dummy")), "image/jpeg", media.ConversionOptions{TargetMimeType: "image/webp"})
+	heldStream, _, err := handler.Processor.ProcessOutgoingEntry(context.Background(), bytes.NewReader([]byte("dummy")), "image/jpeg", media.ConversionOptions{TargetMimeType: "image/webp"})
 	if err != nil {
-		t.Fatalf("failed to reserve slot via ConvertStream: %v", err)
+		t.Fatalf("failed to reserve slot via ProcessOutgoingEntry: %v", err)
 	}
 	defer heldStream.Close()
 

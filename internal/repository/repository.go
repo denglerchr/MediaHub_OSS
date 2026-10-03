@@ -3,7 +3,8 @@
 // Some standards:
 // - timestamps are passed as time.Time and handled as Int64 representing millisecond precision unix epochs internally
 // - the zero value (time.Time{}) is used to specify an undefined/missing timestamp
-// - omitting a timestamp (by passing time.Time{}) can be used to have the server create a default timestamp entry// - timestamps should use the server time, thus the client should avoid passing timestamps created using time.now()
+// - omitting a timestamp (by passing time.Time{}) can be used to have the server create a default timestamp entry
+// - timestamps should use the server time, thus the client should avoid passing timestamps created using time.now()
 // - the interface uses time.Duration instead of timestamps where possible to avoid passing client timestamp
 package repository
 

@@ -111,7 +111,7 @@ func (h *EntryHandler) PostEntry(w http.ResponseWriter, r *http.Request) {
 	originalMime := header.Header.Get("Content-Type")
 	originalName := header.Filename
 
-	entry, wasSync, err := h.Processor.ProcessEntry(r.Context(), db, procReq, file, originalMime, originalName)
+	entry, wasSync, err := h.Processor.ProcessIncomingEntry(r.Context(), db, procReq, file, originalMime, originalName)
 	if err != nil {
 		if errors.Is(err, customerrors.ErrUnavailable) {
 			utils.RespondWithError(w, http.StatusServiceUnavailable, "Service Unavailable: queue is full or processing capacity exhausted.")

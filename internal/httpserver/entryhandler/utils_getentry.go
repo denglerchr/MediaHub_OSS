@@ -143,7 +143,7 @@ func (h *EntryHandler) serveTransformedEntryFile(
 	}
 	defer origStream.Close()
 
-	convertedStream, convertedSize, err := h.Processor.ConvertStream(r.Context(), origStream, entry.MimeType, convOpts)
+	convertedStream, convertedSize, err := h.Processor.ProcessOutgoingEntry(r.Context(), origStream, entry.MimeType, convOpts)
 	if err != nil {
 		if errors.Is(err, customerrors.ErrUnavailable) {
 			utils.RespondWithError(w, http.StatusServiceUnavailable, "Server is currently at capacity for transformations. Try again later.")

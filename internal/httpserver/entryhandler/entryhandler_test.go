@@ -56,10 +56,7 @@ func setupTestEnvironment(t *testing.T) (*sqlite.SQLiteRepository, *localstorage
 	}
 
 	conv := &mockMediaConverter{}
-	proc, err := processing.NewProcessor(r, store, conv, 2, 4, logger)
-	if err != nil {
-		t.Fatalf("failed to create processor: %v", err)
-	}
+	proc := processing.NewProcessor(r, store, conv, 2, 4, logger)
 
 	handler := &entryhandler.EntryHandler{
 		Repo:                   r,
