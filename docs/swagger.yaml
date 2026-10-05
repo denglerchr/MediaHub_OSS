@@ -88,6 +88,8 @@ definitions:
     properties:
       entry_count:
         type: integer
+      queued_count:
+        type: integer
       total_disk_space_bytes:
         type: integer
     type: object

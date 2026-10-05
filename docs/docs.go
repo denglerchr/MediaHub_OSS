@@ -2653,6 +2653,9 @@ const docTemplate = `{
                 "entry_count": {
                     "type": "integer"
                 },
+                "queued_count": {
+                    "type": "integer"
+                },
                 "total_disk_space_bytes": {
                     "type": "integer"
                 }
