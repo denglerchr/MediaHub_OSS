@@ -140,6 +140,7 @@
   height: 2rem;
 }
 
+.status-queued { color: var(--text-warning); }
 .status-processing { color: var(--text-accent); }
 .status-error { color: var(--text-danger); }
 

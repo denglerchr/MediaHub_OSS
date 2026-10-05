@@ -61,12 +61,12 @@
             </tr>
             <tr>
               <th>Type</th>
-              <td>{{ entryForMetadata.mime_type || 'Processing...' }}</td>
+              <td>{{ entryForMetadata.mime_type || (entryForMetadata.status === 'queued' ? 'Queued...' : 'Processing...') }}</td>
             </tr>
             <tr>
               <th>Status</th>
               <td>
-                <span [ngClass]="{'text-warning': entryForMetadata.status === 'processing', 'text-danger': entryForMetadata.status === 'error'}">
+                <span [ngClass]="{'text-warning': entryForMetadata.status === 'processing' || entryForMetadata.status === 'queued', 'text-danger': entryForMetadata.status === 'error'}">
                   {{ entryForMetadata.status | titlecase }}
                 </span>
               </td>
@@ -174,7 +174,7 @@
           type="button" 
           class="btn btn-danger" 
           (click)="onDelete()"
-          [disabled]="isLoadingFile || entryForMetadata.status === 'processing'">
+          [disabled]="isLoadingFile || entryForMetadata.status === 'processing' || entryForMetadata.status === 'queued'">
           Delete
         </button>
 

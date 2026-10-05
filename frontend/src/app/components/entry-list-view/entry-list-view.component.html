@@ -31,6 +31,13 @@
             <ng-container *ngSwitchCase="'Preview'">
               <ng-container [ngSwitch]="entry.status">
                 
+                <div *ngSwitchCase="'queued'" class="list-preview-placeholder status-queued" title="Queued...">
+                  <svg class="placeholder-icon" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="2"></circle>
+                    <polyline points="12 6 12 12 16 14" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"></polyline>
+                  </svg>
+                </div>
+
                 <div *ngSwitchCase="'processing'" class="list-preview-placeholder status-processing" title="Processing...">
                   <svg class="placeholder-icon processing-icon" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
                     <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
@@ -74,7 +81,7 @@
                        (click)="onDeleteClick(entry)" 
                        class="btn-link btn-link-danger" 
                        title="Delete Entry"
-                       [disabled]="entry.status === 'processing'">Delete</button>
+                       [disabled]="entry.status === 'processing' || entry.status === 'queued'">Delete</button>
              </div>
             </ng-container>
 
@@ -93,7 +100,7 @@
             </ng-container>
 
             <ng-container *ngSwitchCase="'mime_type'">
-              {{ entry.mime_type || 'Processing...' }}
+              {{ entry.mime_type || (entry.status === 'queued' ? 'Queued...' : 'Processing...') }}
             </ng-container>
 
             <ng-container *ngSwitchCase="'filesize'">

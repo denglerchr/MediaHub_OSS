@@ -151,7 +151,7 @@ export class EntryService {
           }
           
           if (entry) {
-             if (entry.status === 'processing') {
+             if (entry.status === 'processing' || entry.status === 'queued') {
                 this.addProcessingEntry(entry.id);
                 this.pollForEntryStatus(dbId, entry.id);
              }
@@ -161,6 +161,9 @@ export class EntryService {
         
         if (response.status === 202) {
           const partialEntry = response.body as PartialEntryResponse;
+          // The backend decides whether the entry is processed right away ("processing")
+          // or waiting for a free conversion slot ("queued"). Reflect the real status.
+          const status = partialEntry.status === 'queued' ? 'queued' : 'processing';
           const entry: Entry = {
             id: partialEntry.id,
             timestamp: (metadata as any).timestamp || Date.now(),
@@ -170,11 +173,15 @@ export class EntryService {
             filename: file.name,
             filesize: file.size,
             mime_type: file.type,
-            status: 'processing'
+            status
           };
           this.addProcessingEntry(partialEntry.id);
           if (!options?.silentSuccess) {
-            this.notificationService.showInfo(`Large file (ID: ${partialEntry.id}) is processing...`);
+            if (status === 'queued') {
+              this.notificationService.showInfo(`Large file (ID: ${partialEntry.id}) is queued for processing...`);
+            } else {
+              this.notificationService.showInfo(`Large file (ID: ${partialEntry.id}) is processing...`);
+            }
           }
           this.pollForEntryStatus(dbId, partialEntry.id);
           this.entryCreatedNotifier.next(entry);
@@ -255,10 +262,24 @@ export class EntryService {
   }
 
   private pollForEntryStatus(dbId: string, entryId: number): void {
+    // Status seen on the previous poll. Used to refresh the list view when the
+    // entry moves from "queued" to "processing" (so the UI swaps the QUEUED
+    // placeholder for the spinner without a manual reload).
+    let lastSeenStatus: string | null = null;
+
     timer(2000, 2000).pipe(
       take(30),
       switchMap(() => this.getEntryMeta(dbId, entryId)),
-      filter(entry => entry.status !== 'processing'),
+      tap(entry => {
+        const status = entry.status as string;
+        if (status !== lastSeenStatus && status !== 'ready' && status !== 'error') {
+          this.entryUpdatedNotifier.next(entry);
+        }
+        lastSeenStatus = status;
+      }),
+      // Keep polling while the entry is still waiting ("queued") or actively
+      // being worked on ("processing"); only stop on a terminal status.
+      filter(entry => entry.status !== 'processing' && entry.status !== 'queued'),
       take(1),
       finalize(() => {
         if (this.processingEntriesSubject.value.includes(entryId)) {

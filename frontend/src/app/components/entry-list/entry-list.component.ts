@@ -336,6 +336,14 @@ export class EntryListComponent implements OnInit, OnDestroy {
 
   onBulkDelete(): void {
     if (!this.dbId || !this.currentDb || this.selectedEntryIds.size === 0) return; // UPDATED
+    const queuedSelected = this.entriesToShow.find(
+      e => this.selectedEntryIds.has(e.id) && e.status === 'queued'
+    );
+    if (queuedSelected) {
+      return this.notificationService.showError(
+        'Cannot delete: entry ' + queuedSelected.id + ' is still queued.'
+      );
+    }
     const ids = Array.from(this.selectedEntryIds);
     const modalData: ConfirmationModalData = {
       title: 'Confirm Bulk Deletion',
@@ -421,6 +429,7 @@ export class EntryListComponent implements OnInit, OnDestroy {
   openDeleteConfirm(entry: Entry): void {
     if (!this.currentDb) return;
     if (entry.status === 'processing') return this.notificationService.showError('Cannot delete processing entry.');
+    if (entry.status === 'queued') return this.notificationService.showError('Cannot delete queued entry.');
     const modalData = { message: `Delete entry ${entry.id}?` };
     this.modalService.open(ConfirmationModalComponent.MODAL_ID, modalData)
       .pipe(take(1), filter(c => c === true))

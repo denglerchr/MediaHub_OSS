@@ -9,6 +9,7 @@ export enum ContentType {
 
 export enum EntryStatus {
   Processing = 'processing',
+  Queued = 'queued',
   Ready = 'ready',
   Error = 'error',
   Deleted = `deleted`

@@ -161,6 +161,11 @@ export class EntryDetailModalComponent implements OnInit, OnDestroy {
       return;
     }
 
+    if (this.entryForMetadata.status === 'queued') {
+      this.notificationService.showError('Cannot delete an entry that is still queued.');
+      return;
+    }
+
     const modalData: ConfirmationModalData = {
       title: 'Delete Entry',
       message: `Are you sure you want to delete entry ${this.entryForMetadata.id}? This action cannot be undone.`
