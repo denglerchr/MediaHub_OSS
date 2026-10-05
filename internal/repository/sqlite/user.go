@@ -15,7 +15,12 @@ import (
 
 // CreateUser inserts a new user into the database and returns the populated user object (with ID).
 func (r *SQLiteRepository) CreateUser(ctx context.Context, user repo.User) (repo.User, error) {
-	user.ID = repo.ULID(shared.GenerateULID())
+	// Generate ULID only if not provided by the caller
+	if user.ID == "" {
+		user.ID = repo.ULID(shared.GenerateULID())
+	} else if !shared.IsValidULID(user.ID.String()) {
+		return repo.User{}, fmt.Errorf("%w: invalid user id", customerrors.ErrValidation)
+	}
 
 	query, args, err := r.Builder.Insert("users").
 		Columns("id", "username", "password_hash", "is_admin", "account_type").

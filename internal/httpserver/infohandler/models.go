@@ -4,8 +4,6 @@ import (
 	"context"
 	"log/slog"
 	"time"
-
-	"mediahub_oss/internal/logging/audit"
 )
 
 // AuthEndpointProvider abstracts fetching the authorization endpoint for OIDC.
@@ -30,7 +28,6 @@ type FeaturesConfig struct {
 
 type InfoHandler struct {
 	Logger       *slog.Logger
-	Auditor      audit.AuditLogger
 	Version      string
 	StartTime    time.Time
 	ConversionTo map[string][]string

@@ -22,7 +22,7 @@ func (r *SQLiteRepository) HouseKeepingRequired(ctx context.Context) ([]repo.Dat
 	query, args, err := r.Builder.Select(
 		"id", "name", "content_type", "hk_interval", "hk_disk_space", "hk_max_age",
 		"create_preview", "auto_conversion", "n_max_queued", "hk_last_run",
-		"entry_count", "total_disk_space_bytes").
+		"entry_count", "total_disk_space_bytes", "queued_count").
 		From("databases").
 		Where("hk_interval > 0 AND hk_last_run + hk_interval <= CAST(unixepoch('subsec') * 1000 AS INTEGER)").
 		ToSql()

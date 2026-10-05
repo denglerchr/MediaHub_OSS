@@ -70,7 +70,7 @@ func TestEntryStatusCorrection_ZeroStatsScan(t *testing.T) {
 
 	// Deliberately set stats.EntryCount to 0 in database metadata (simulating corrupted / zero stats)
 	createdDB.Stats.EntryCount = 0
-	_, err = r.UpdateDatabase(ctx, createdDB)
+	err = r.UpdateDatabaseStats(ctx, createdDB.ID, createdDB.Stats)
 	if err != nil {
 		t.Fatalf("failed to update db stats: %v", err)
 	}
@@ -152,7 +152,7 @@ func TestIntegrityCheck_QueuedCountReconciliation(t *testing.T) {
 
 	// Corrupt QueuedCount to 99
 	createdDB.Stats.QueuedCount = 99
-	if _, err := r.UpdateDatabase(ctx, createdDB); err != nil {
+	if err := r.UpdateDatabaseStats(ctx, createdDB.ID, createdDB.Stats); err != nil {
 		t.Fatalf("failed to corrupt queued_count: %v", err)
 	}
 

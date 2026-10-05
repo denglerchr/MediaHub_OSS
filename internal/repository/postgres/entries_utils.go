@@ -85,7 +85,9 @@ func (s entryScanner) scan(rows *sql.Rows) (repo.Entry, error) {
 			entry.ID = asInt64(val)
 		case "timestamp":
 			tsMs := asInt64(val)
-			entry.Timestamp = time.UnixMilli(tsMs)
+			if tsMs > 0 {
+				entry.Timestamp = time.UnixMilli(tsMs)
+			}
 		case "created_at":
 			tsMs := asInt64(val)
 			if tsMs > 0 {
@@ -257,29 +259,27 @@ func mapCustomFieldsToPostgresColumns(
 	entryCustomFields map[string]any,
 	target map[string]any,
 ) error {
-	cfMap := make(map[string]repo.CustomFieldDef, len(customFields)*3)
+	cfMap := make(map[string]repo.CustomFieldDef, len(customFields))
 	for _, cf := range customFields {
 		cfMap[cf.Name] = cf
-		cfMap[fmt.Sprintf("%s%d", customFieldsPrefix, cf.ID)] = cf
-		cfMap[fmt.Sprintf("%d", cf.ID)] = cf
 	}
 	for key, value := range entryCustomFields {
-		if cf, ok := cfMap[key]; ok {
-			if cf.Type.IsCoordinate() {
-				if value == nil {
-					target[fmt.Sprintf("%s%d", customFieldsPrefix, cf.ID)] = nil
-				} else {
-					coord, err := repo.ParseCoordinate(value)
-					if err != nil {
-						return fmt.Errorf("%w: %v", customerrors.ErrValidation, err)
-					}
-					target[fmt.Sprintf("%s%d", customFieldsPrefix, cf.ID)] = squirrel.Expr("point(?, ?)", coord.Longitude, coord.Latitude)
-				}
+		cf, ok := cfMap[key]
+		if !ok {
+			return fmt.Errorf("%w: unknown custom field: %q", customerrors.ErrValidation, key)
+		}
+		if cf.Type.IsCoordinate() {
+			if value == nil {
+				target[fmt.Sprintf("%s%d", customFieldsPrefix, cf.ID)] = nil
 			} else {
-				target[fmt.Sprintf("%s%d", customFieldsPrefix, cf.ID)] = value
+				coord, err := repo.ParseCoordinate(value)
+				if err != nil {
+					return fmt.Errorf("%w: %v", customerrors.ErrValidation, err)
+				}
+				target[fmt.Sprintf("%s%d", customFieldsPrefix, cf.ID)] = squirrel.Expr("point(?, ?)", coord.Longitude, coord.Latitude)
 			}
 		} else {
-			target[customFieldsPrefix+key] = value
+			target[fmt.Sprintf("%s%d", customFieldsPrefix, cf.ID)] = value
 		}
 	}
 	return nil

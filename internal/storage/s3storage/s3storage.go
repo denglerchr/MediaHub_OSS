@@ -71,11 +71,21 @@ func isNotFoundError(err error) bool {
 	return errResp.Code == "NoSuchKey" || errResp.Code == "NotFound" || errResp.StatusCode == 404
 }
 
-// Helper function to inspect an io.Reader and determine size if possible
+// Helper function to inspect an io.Reader and determine size if possible.
+// Returns -1 when the size cannot be determined safely so callers fall back to
+// unknown-size streaming instead of silently truncating content.
 func getStreamSize(r io.Reader) int64 {
 	if f, ok := r.(*os.File); ok {
-		if stat, err := f.Stat(); err == nil {
-			return stat.Size()
+		// Trust Stat only for regular files (a pipe/FIFO reports size 0, which
+		// would make minio upload an empty object and ignore the stream) and only
+		// for the bytes that remain from the current offset.
+		if stat, err := f.Stat(); err == nil && stat.Mode().IsRegular() {
+			if current, err := f.Seek(0, io.SeekCurrent); err == nil {
+				if remaining := stat.Size() - current; remaining >= 0 {
+					return remaining
+				}
+				return 0
+			}
 		}
 	}
 	if b, ok := r.(*bytes.Buffer); ok {

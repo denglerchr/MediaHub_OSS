@@ -123,6 +123,30 @@ func TestWriteJSONFileResponseStream(t *testing.T) {
 			t.Errorf("unexpected parsed response: %+v", resp)
 		}
 	})
+
+	t.Run("Malicious MIME type injection escaping", func(t *testing.T) {
+		rawBytes := []byte("payload")
+		reader := bytes.NewReader(rawBytes)
+		var out bytes.Buffer
+
+		maliciousMime := `x";"injected":"true`
+		err := writeJSONFileResponseStream(&out, "test.bin", maliciousMime, uint64(len(rawBytes)), reader)
+		if err != nil {
+			t.Fatalf("writeJSONFileResponseStream failed: %v", err)
+		}
+
+		var resp FileJSONResponse
+		if err := json.Unmarshal(out.Bytes(), &resp); err != nil {
+			t.Fatalf("output is not valid JSON: %v, raw: %s", err, out.String())
+		}
+		if resp.MimeType != maliciousMime {
+			t.Errorf("expected MIME %q, got %q", maliciousMime, resp.MimeType)
+		}
+		expectedDataPrefix := fmt.Sprintf("data:%s;base64,", maliciousMime)
+		if !strings.HasPrefix(resp.Data, expectedDataPrefix) {
+			t.Errorf("expected data to start with %q, got %q", expectedDataPrefix, resp.Data)
+		}
+	})
 }
 
 func min(a, b int) int {

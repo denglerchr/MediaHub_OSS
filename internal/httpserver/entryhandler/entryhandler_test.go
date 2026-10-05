@@ -135,6 +135,52 @@ func TestSearchEntries_ValidationErrorsReturn400(t *testing.T) {
 	}
 }
 
+func TestSearchEntries_MissingLimitReturns400(t *testing.T) {
+	r, _, handler, db := setupTestEnvironment(t)
+	defer r.Close()
+
+	cases := []struct {
+		name string
+		body map[string]any
+	}{
+		{"no pagination object", map[string]any{}},
+		{"missing limit", map[string]any{"pagination": map[string]any{"offset": 0}}},
+		{"zero limit", map[string]any{"pagination": map[string]any{"limit": 0}}},
+		{"negative limit", map[string]any{"pagination": map[string]any{"limit": -5}}},
+	}
+
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			bodyBytes, _ := json.Marshal(tt.body)
+			req := httptest.NewRequest(http.MethodPost, "/api/database/"+db.ID.String()+"/entries/search", bytes.NewReader(bodyBytes))
+			req.SetPathValue("database_id", db.ID.String())
+			req = req.WithContext(context.WithValue(req.Context(), utils.UserKey, &repo.User{Username: "admin", IsAdmin: true}))
+			w := httptest.NewRecorder()
+
+			handler.SearchEntries(w, req)
+
+			if w.Code != http.StatusBadRequest {
+				t.Errorf("expected status 400 when pagination.limit is missing/invalid, got %d", w.Code)
+			}
+		})
+	}
+
+	// Positive control: a provided limit must be accepted.
+	t.Run("provided limit accepted", func(t *testing.T) {
+		bodyBytes, _ := json.Marshal(map[string]any{"pagination": map[string]any{"limit": 10}})
+		req := httptest.NewRequest(http.MethodPost, "/api/database/"+db.ID.String()+"/entries/search", bytes.NewReader(bodyBytes))
+		req.SetPathValue("database_id", db.ID.String())
+		req = req.WithContext(context.WithValue(req.Context(), utils.UserKey, &repo.User{Username: "admin", IsAdmin: true}))
+		w := httptest.NewRecorder()
+
+		handler.SearchEntries(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Errorf("expected status 200 when pagination.limit is provided, got %d", w.Code)
+		}
+	})
+}
+
 func TestDeleteEntries_SuccessAndPartialSuccess(t *testing.T) {
 	r, store, handler, db := setupTestEnvironment(t)
 	defer r.Close()

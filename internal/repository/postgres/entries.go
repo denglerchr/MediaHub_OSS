@@ -23,11 +23,11 @@ func (r *PostgresRepository) CreateEntry(ctx context.Context, db repo.Database, 
 	}
 
 	isValidMime, err := media.IsMimeOfType(db.ContentType, entry.MimeType)
-	if !isValidMime {
-		return repo.Entry{}, customerrors.ErrBadMimeType
-	}
 	if err != nil {
 		return repo.Entry{}, err
+	}
+	if !isValidMime {
+		return repo.Entry{}, customerrors.ErrBadMimeType
 	}
 
 	dbNowExpr := squirrel.Expr("(EXTRACT(EPOCH FROM clock_timestamp()) * 1000)::BIGINT")
@@ -204,7 +204,10 @@ func (r *PostgresRepository) GetEntries(ctx context.Context, dbID repo.ULID, opt
 	return entries, nil
 }
 
-// UpdateEntry modifies an existing entry's metadata and safely adjusts the parent database's size statistics.
+// UpdateEntry modifies the processing-owned fields of an existing entry (status,
+// sizes, mime type, file name, media fields) and safely adjusts the parent
+// database's size statistics. It intentionally leaves timestamp and custom
+// fields untouched; use UpdateEntryMetadata for those.
 func (r *PostgresRepository) UpdateEntry(ctx context.Context, dbID repo.ULID, entry repo.Entry) (repo.Entry, error) {
 	if !shared.IsValidULID(dbID.String()) {
 		return repo.Entry{}, fmt.Errorf("%w: invalid database id", customerrors.ErrValidation)
@@ -212,21 +215,11 @@ func (r *PostgresRepository) UpdateEntry(ctx context.Context, dbID repo.ULID, en
 
 	tableName := fmt.Sprintf(`"entries_%s"`, dbID.String())
 
-	var entryTime time.Time
-	if !entry.Timestamp.IsZero() {
-		entryTime = entry.Timestamp
-	}
-
 	tx, err := r.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return repo.Entry{}, fmt.Errorf("failed to begin transaction: %w", err)
 	}
 	defer tx.Rollback()
-
-	customFields, err := r.getCustomFields(ctx, tx, dbID)
-	if err != nil {
-		return repo.Entry{}, err
-	}
 
 	var oldSize, oldPreviewSize uint64
 	var oldStatus repo.EntryStatus
@@ -247,7 +240,6 @@ func (r *PostgresRepository) UpdateEntry(ctx context.Context, dbID repo.ULID, en
 	}
 
 	updateData := map[string]any{
-		"timestamp":        entryTime.UnixMilli(),
 		"updated_at":       squirrel.Expr("(EXTRACT(EPOCH FROM clock_timestamp()) * 1000)::BIGINT"),
 		"filesize":         entry.Size,
 		"preview_filesize": entry.PreviewSize,
@@ -258,9 +250,6 @@ func (r *PostgresRepository) UpdateEntry(ctx context.Context, dbID repo.ULID, en
 
 	for key, value := range entry.MediaFields {
 		updateData[key] = value
-	}
-	if err := mapCustomFieldsToPostgresColumns(customFields, entry.CustomFields, updateData); err != nil {
-		return repo.Entry{}, err
 	}
 
 	updateQuery, argsUpdate, err := r.Builder.Update(tableName).
@@ -309,6 +298,67 @@ func (r *PostgresRepository) UpdateEntry(ctx context.Context, dbID repo.ULID, en
 		if _, err := tx.ExecContext(ctx, statsQuery, statsArgs...); err != nil {
 			return repo.Entry{}, fmt.Errorf("failed to update database stats: %w", err)
 		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return repo.Entry{}, fmt.Errorf("failed to commit transaction: %w", err)
+	}
+
+	entry.UpdatedAt = time.UnixMilli(updatedMillis)
+	return entry, nil
+}
+
+// UpdateEntryMetadata modifies only the user-editable metadata of an entry
+// (file name, timestamp, custom fields). It never touches the processing-owned
+// columns (status, sizes, mime type, media fields), so a metadata edit cannot
+// revert a concurrent background processing update (and vice versa).
+func (r *PostgresRepository) UpdateEntryMetadata(ctx context.Context, dbID repo.ULID, entry repo.Entry) (repo.Entry, error) {
+	if !shared.IsValidULID(dbID.String()) {
+		return repo.Entry{}, fmt.Errorf("%w: invalid database id", customerrors.ErrValidation)
+	}
+
+	tx, err := r.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return repo.Entry{}, fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	customFields, err := r.getCustomFields(ctx, tx, dbID)
+	if err != nil {
+		return repo.Entry{}, err
+	}
+
+	// A zero timestamp means "missing"; store it as 0 instead of a year-1 epoch.
+	var tsMillis int64
+	if !entry.Timestamp.IsZero() {
+		tsMillis = entry.Timestamp.UnixMilli()
+	}
+
+	updateData := map[string]any{
+		"timestamp":  tsMillis,
+		"updated_at": squirrel.Expr("(EXTRACT(EPOCH FROM clock_timestamp()) * 1000)::BIGINT"),
+		"filename":   entry.FileName,
+	}
+	if err := mapCustomFieldsToPostgresColumns(customFields, entry.CustomFields, updateData); err != nil {
+		return repo.Entry{}, err
+	}
+
+	tableName := fmt.Sprintf(`"entries_%s"`, dbID.String())
+	query, args, err := r.Builder.Update(tableName).
+		SetMap(updateData).
+		Where(squirrel.Eq{"id": entry.ID}).
+		Suffix("RETURNING updated_at").
+		ToSql()
+	if err != nil {
+		return repo.Entry{}, fmt.Errorf("failed to build metadata update query: %w", err)
+	}
+
+	var updatedMillis int64
+	if err = tx.QueryRowContext(ctx, query, args...).Scan(&updatedMillis); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return repo.Entry{}, customerrors.ErrNotFound
+		}
+		return repo.Entry{}, fmt.Errorf("failed to update entry metadata: %w", err)
 	}
 
 	if err := tx.Commit(); err != nil {

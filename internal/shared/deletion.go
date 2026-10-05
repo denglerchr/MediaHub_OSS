@@ -3,6 +3,7 @@ package shared
 import (
 	"context"
 	"errors"
+	"fmt"
 	"mediahub_oss/internal/repository"
 	"mediahub_oss/internal/storage"
 )
@@ -82,8 +83,12 @@ func DeleteMultipleSafe(ctx context.Context, repo repository.Repository, storage
 }
 
 // DeleteDatabaseSafe safely deletes a complete database including all physical storage files and DB records.
+// The database record is only removed once the storage wipe succeeded; deleting
+// the record first (or despite a failed wipe) would leave orphaned files that no
+// reconciliation tool could ever rediscover.
 func DeleteDatabaseSafe(ctx context.Context, repo repository.Repository, storage storage.StorageProvider, dbID repository.ULID) error {
-	storageErr := storage.DeleteDatabase(ctx, dbID.String())
-	repoErr := repo.DeleteDatabase(ctx, dbID)
-	return errors.Join(storageErr, repoErr)
+	if storageErr := storage.DeleteDatabase(ctx, dbID.String()); storageErr != nil {
+		return fmt.Errorf("storage deletion failed, database record kept for retry: %w", storageErr)
+	}
+	return repo.DeleteDatabase(ctx, dbID)
 }

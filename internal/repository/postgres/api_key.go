@@ -119,53 +119,6 @@ func (r *PostgresRepository) GetAPIKeyByID(ctx context.Context, id repo.ULID) (r
 	return key, nil
 }
 
-// GetAPIKeyByHash retrieves an API key by its hash.
-func (r *PostgresRepository) GetAPIKeyByHash(ctx context.Context, keyHash string) (repo.APIKey, error) {
-	query, args, err := r.Builder.Select(
-		"id", "user_id", "name", "key_hash", "key_hint",
-		"scope_view", "scope_create", "scope_edit", "scope_delete", "scope_admin",
-		"created_at", "expires_at", "last_used_at",
-	).
-		From("api_keys").
-		Where(squirrel.Eq{"key_hash": keyHash}).
-		ToSql()
-	if err != nil {
-		return repo.APIKey{}, fmt.Errorf("failed to build get api_key by hash query: %w", err)
-	}
-
-	var key repo.APIKey
-	var idStr, userIDStr string
-	var createdAtVal int64
-	var expiresAtNull, lastUsedAtNull sql.NullInt64
-	var scopeView, scopeCreate, scopeEdit, scopeDelete, scopeAdmin bool
-
-	err = r.DB.QueryRowContext(ctx, query, args...).Scan(
-		&idStr, &userIDStr, &key.Name, &key.KeyHash, &key.KeyHint,
-		&scopeView, &scopeCreate, &scopeEdit, &scopeDelete, &scopeAdmin,
-		&createdAtVal, &expiresAtNull, &lastUsedAtNull,
-	)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return repo.APIKey{}, customerrors.ErrNotFound
-		}
-		return repo.APIKey{}, fmt.Errorf("failed to execute get api_key by hash query: %w", err)
-	}
-
-	key.ID = repo.ULID(idStr)
-	key.UserID = repo.ULID(userIDStr)
-	key.Scope = repo.NewAccessGrant(scopeView, scopeCreate, scopeEdit, scopeDelete, scopeAdmin)
-	key.CreatedAt = time.UnixMilli(createdAtVal)
-
-	if expiresAtNull.Valid {
-		key.ExpiresAt = time.UnixMilli(expiresAtNull.Int64)
-	}
-	if lastUsedAtNull.Valid {
-		key.LastUsedAt = time.UnixMilli(lastUsedAtNull.Int64)
-	}
-
-	return key, nil
-}
-
 // GetAPIKeyWithOwnerByHash retrieves both the API key and the owner details in a single query.
 func (r *PostgresRepository) GetAPIKeyWithOwnerByHash(ctx context.Context, keyHash string) (repo.APIKey, repo.User, error) {
 	query, args, err := r.Builder.Select(

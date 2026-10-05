@@ -2,6 +2,7 @@ package audit
 
 import (
 	"context"
+	"log/slog"
 	"mediahub_oss/internal/repository"
 )
 
@@ -20,5 +21,15 @@ func (a *AlDatabase) Log(ctx context.Context, action string, actor string, resou
 		Resource: resource,
 		Details:  details,
 	}
-	a.Repo.LogAudit(ctx, log)
+	// An audit-write failure must never fail the request, but it must not be
+	// silently swallowed either. AlDatabase has no injected logger, so fall back
+	// to the default slog logger.
+	if err := a.Repo.LogAudit(ctx, log); err != nil {
+		slog.Error("Failed to write audit log entry",
+			"error", err,
+			"action", action,
+			"actor", actor,
+			"resource", resource,
+		)
+	}
 }

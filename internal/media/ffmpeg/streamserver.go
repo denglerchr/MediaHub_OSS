@@ -34,6 +34,7 @@ type StreamSession struct {
 	size      int64       // Required for io.NewSectionReader
 	token     string
 	expiresAt time.Time
+	spoolPath string // Disk spool backing readerAt when the stream was spooled; empty for pass-through readers
 }
 
 // NewLocalStreamServer initializes and starts the internal server.
@@ -102,6 +103,7 @@ func (l *LocalStreamServer) Register(stream io.ReadSeeker, ttl time.Duration) (s
 
 	var readerAt io.ReaderAt
 	var size int64
+	var spoolPath string
 
 	if safeReaderAt, ok := isConcurrentSafeReaderAt(stream); ok {
 		endPos, err := stream.Seek(0, io.SeekEnd)
@@ -115,15 +117,29 @@ func (l *LocalStreamServer) Register(stream io.ReadSeeker, ttl time.Duration) (s
 		size = endPos
 	} else {
 		// Fallback: For non-ReaderAt or non-concurrent-safe streams (e.g., *minio.Object),
-		// rewind if possible and buffer into memory so it becomes a concurrent-safe *bytes.Reader.
+		// rewind if possible and spool to a temporary file on disk so it becomes a
+		// concurrent-safe *os.File. This avoids holding the whole file in RAM for the
+		// lifetime of the session while still supporting concurrent Range reads via ReadAt.
 		_, _ = stream.Seek(0, io.SeekStart)
-		l.logger.Debug("Buffering stream into RAM for concurrent-safe ReaderAt access")
-		data, err := io.ReadAll(stream)
+		l.logger.Debug("Spooling stream to disk for concurrent-safe ReaderAt access")
+		spoolFile, err := os.CreateTemp("", "mh-streamspool-*")
 		if err != nil {
-			return "", "", fmt.Errorf("failed to buffer stream into memory: %w", err)
+			return "", "", fmt.Errorf("failed to create stream spool file: %w", err)
 		}
-		readerAt = bytes.NewReader(data)
-		size = int64(len(data))
+		spoolPath = spoolFile.Name()
+		written, err := io.Copy(spoolFile, stream)
+		if err != nil {
+			spoolFile.Close()
+			os.Remove(spoolPath)
+			return "", "", fmt.Errorf("failed to spool stream to disk: %w", err)
+		}
+		if _, err := spoolFile.Seek(0, io.SeekStart); err != nil {
+			spoolFile.Close()
+			os.Remove(spoolPath)
+			return "", "", fmt.Errorf("failed to rewind stream spool file: %w", err)
+		}
+		readerAt = spoolFile
+		size = written
 	}
 
 	session := &StreamSession{
@@ -132,6 +148,7 @@ func (l *LocalStreamServer) Register(stream io.ReadSeeker, ttl time.Duration) (s
 		size:      size,
 		token:     token,
 		expiresAt: time.Now().Add(ttl),
+		spoolPath: spoolPath,
 	}
 
 	l.mu.Lock()
@@ -144,8 +161,25 @@ func (l *LocalStreamServer) Register(stream io.ReadSeeker, ttl time.Duration) (s
 
 func (l *LocalStreamServer) Unregister(id string) {
 	l.mu.Lock()
+	session := l.sessions[id]
 	delete(l.sessions, id)
 	l.mu.Unlock()
+
+	if session != nil {
+		removeSpoolFile(session)
+	}
+}
+
+// removeSpoolFile closes and deletes the temporary spool file backing a session,
+// if any. Sessions whose readerAt is a pass-through (owned by the caller) are left untouched.
+func removeSpoolFile(session *StreamSession) {
+	if session.spoolPath == "" {
+		return
+	}
+	if spoolFile, ok := session.readerAt.(*os.File); ok {
+		spoolFile.Close()
+	}
+	os.Remove(session.spoolPath)
 }
 
 // handleStream is the internal endpoint that FFmpeg requests data from.
@@ -188,6 +222,7 @@ func (l *LocalStreamServer) startSweeper(ctx context.Context) {
 			for id, session := range l.sessions {
 				if now.After(session.expiresAt) {
 					delete(l.sessions, id)
+					removeSpoolFile(session)
 					l.logger.Debug("Sweeper removed expired stream session", "id", id)
 				}
 			}

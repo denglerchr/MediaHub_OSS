@@ -9,7 +9,7 @@ type StorageProvider interface {
 	// Write uploads a file stream to the storage backend and returns the amount of bytes written.
 	Write(ctx context.Context, dbID string, id int64, content io.Reader) (int64, error)
 
-	// Write uploads a preview file stream to the storage backend and returns the amount of bytes written.
+	// WritePreview uploads a preview file stream to the storage backend and returns the amount of bytes written.
 	WritePreview(ctx context.Context, dbID string, id int64, preview io.Reader) (int64, error)
 
 	// Stat retrieves metadata about the main file without downloading the content.
@@ -21,7 +21,7 @@ type StorageProvider interface {
 	// Read retrieves a stream of the file content. Pass length<0 to get a reader for the full file.
 	Read(ctx context.Context, dbID string, id int64, offset int64, length int64) (io.ReadCloser, error)
 
-	// Read retrieves a stream of the preview file content
+	// ReadPreview retrieves a stream of the preview file content.
 	ReadPreview(ctx context.Context, dbID string, id int64) (io.ReadCloser, error)
 
 	// Delete removes the main file from storage.

@@ -122,7 +122,25 @@ func addDatabaseRoutes(mux *http.ServeMux, h *Handlers, am *auth.AuthMiddleware)
 	mux.Handle("DELETE /api/database/{database_id}/entry/{id}", ReqPerm(repo.AccessDelete, h.EntryHandler.DeleteEntry))
 }
 
+// respondJSON404 writes a minimal JSON 404 error, matching the documented error
+// response format for API endpoints.
+func respondJSON404(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusNotFound)
+	_, _ = w.Write([]byte(`{"error":"not found"}`))
+}
+
 func addFrontendRoutes(mux *http.ServeMux, frontendFS http.FileSystem, indexFile string, basePath string) {
+	// Headless (API-only) deployment: without an embedded frontend every
+	// unmatched GET must return a JSON 404 instead of panicking on a nil
+	// filesystem.
+	if frontendFS == nil {
+		mux.HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) {
+			respondJSON404(w)
+		})
+		return
+	}
+
 	fileServer := http.FileServer(frontendFS)
 
 	// Angular requires the base href to end with a trailing slash
@@ -132,6 +150,13 @@ func addFrontendRoutes(mux *http.ServeMux, frontendFS http.FileSystem, indexFile
 
 	mux.HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) {
 		path := strings.TrimPrefix(r.URL.Path, "/")
+
+		// API and health endpoints must never fall through to the SPA shell;
+		// unknown ones are proper JSON 404s (never a 200 with index.html).
+		if strings.HasPrefix(path, "api/") || strings.HasPrefix(path, "health") {
+			respondJSON404(w)
+			return
+		}
 
 		// If the path is empty, they want the root index
 		if path == "" {

@@ -96,6 +96,12 @@ func EnsureAdminUser(ctx context.Context, repo repository.Repository, logger *sl
 				return fmt.Errorf("failed to update admin password: %w", err)
 			}
 
+			// The password changed, so revoke any refresh tokens issued under the old
+			// password. This runs before the server starts; log and continue on error.
+			if err := repo.DeleteAllRefreshTokensForUser(ctx, user.ID); err != nil {
+				logger.Error("Failed to revoke admin refresh tokens after password reset", "error", err)
+			}
+
 			logger.Info("Admin password has been successfully reset.")
 		}
 	}

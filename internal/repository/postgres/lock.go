@@ -7,13 +7,23 @@ import (
 	"fmt"
 	"time"
 
+	"mediahub_oss/internal/shared/customerrors"
+
 	"github.com/Masterminds/squirrel"
 )
 
 // AcquireLock attempts to acquire an atomic distributed lock in a single database round-trip.
 func (r *PostgresRepository) AcquireLock(ctx context.Context, lockName string, ownerID string, ttl time.Duration) (bool, error) {
-	// Convert the TTL into milliseconds to pass to the query
-	ttlMs := ttl.Milliseconds()
+	// A non-positive TTL would produce an already-expired lock, silently turning
+	// mutual exclusion into a no-op.
+	if ttl <= 0 {
+		return false, fmt.Errorf("%w: lock ttl must be positive", customerrors.ErrValidation)
+	}
+
+	// Convert the TTL into milliseconds to pass to the query, rounding up so that
+	// positive sub-millisecond TTLs never truncate to 0 ms (which would also create
+	// an already-expired lock).
+	ttlMs := int64((ttl + time.Millisecond - 1) / time.Millisecond)
 
 	// By using (EXTRACT(EPOCH FROM clock_timestamp()) * 1000), Postgres acts as the single source
 	// of truth for time directly during the INSERT

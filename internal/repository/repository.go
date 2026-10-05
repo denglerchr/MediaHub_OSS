@@ -10,9 +10,7 @@ package repository
 
 import (
 	"context"
-	"errors"
 	"fmt"
-	"mediahub_oss/internal/shared/customerrors"
 	"time"
 )
 
@@ -26,7 +24,14 @@ type Repository interface {
 	GetDatabase(ctx context.Context, dbID ULID) (Database, error)
 	GetDatabases(ctx context.Context) ([]Database, error)
 	GetDatabaseULIDsWithQueuedEntries(ctx context.Context) ([]ULID, error)
+	// UpdateDatabase updates the configuration fields of a database. Denormalized
+	// statistics (entry_count, total_disk_space_bytes, queued_count) are NOT
+	// written by this method; use UpdateDatabaseStats for deliberate stat
+	// reconciliation so concurrent entry operations cannot lose their deltas.
 	UpdateDatabase(ctx context.Context, db Database) (Database, error)
+	// UpdateDatabaseStats overwrites the denormalized statistics of a database.
+	// It is intended for reconciliation tooling (e.g. 'mediahub recovery') only.
+	UpdateDatabaseStats(ctx context.Context, dbID ULID, stats DatabaseStats) error
 	DeleteDatabase(ctx context.Context, dbID ULID) error
 	GetDatabaseStats(ctx context.Context, dbID ULID) (DatabaseStats, error)
 
@@ -45,7 +50,18 @@ type Repository interface {
 	CreateEntry(ctx context.Context, db Database, entry Entry) (Entry, error)
 	GetEntry(ctx context.Context, dbID ULID, id int64) (Entry, error)
 	GetEntries(ctx context.Context, dbID ULID, opts QueryOptions) ([]Entry, error)
+	// UpdateEntry updates the processing-owned fields of an entry (status, file
+	// and preview size, mime type, file name, media fields) and maintains the
+	// denormalized database statistics accordingly. It deliberately does NOT
+	// write the user-editable metadata (timestamp, custom fields) so a background
+	// processing update can never revert a concurrent metadata edit; use
+	// UpdateEntryMetadata for those fields.
 	UpdateEntry(ctx context.Context, dbID ULID, entry Entry) (Entry, error)
+	// UpdateEntryMetadata updates only the user-editable metadata of an entry
+	// (file name, timestamp, custom fields). It never touches the
+	// processing-owned columns, so it is safe to use while a background worker
+	// is still processing the entry.
+	UpdateEntryMetadata(ctx context.Context, dbID ULID, entry Entry) (Entry, error)
 	UpdateEntriesStatus(ctx context.Context, dbID ULID, entryIDs []int64, status EntryStatus) error
 	ClaimQueuedEntry(ctx context.Context, dbID ULID, entryID int64) (bool, error)
 	GetEntriesByStatus(ctx context.Context, dbID ULID, status EntryStatus, limit uint64) ([]Entry, error)
@@ -80,7 +96,6 @@ type Repository interface {
 	// API Key
 	CreateAPIKey(ctx context.Context, apiKey APIKey) (APIKey, error)
 	GetAPIKeyByID(ctx context.Context, id ULID) (APIKey, error)
-	GetAPIKeyByHash(ctx context.Context, keyHash string) (APIKey, error)
 	GetAPIKeyWithOwnerByHash(ctx context.Context, keyHash string) (APIKey, User, error)
 	GetAPIKeysByUserID(ctx context.Context, userID ULID) ([]APIKey, error)
 	GetAllAPIKeys(ctx context.Context) ([]APIKey, error)
@@ -104,18 +119,7 @@ type Repository interface {
 	MigrateDown(ctx context.Context) error
 }
 
-func UserExists(ctx context.Context, s Repository, username string) (bool, error) {
-	_, err := s.GetUserByUsername(ctx, username)
-	if err != nil {
-		if errors.Is(err, customerrors.ErrNotFound) {
-			return false, nil
-		}
-		return false, err
-	}
-	return true, nil
-}
-
-// formatVersion converts the packed integer (e.g., 2001) into a readable string (e.g., "2.1")
+// FormatVersion converts the packed integer (e.g., 2001) into a readable string (e.g., "2.1")
 func FormatVersion(v int) string {
 	major := v / 1000
 	minor := v % 1000

@@ -20,7 +20,6 @@ type PermissionHolder interface {
 
 type GlobalAdmin struct {
 	UserULID repository.ULID
-	Repo     repository.Repository
 }
 
 func (g *GlobalAdmin) IsGlobalAdmin() bool {

@@ -54,6 +54,10 @@ type Processor struct {
 	isScanningQueue atomic.Bool
 	// needsRescan indicates another trigger occurred while a dispatch pass was in flight.
 	needsRescan atomic.Bool
+
+	// retries tracks per-entry backoff for queued entries that failed during
+	// processing, so transient failures cannot cause a hot claim/requeue loop.
+	retries *retryRegistry
 }
 
 // NewProcessor creates a Processor enforcing the given conversion concurrency limits.
@@ -72,5 +76,6 @@ func NewProcessor(
 		Logger:         logger,
 		NFfmpegAsync:   nFfmpegAsync,
 		NFfmpegTotal:   nFfmpegTotal,
+		retries:        newRetryRegistry(),
 	}
 }

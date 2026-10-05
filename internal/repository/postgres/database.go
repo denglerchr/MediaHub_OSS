@@ -236,9 +236,6 @@ func (r *PostgresRepository) UpdateDatabase(ctx context.Context, db repo.Databas
 		Set("create_preview", db.Config.CreatePreview).
 		Set("auto_conversion", db.Config.AutoConversion).
 		Set("n_max_queued", db.NMaxQueued).
-		Set("entry_count", db.Stats.EntryCount).
-		Set("total_disk_space_bytes", db.Stats.TotalDiskSpaceBytes).
-		Set("queued_count", db.Stats.QueuedCount).
 		Where(squirrel.Eq{"id": db.ID}).
 		ToSql()
 	if err != nil {
@@ -259,6 +256,35 @@ func (r *PostgresRepository) UpdateDatabase(ctx context.Context, db repo.Databas
 	}
 
 	return r.GetDatabase(ctx, db.ID)
+}
+
+// UpdateDatabaseStats overwrites the denormalized statistics of a database.
+// It is intended for reconciliation tooling (e.g. 'mediahub recovery') that has
+// recomputed the true values; regular configuration updates must not use it or
+// concurrent entry operations would lose their statistics deltas.
+func (r *PostgresRepository) UpdateDatabaseStats(ctx context.Context, dbID repo.ULID, stats repo.DatabaseStats) error {
+	if !shared.IsValidULID(dbID.String()) {
+		return fmt.Errorf("%w: invalid database id", customerrors.ErrValidation)
+	}
+
+	query, args, err := r.Builder.Update("databases").
+		Set("entry_count", stats.EntryCount).
+		Set("total_disk_space_bytes", stats.TotalDiskSpaceBytes).
+		Set("queued_count", stats.QueuedCount).
+		Where(squirrel.Eq{"id": dbID.String()}).
+		ToSql()
+	if err != nil {
+		return fmt.Errorf("failed to build stats update query: %w", err)
+	}
+
+	res, err := r.DB.ExecContext(ctx, query, args...)
+	if err != nil {
+		return fmt.Errorf("failed to update database stats: %w", err)
+	}
+	if rowsAffected, _ := res.RowsAffected(); rowsAffected == 0 {
+		return customerrors.ErrNotFound
+	}
+	return nil
 }
 
 // DeleteDatabase permanently removes a database and its entries table.

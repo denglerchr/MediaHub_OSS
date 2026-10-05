@@ -129,7 +129,9 @@ func (s entryScanner) scan(rows *sql.Rows) (repo.Entry, error) {
 				entry.ID = asInt64(val)
 			case "timestamp":
 				tsMs := asInt64(val)
-				entry.Timestamp = time.UnixMilli(tsMs)
+				if tsMs > 0 {
+					entry.Timestamp = time.UnixMilli(tsMs)
+				}
 			case "created_at":
 				tsMs := asInt64(val)
 				if tsMs > 0 {
@@ -320,31 +322,29 @@ func mapCustomFieldsToSQLiteColumns(
 	entryCustomFields map[string]any,
 	target map[string]any,
 ) error {
-	cfMap := make(map[string]repo.CustomFieldDef, len(customFields)*3)
+	cfMap := make(map[string]repo.CustomFieldDef, len(customFields))
 	for _, cf := range customFields {
 		cfMap[cf.Name] = cf
-		cfMap[fmt.Sprintf("%s%d", customFieldsPrefix, cf.ID)] = cf
-		cfMap[fmt.Sprintf("%d", cf.ID)] = cf
 	}
 	for key, value := range entryCustomFields {
-		if cf, ok := cfMap[key]; ok {
-			if cf.Type.IsCoordinate() {
-				if value == nil {
-					target[fmt.Sprintf("%s%d_lat", customFieldsPrefix, cf.ID)] = nil
-					target[fmt.Sprintf("%s%d_lng", customFieldsPrefix, cf.ID)] = nil
-				} else {
-					coord, err := repo.ParseCoordinate(value)
-					if err != nil {
-						return fmt.Errorf("%w: %v", customerrors.ErrValidation, err)
-					}
-					target[fmt.Sprintf("%s%d_lat", customFieldsPrefix, cf.ID)] = coord.Latitude
-					target[fmt.Sprintf("%s%d_lng", customFieldsPrefix, cf.ID)] = coord.Longitude
-				}
+		cf, ok := cfMap[key]
+		if !ok {
+			return fmt.Errorf("%w: unknown custom field: %q", customerrors.ErrValidation, key)
+		}
+		if cf.Type.IsCoordinate() {
+			if value == nil {
+				target[fmt.Sprintf("%s%d_lat", customFieldsPrefix, cf.ID)] = nil
+				target[fmt.Sprintf("%s%d_lng", customFieldsPrefix, cf.ID)] = nil
 			} else {
-				target[fmt.Sprintf("%s%d", customFieldsPrefix, cf.ID)] = value
+				coord, err := repo.ParseCoordinate(value)
+				if err != nil {
+					return fmt.Errorf("%w: %v", customerrors.ErrValidation, err)
+				}
+				target[fmt.Sprintf("%s%d_lat", customFieldsPrefix, cf.ID)] = coord.Latitude
+				target[fmt.Sprintf("%s%d_lng", customFieldsPrefix, cf.ID)] = coord.Longitude
 			}
 		} else {
-			target[customFieldsPrefix+key] = value
+			target[fmt.Sprintf("%s%d", customFieldsPrefix, cf.ID)] = value
 		}
 	}
 	return nil

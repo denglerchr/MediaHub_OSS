@@ -111,6 +111,9 @@ func (p *Processor) dispatchQueuedWorkers(ctx context.Context) {
 // stopped with capacity to spare. A false result ends the dispatch loop unless a
 // concurrent trigger requested a rescan.
 func (p *Processor) runDispatchPass(ctx context.Context) bool {
+	// Bound the requeue backoff registry before scanning.
+	p.retries.prune()
+
 	dbIDs, err := p.Repo.GetDatabaseULIDsWithQueuedEntries(ctx)
 	if err != nil {
 		p.Logger.Error("Queue dispatch: Failed to query databases with queued entries", "error", err)
@@ -167,6 +170,13 @@ func (p *Processor) runDispatchPass(ctx context.Context) bool {
 // it. The slot reservation is rolled back if the claim fails or is lost to
 // another node, without triggering cascading dispatch passes.
 func (p *Processor) tryClaimAndSpawn(ctx context.Context, dbID repo.ULID, entry repo.Entry) claimOutcome {
+	// Skip entries that recently failed and are still within their requeue
+	// backoff window; the dispatch pass moves on to the next candidate instead
+	// of hot-looping on the same broken entry.
+	if p.retries.claimDeferred(entry.ID) {
+		return claimLost
+	}
+
 	if !p.tryReserveAsyncSlot() {
 		return claimAborted
 	}
@@ -244,17 +254,22 @@ func (p *Processor) runClaimedEntry(ctx context.Context, dbID repo.ULID, entry r
 
 	plan := DeterminePlanForEntry(p.MediaConverter, db, entry)
 	cleanupTemp = false // ownership handed over to the finalization pipeline
-	p.finalizeEntryFile(ctx, db, entry, tempFilePath, plan)
+	// Whether the entry was processed successfully or marked erroneous, it will
+	// not be claimed again — drop any backoff state.
+	_ = p.finalizeEntryFile(ctx, db, entry, tempFilePath, plan)
+	p.retries.clearClaimRetry(entry.ID)
 }
 
 // requeueClaimedEntry returns a claimed entry to the queue (e.g. after a transient
-// failure) so it can be picked up again later.
+// failure) so it can be picked up again later. The entry enters a per-node
+// backoff window (see retry.go) so repeated failures cannot spin the dispatcher.
 func (p *Processor) requeueClaimedEntry(ctx context.Context, dbID repo.ULID, entry repo.Entry) {
 	entry.Status = repo.EntryStatusQueued
 	if _, err := p.Repo.UpdateEntry(ctx, dbID, entry); err != nil {
 		p.Logger.Error("Worker: CRITICAL: Failed to requeue claimed entry", "entry", entry.ID, "error", err)
 		return
 	}
+	p.retries.noteClaimFailure(entry.ID)
 	p.noteQueuedEntry()
 }
 
@@ -265,6 +280,7 @@ func (p *Processor) failProcessedEntry(ctx context.Context, dbID repo.ULID, entr
 	_ = p.Storage.DeletePreview(ctx, dbID.String(), entry.ID)
 	entry.PreviewSize = 0
 	entry.Status = repo.EntryStatusError
+	p.retries.clearClaimRetry(entry.ID)
 	if _, err := p.Repo.UpdateEntry(ctx, dbID, entry); err != nil {
 		p.Logger.Error("Worker: CRITICAL: Failed to set status error", "entry", entry.ID, "error", err)
 	}

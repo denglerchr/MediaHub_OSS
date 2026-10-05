@@ -388,7 +388,7 @@ func (h *EntryHandler) PatchEntry(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	updatedEntry, err := h.Repo.UpdateEntry(r.Context(), dbID, existingEntry)
+	updatedEntry, err := h.Repo.UpdateEntryMetadata(r.Context(), dbID, existingEntry)
 	if err != nil {
 		h.Logger.Error("Failed to update entry metadata", "entry", id, "error", err)
 		utils.RespondWithError(w, http.StatusInternalServerError, "Failed to apply updates to database.")
@@ -497,12 +497,12 @@ func (h *EntryHandler) QueryEntries(w http.ResponseWriter, r *http.Request) {
 
 	user := utils.GetUserFromContext(r.Context())
 
-	limit, err := parseQueryInt(r, "limit", 30)
+	limit, err := utils.ParseQueryInt(r, "limit", 30)
 	if err != nil {
 		utils.RespondWithError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	offset, err := parseQueryInt(r, "offset", 0)
+	offset, err := utils.ParseQueryInt(r, "offset", 0)
 	if err != nil {
 		utils.RespondWithError(w, http.StatusBadRequest, err.Error())
 		return
@@ -513,7 +513,7 @@ func (h *EntryHandler) QueryEntries(w http.ResponseWriter, r *http.Request) {
 	timeField := r.URL.Query().Get("time_field")
 
 	var tStart, tEnd time.Time
-	tStartQuery, err := parseQueryInt64(r, "tstart", math.MinInt64)
+	tStartQuery, err := utils.ParseQueryInt64(r, "tstart", math.MinInt64)
 	if err != nil {
 		utils.RespondWithError(w, http.StatusBadRequest, err.Error())
 		return
@@ -521,7 +521,7 @@ func (h *EntryHandler) QueryEntries(w http.ResponseWriter, r *http.Request) {
 	if tStartQuery != math.MinInt64 {
 		tStart = time.UnixMilli(tStartQuery)
 	}
-	tEndQuery, err := parseQueryInt64(r, "tend", math.MaxInt64)
+	tEndQuery, err := utils.ParseQueryInt64(r, "tend", math.MaxInt64)
 	if err != nil {
 		utils.RespondWithError(w, http.StatusBadRequest, err.Error())
 		return
@@ -592,6 +592,11 @@ func (h *EntryHandler) SearchEntries(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if searchPayload.Pagination.Limit <= 0 {
+		utils.RespondWithError(w, http.StatusBadRequest, "pagination.limit is required and must be greater than 0")
+		return
+	}
+
 	searchReq := searchPayload.toModel()
 	entries, err := h.Repo.SearchEntries(r.Context(), dbID, searchReq, db.CustomFields)
 	if err != nil {
@@ -650,6 +655,11 @@ func (h *EntryHandler) ExportEntries(w http.ResponseWriter, r *http.Request) {
 
 	// Use io.Pipe to stream generation directly to the HTTP response
 	pr, pw := io.Pipe()
+	defer pr.CloseWithError(io.ErrClosedPipe)
+
+	// Detached context so file reads in the worker aren't immediately aborted by client cancellation
+	// before the pipe write encounters ErrClosedPipe and exits cleanly.
+	workerCtx := context.WithoutCancel(r.Context())
 
 	go func() {
 		defer pw.Close()
@@ -684,7 +694,7 @@ func (h *EntryHandler) ExportEntries(w http.ResponseWriter, r *http.Request) {
 		// Pass 1: Fetch metadata and write all CSV rows
 		for _, id := range req.IDs {
 			// Fetch metadata
-			entry, err := h.Repo.GetEntry(r.Context(), dbID, id)
+			entry, err := h.Repo.GetEntry(workerCtx, dbID, id)
 			if err != nil {
 				h.Logger.Warn("Skipping entry in export (not found)", "id", id)
 				continue
@@ -729,42 +739,54 @@ func (h *EntryHandler) ExportEntries(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 
-			_ = csvWriter.Write(row)
+			if err := csvWriter.Write(row); err != nil {
+				// The ZIP stream is broken (e.g. client disconnected); abort the export.
+				h.Logger.Warn("Aborting export: failed to write CSV row", "id", entry.ID, "error", err)
+				return
+			}
 		}
 
 		// Flush the CSV buffer to the zip file BEFORE creating new zip entries
 		csvWriter.Flush()
 		if err := csvWriter.Error(); err != nil {
-			h.Logger.Error("Failed to flush CSV", "error", err)
+			h.Logger.Warn("Aborting export: failed to flush CSV", "error", err)
+			return
 		}
 
 		// Pass 2: Stream the files and previews into the ZIP
 		for _, entry := range validEntries {
 			// --- 1. Stream the Main File ---
 			// Fetch file stream from storage
-			fileStream, err := h.Storage.Read(r.Context(), dbID.String(), entry.ID, 0, -1)
+			fileStream, err := h.Storage.Read(workerCtx, dbID.String(), entry.ID, 0, -1)
 			if err != nil {
 				h.Logger.Warn("Failed to read file from storage for export", "id", entry.ID, "error", err)
 				continue // If the main file fails, we skip this entry entirely
 			}
 
-			// Create file inside ZIP
-			zipEntryPath := fmt.Sprintf("files/%d_%s", entry.ID, entry.FileName)
+			// Create file inside ZIP (user-controlled names are sanitized to
+			// prevent path traversal on extraction, e.g. "../../evil.sh")
+			zipEntryPath := fmt.Sprintf("files/%d_%s", entry.ID, sanitizeZipEntryName(entry.FileName))
 			zipFile, err := zipWriter.Create(zipEntryPath)
 			if err != nil {
 				fileStream.Close()
-				h.Logger.Warn("Failed to create zip entry for file", "id", entry.ID, "error", err)
-				continue
+				// Creating a zip entry only fails when the underlying stream is
+				// broken (client gone); abort instead of spinning over the rest.
+				h.Logger.Warn("Aborting export: failed to create zip entry for file", "id", entry.ID, "error", err)
+				return
 			}
 
 			// Stream content into ZIP
-			_, _ = io.Copy(zipFile, fileStream)
+			if _, err := io.Copy(zipFile, fileStream); err != nil {
+				fileStream.Close()
+				h.Logger.Warn("Aborting export: failed to stream file into zip", "id", entry.ID, "error", err)
+				return
+			}
 			fileStream.Close()
 
 			// --- 2. Stream the Preview File (if it exists) ---
 			// We use the database metadata to quickly check if a preview was generated
 			if entry.PreviewSize > 0 {
-				previewStream, err := h.Storage.ReadPreview(r.Context(), dbID.String(), entry.ID)
+				previewStream, err := h.Storage.ReadPreview(workerCtx, dbID.String(), entry.ID)
 				if err != nil {
 					h.Logger.Warn("Failed to read preview from storage for export", "id", entry.ID, "error", err)
 				} else {
@@ -772,10 +794,15 @@ func (h *EntryHandler) ExportEntries(w http.ResponseWriter, r *http.Request) {
 					zipPreviewPath := fmt.Sprintf("previews/%d.webp", entry.ID)
 					zipPreviewFile, err := zipWriter.Create(zipPreviewPath)
 					if err != nil {
-						h.Logger.Warn("Failed to create zip entry for preview", "id", entry.ID, "error", err)
-					} else {
-						// Stream preview content into ZIP
-						_, _ = io.Copy(zipPreviewFile, previewStream)
+						previewStream.Close()
+						h.Logger.Warn("Aborting export: failed to create zip entry for preview", "id", entry.ID, "error", err)
+						return
+					}
+					// Stream preview content into ZIP
+					if _, err := io.Copy(zipPreviewFile, previewStream); err != nil {
+						previewStream.Close()
+						h.Logger.Warn("Aborting export: failed to stream preview into zip", "id", entry.ID, "error", err)
+						return
 					}
 					previewStream.Close()
 				}

@@ -94,8 +94,9 @@ func (s *RecoveryService) IntegrityCheck(ctx context.Context) error {
 				db.Stats.QueuedCount = uint64(finalQueued)
 			}
 
-			// Save it back
-			_, err = s.repo.UpdateDatabase(ctx, db)
+			// Save it back (dedicated stats reconciliation; UpdateDatabase does
+			// not write statistics columns)
+			err = s.repo.UpdateDatabaseStats(ctx, db.ID, db.Stats)
 			if err != nil {
 				s.logger.Error("Failed to sync database stats", "database_id", db.ID.String(), "database_name", db.Name, "error", err)
 			}

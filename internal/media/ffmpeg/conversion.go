@@ -1,7 +1,6 @@
 package ffmpeg
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -96,11 +95,39 @@ func (c *FfmpegConverter) prepareConversion(inputMimeType string, opts media.Con
 	return normTarget, conversionArgs, nil
 }
 
+// stderrCap is the maximum amount of FFmpeg stderr output retained in memory for logging.
+const stderrCap = 64 * 1024
+
+// limitedBuffer is a small bounded writer used to capture FFmpeg's stderr.
+// It retains at most stderrCap bytes and silently discards the rest, so even a
+// noisy failure cannot grow the captured output without bound.
+type limitedBuffer struct {
+	buf []byte
+}
+
+// Write appends up to the remaining capacity and reports the full input length
+// as written, so the copying goroutine never stalls or errors on overflow.
+func (l *limitedBuffer) Write(p []byte) (int, error) {
+	if remaining := stderrCap - len(l.buf); remaining > 0 {
+		if len(p) > remaining {
+			l.buf = append(l.buf, p[:remaining]...)
+		} else {
+			l.buf = append(l.buf, p...)
+		}
+	}
+	return len(p), nil
+}
+
+func (l *limitedBuffer) String() string {
+	return string(l.buf)
+}
+
 // runFFmpegCommand executes an FFmpeg process with context and logs any failures with standard error output.
+// The captured stderr is capped at stderrCap bytes to bound memory usage.
 func (c *FfmpegConverter) runFFmpegCommand(ctx context.Context, ffmpegPath string, args []string, logContext string, normTarget string) error {
 	cmd := exec.CommandContext(ctx, ffmpegPath, args...)
 
-	var stderr bytes.Buffer
+	var stderr limitedBuffer
 	cmd.Stderr = &stderr
 
 	if err := cmd.Run(); err != nil {
@@ -123,7 +150,8 @@ func (c *FfmpegConverter) ConvertFile(ctx context.Context, inputPath string, out
 		return err
 	}
 
-	args := append([]string{"-y", "-i", inputPath}, conversionArgs...)
+	// Global flags must precede -i: suppress banner, progress spam and verbose logs.
+	args := append([]string{"-y", "-hide_banner", "-nostats", "-v", "error", "-i", inputPath}, conversionArgs...)
 	args = append(args, outputPath)
 
 	return c.runFFmpegCommand(ctx, ffmpegPath, args, "FFmpeg file conversion failed", normTarget)
@@ -159,7 +187,8 @@ func (c *FfmpegConverter) ConvertStreamToFile(ctx context.Context, inputData io.
 		return nil, fmt.Errorf("failed to create temporary output file: %w", err)
 	}
 
-	args := append([]string{"-y", "-i", inputSource}, conversionArgs...)
+	// Global flags must precede -i: suppress banner, progress spam and verbose logs.
+	args := append([]string{"-y", "-hide_banner", "-nostats", "-v", "error", "-i", inputSource}, conversionArgs...)
 	args = append(args, tmpPath)
 
 	if err := c.runFFmpegCommand(ctx, ffmpegPath, args, "FFmpeg stream conversion failed", normTarget); err != nil {

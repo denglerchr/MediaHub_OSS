@@ -3,6 +3,7 @@ package config
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"log/slog"
 	"mediahub_oss/internal/shared/customerrors"
@@ -31,8 +32,9 @@ func LoadConfig(path string) (*Config, error) {
 
 	// 3. Read the TOML file
 	if err := viper.ReadInConfig(); err != nil {
-		// If the file simply isn't there, that's fine. But if it's malformed, we should panic/return.
-		if _, ok := err.(viper.ConfigFileNotFoundError); !ok {
+		// If the file simply isn't there, that's fine. But if it's malformed, we should return an error.
+		var configFileNotFound viper.ConfigFileNotFoundError
+		if !errors.As(err, &configFileNotFound) && !os.IsNotExist(err) {
 			return nil, fmt.Errorf("error parsing config file: %w", err)
 		}
 	}

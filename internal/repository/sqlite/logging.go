@@ -21,10 +21,16 @@ func (r *SQLiteRepository) LogAudit(ctx context.Context, log repository.AuditLog
 		detailsJSON = []byte("{}")
 	}
 
+	// Honor a caller-provided timestamp; otherwise stamp with the current time.
+	tsVal := time.Now().UnixMilli()
+	if !log.Timestamp.IsZero() {
+		tsVal = log.Timestamp.UnixMilli()
+	}
+
 	// Build the query, relying on SQLite's AUTOINCREMENT and DEFAULT CURRENT_TIMESTAMP.
 	query, args, err := r.Builder.Insert("audit_logs").
 		Columns("timestamp", "action", "actor", "resource", "details").
-		Values(time.Now().UnixMilli(), log.Action, log.Actor, log.Resource, string(detailsJSON)).
+		Values(tsVal, log.Action, log.Actor, log.Resource, string(detailsJSON)).
 		ToSql()
 
 	if err != nil {

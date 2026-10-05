@@ -268,20 +268,37 @@ func TestLocalStreamServer_Register(t *testing.T) {
 	}
 	defer srv.Shutdown(context.Background())
 
-	// Custom type implementing io.ReaderAt that is NOT in the safe allowlist should be buffered into *bytes.Reader
+	// Custom type implementing io.ReaderAt that is NOT in the safe allowlist should be
+	// spooled to a temporary file on disk (concurrent-safe *os.File) instead of RAM.
 	customStream := &nonConcurrentReaderAt{Reader: bytes.NewReader([]byte("hello world"))}
 	id, _, err := srv.Register(customStream, time.Minute)
 	if err != nil {
 		t.Fatalf("Register failed: %v", err)
 	}
-	defer srv.Unregister(id)
 
 	srv.mu.RLock()
 	session := srv.sessions[id]
 	srv.mu.RUnlock()
 
-	if _, ok := session.readerAt.(*bytes.Reader); !ok {
-		t.Errorf("expected non-allowlisted ReaderAt stream to be buffered into *bytes.Reader, got %T", session.readerAt)
+	spoolFile, ok := session.readerAt.(*os.File)
+	if !ok {
+		t.Fatalf("expected non-allowlisted ReaderAt stream to be spooled into *os.File, got %T", session.readerAt)
+	}
+	if session.spoolPath == "" || session.spoolPath != spoolFile.Name() {
+		t.Errorf("expected session to track the spool file path %q, got %q", spoolFile.Name(), session.spoolPath)
+	}
+	got := make([]byte, len("hello world"))
+	if _, err := spoolFile.ReadAt(got, 0); err != nil {
+		t.Fatalf("failed to read spooled content: %v", err)
+	}
+	if string(got) != "hello world" {
+		t.Errorf("expected spooled content %q, got %q", "hello world", string(got))
+	}
+
+	// Unregister must delete the spool file from disk.
+	srv.Unregister(id)
+	if _, err := os.Stat(session.spoolPath); !os.IsNotExist(err) {
+		t.Errorf("expected spool file to be removed after Unregister, stat err: %v", err)
 	}
 }
 

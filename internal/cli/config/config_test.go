@@ -153,3 +153,20 @@ func TestSaveConfig(t *testing.T) {
 		t.Errorf("expected secret 'explicit-secret', got '%s'", loaded.Auth.JWT.Secret)
 	}
 }
+
+func TestLoadConfig_NonExistentFileUsesDefaults(t *testing.T) {
+	tempDir := t.TempDir()
+	nonExistentPath := filepath.Join(tempDir, "does_not_exist.toml")
+
+	cfg, err := config.LoadConfig(nonExistentPath)
+	if err != nil {
+		t.Fatalf("LoadConfig should not fail when config file is missing, got error: %v", err)
+	}
+	if cfg == nil {
+		t.Fatalf("expected non-nil config")
+	}
+	if cfg.Auth.JWT.Secret == "" {
+		t.Errorf("expected auto-generated JWT secret")
+	}
+}
+

@@ -1,7 +1,6 @@
 package processing
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -83,11 +82,27 @@ func (p *Processor) convertToTempFile(
 		}
 		seeker = rs
 	} else {
-		data, err := io.ReadAll(input)
+		// Spool the non-seekable input to a temporary file instead of buffering it
+		// in RAM. Because the spool is an *os.File, ConvertStreamToFile hands its
+		// path directly to FFmpeg, bypassing the loopback stream server entirely.
+		spoolFile, err := os.CreateTemp("", "mh-convertspool-*")
 		if err != nil {
-			return nil, 0, fmt.Errorf("failed to read input stream: %w", err)
+			return nil, 0, fmt.Errorf("failed to create temporary spool file: %w", err)
 		}
-		seeker = bytes.NewReader(data)
+		spoolPath := spoolFile.Name()
+		// The input spool is only needed while ConvertStreamToFile runs; clean it
+		// up on both success and error paths (the OUTPUT file is owned by the caller).
+		defer func() {
+			spoolFile.Close()
+			os.Remove(spoolPath)
+		}()
+		if _, err := io.Copy(spoolFile, input); err != nil {
+			return nil, 0, fmt.Errorf("failed to spool input stream to disk: %w", err)
+		}
+		if _, err := spoolFile.Seek(0, io.SeekStart); err != nil {
+			return nil, 0, fmt.Errorf("failed to rewind input spool file: %w", err)
+		}
+		seeker = spoolFile
 	}
 
 	tempFile, err := p.MediaConverter.ConvertStreamToFile(ctx, seeker, inputMimeType, opts)

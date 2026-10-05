@@ -144,6 +144,12 @@ func (h *UserHandler) UpdateMe(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The password changed, so invalidate all refresh tokens previously issued to this user.
+	// A failure here is logged but does not fail the request: the password update already succeeded.
+	if err := h.Repo.DeleteAllRefreshTokensForUser(ctx, user.ID); err != nil {
+		h.Logger.Error("Failed to revoke refresh tokens after password change", "error", err, "user_id", user.ID)
+	}
+
 	// 7. Log the action in the audit log
 	h.Auditor.Log(ctx, "user.update_password", user.Username, "self", nil)
 
@@ -430,6 +436,7 @@ func (h *UserHandler) UpdateUser(w http.ResponseWriter, r *http.Request) {
 
 	// 4. Update core user fields if provided
 	userChanged := false
+	passwordChanged := false
 
 	if payload.Username != "" && payload.Username != existingUser.Username {
 		existingUser.Username = payload.Username
@@ -448,6 +455,7 @@ func (h *UserHandler) UpdateUser(w http.ResponseWriter, r *http.Request) {
 		}
 		existingUser.PasswordHash = string(hashBytes)
 		userChanged = true
+		passwordChanged = true
 	}
 
 	if payload.IsAdmin != nil {
@@ -473,6 +481,14 @@ func (h *UserHandler) UpdateUser(w http.ResponseWriter, r *http.Request) {
 			h.Logger.Error("Failed to update user record", "error", err, "user_id", userID)
 			utils.RespondWithError(w, http.StatusInternalServerError, "Failed to update user")
 			return
+		}
+
+		// If the password was changed, invalidate all refresh tokens previously issued
+		// to this user. A failure here is logged but does not fail the request.
+		if passwordChanged {
+			if err := h.Repo.DeleteAllRefreshTokensForUser(ctx, userID); err != nil {
+				h.Logger.Error("Failed to revoke refresh tokens after password change", "error", err, "user_id", userID)
+			}
 		}
 	}
 

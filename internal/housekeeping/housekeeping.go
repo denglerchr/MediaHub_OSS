@@ -30,8 +30,10 @@ func NewHouseKeeper(repo repository.Repository, storage storage.StorageProvider,
 	if err != nil {
 		hostname = "unknown-host"
 	}
-	// Append startup timestamp to ensure uniqueness even if a pod restarts rapidly
-	instanceID := fmt.Sprintf("%s-%d", hostname, time.Now().Unix())
+	// Append startup timestamp and a random suffix to ensure uniqueness even if
+	// several instances start on the same host within the same second (lock
+	// ownership must never collide).
+	instanceID := fmt.Sprintf("%s-%d-%s", hostname, time.Now().Unix(), shared.GenerateULID())
 
 	return &HouseKeeper{
 		Repo:           repo,
@@ -139,11 +141,14 @@ func (s *HouseKeeper) runDBTasks(ctx context.Context) {
 }
 
 // RunDBHousekeeping executes the cleanup logic for a single database.
-// This can be called by the scheduler or manually via the API.
+// This can be called by the scheduler or manually via the API. Batch failures
+// are collected and returned so API callers can distinguish "nothing to do"
+// from "the sweep failed".
 func (s *HouseKeeper) RunDBHousekeeping(ctx context.Context, db repository.Database) (int, uint64, error) {
 	var lockName = "hk_" + db.ID.String()
 	var totalDeleted int = 0
 	var totalFreed uint64 = 0
+	var runErr error
 	var err error
 
 	// 1. Acquire Distributed Lock (30-minute TTL as a safety net for large deletions)
@@ -189,6 +194,7 @@ func (s *HouseKeeper) RunDBHousekeeping(ctx context.Context, db repository.Datab
 			})
 			if err != nil {
 				s.Logger.Error("Housekeeper failed to fetch entries for MaxAge", "error", err, "database_id", db.ID, "database_name", db.Name)
+				runErr = errors.Join(runErr, fmt.Errorf("max-age sweep fetch: %w", err))
 				break
 			}
 
@@ -197,12 +203,22 @@ func (s *HouseKeeper) RunDBHousekeeping(ctx context.Context, db repository.Datab
 				break
 			}
 
-			delCount, freed, err := s.deleteEntriesBatch(ctx, db.ID, entries)
+			// Never touch entries that are still in flight (processing, queued
+			// or mid-deletion); they belong to upload/queue/delete workflows and
+			// deleting them would race with their workers and orphan files.
+			deletable := filterDeletableEntries(entries)
+			if len(deletable) == 0 {
+				s.Logger.Debug("Housekeeper skipped in-flight entries during MaxAge sweep", "database_id", db.ID, "database_name", db.Name)
+				break
+			}
+
+			delCount, freed, err := s.deleteEntriesBatch(ctx, db.ID, deletable)
 			totalDeleted += delCount
 			totalFreed += freed
 
 			if err != nil {
 				s.Logger.Error("Housekeeper failed during MaxAge batch deletion", "error", err, "database_id", db.ID, "database_name", db.Name)
+				runErr = errors.Join(runErr, fmt.Errorf("max-age batch deletion: %w", err))
 				break
 			}
 			if delCount == 0 {
@@ -228,15 +244,27 @@ func (s *HouseKeeper) RunDBHousekeeping(ctx context.Context, db repository.Datab
 				Offset: 0,
 				Order:  "asc",
 			})
-			if err != nil || len(entries) == 0 {
-				break // Cannot fetch or no entries left
+			if err != nil {
+				s.Logger.Error("Housekeeper failed to fetch entries for DiskSpace", "error", err, "database_id", db.ID, "database_name", db.Name)
+				runErr = errors.Join(runErr, fmt.Errorf("disk-space sweep fetch: %w", err))
+				break
+			}
+			if len(entries) == 0 {
+				break // no entries left
+			}
+
+			// Skip entries that are still in flight (see MaxAge loop above).
+			deletable := filterDeletableEntries(entries)
+			if len(deletable) == 0 {
+				s.Logger.Debug("Housekeeper skipped in-flight entries during DiskSpace sweep", "database_id", db.ID, "database_name", db.Name)
+				break
 			}
 
 			// Accumulate just enough entries to dip below the limit
 			var slideEnd int = 0
 			var targetSpaceToFree uint64
 
-			for i, e := range entries {
+			for i, e := range deletable {
 				targetSpaceToFree += e.Size + e.PreviewSize
 				slideEnd = i + 1
 
@@ -246,7 +274,7 @@ func (s *HouseKeeper) RunDBHousekeeping(ctx context.Context, db repository.Datab
 				}
 			}
 
-			delCount, freed, err := s.deleteEntriesBatch(ctx, db.ID, entries[:slideEnd])
+			delCount, freed, err := s.deleteEntriesBatch(ctx, db.ID, deletable[:slideEnd])
 			totalDeleted += delCount
 			totalFreed += freed
 			if currentSpace > freed {
@@ -257,8 +285,13 @@ func (s *HouseKeeper) RunDBHousekeeping(ctx context.Context, db repository.Datab
 
 			if err != nil {
 				s.Logger.Error("Housekeeper failed during DiskSpace batch deletion", "error", err, "database_id", db.ID, "database_name", db.Name)
+				runErr = errors.Join(runErr, fmt.Errorf("disk-space batch deletion: %w", err))
 				break
 			}
+			// Safety valve: abort when the batch made no progress. Zero-size
+			// entries free no space, so continuing would never advance the goal
+			// of this loop and could spin indefinitely if such rows keep
+			// appearing; the next scheduled run continues where we stopped.
 			if delCount == 0 || freed == 0 {
 				s.Logger.Warn("Housekeeper made no progress freeing disk space, aborting loop", "database_id", db.ID, "database_name", db.Name, "delCount", delCount, "freed", freed)
 				break
@@ -270,10 +303,25 @@ func (s *HouseKeeper) RunDBHousekeeping(ctx context.Context, db repository.Datab
 	_, err = s.Repo.HouseKeepingWasCalled(ctx, db.ID)
 	if err != nil {
 		s.Logger.Error("Housekeeper failed to update LastHkRun", "error", err, "database_id", db.ID, "database_name", db.Name)
+		runErr = errors.Join(runErr, fmt.Errorf("update LastHkRun: %w", err))
 	}
 
 	s.Logger.Info("Housekeeping completed", "database_id", db.ID.String(), "database_name", db.Name, "deleted", totalDeleted, "freed_bytes", totalFreed)
-	return totalDeleted, totalFreed, nil
+	return totalDeleted, totalFreed, runErr
+}
+
+// filterDeletableEntries returns only the entries housekeeping may delete:
+// entries in an in-flight state (processing, queued, mid-deletion) are owned by
+// upload/queue/delete workflows and must never be deleted from underneath them,
+// or their workers would write files for rows that no longer exist.
+func filterDeletableEntries(entries []repository.Entry) []repository.Entry {
+	deletable := make([]repository.Entry, 0, len(entries))
+	for _, e := range entries {
+		if e.Status == repository.EntryStatusReady || e.Status == repository.EntryStatusError {
+			deletable = append(deletable, e)
+		}
+	}
+	return deletable
 }
 
 // deleteEntriesBatch safely deletes a batch of entries from the DB and storage using a 2-Phase approach.

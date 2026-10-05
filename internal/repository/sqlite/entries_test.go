@@ -491,7 +491,7 @@ func TestCoordinateCustomField_SQLite(t *testing.T) {
 
 	// 7. Update entry coordinate
 	fetchedE1.CustomFields["location"] = repo.Coordinate{Latitude: 48.2, Longitude: 11.6}
-	updatedE1, err := r.UpdateEntry(ctx, db.ID, fetchedE1)
+	updatedE1, err := r.UpdateEntryMetadata(ctx, db.ID, fetchedE1)
 	if err != nil {
 		t.Fatalf("failed to update entry: %v", err)
 	}

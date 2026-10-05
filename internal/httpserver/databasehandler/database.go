@@ -36,8 +36,15 @@ func (h *DatabaseHandler) GetDatabase(w http.ResponseWriter, r *http.Request) {
 	}
 
 	db, err := h.Repo.GetDatabase(ctx, repository.ULID(id))
-	if err != nil {
+	if errors.Is(err, customerrors.ErrNotFound) {
 		utils.RespondWithError(w, http.StatusNotFound, "Database not found.")
+		return
+	} else if errors.Is(err, customerrors.ErrValidation) {
+		utils.RespondWithError(w, http.StatusBadRequest, "Invalid database id.")
+		return
+	} else if err != nil {
+		h.Logger.Error("error retrieving database", "error", err)
+		utils.RespondWithError(w, http.StatusInternalServerError, "Failed to retrieve database")
 		return
 	}
 

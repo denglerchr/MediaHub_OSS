@@ -10,6 +10,10 @@ import (
 func CORSMiddleware(allowedOrigins []string) Middleware {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// Responses vary depending on the Origin header (the CORS headers are
+			// only added for allowed origins), so caches must key on it.
+			w.Header().Add("Vary", "Origin")
+
 			origin := r.Header.Get("Origin")
 
 			// If no Origin header is present (same-origin request), or if the server
@@ -50,7 +54,12 @@ func CORSMiddleware(allowedOrigins []string) Middleware {
 			// Handle preflight requests (OPTIONS method)
 			// The browser sends this before the actual request to verify permissions.
 			if r.Method == http.MethodOptions {
+				// Preflight responses also depend on the requested method and headers.
+				w.Header().Add("Vary", "Access-Control-Request-Method, Access-Control-Request-Headers")
 				if isExactMatch || isWildcard {
+					// Cache the preflight result for 10 minutes to avoid an extra
+					// OPTIONS round-trip before every actual request.
+					w.Header().Set("Access-Control-Max-Age", "600")
 					w.WriteHeader(http.StatusOK)
 					return
 				}

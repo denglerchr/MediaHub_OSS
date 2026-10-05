@@ -146,6 +146,9 @@ func registerFlags(cmd *cobra.Command) {
 		"auth-oidc-client-id":              "auth.oidc.client_id",
 		"auth-oidc-client-secret":          "auth.oidc.client_secret",
 		"auth-oidc-redirect-url":           "auth.oidc.redirect_url",
+		"init_config":                      "init_config",
+		"password":                         "password",
+		"reset_pw":                         "reset_pw",
 	}
 
 	for flagName, viperKey := range flagToViperKey {
@@ -171,7 +174,6 @@ func serve(globalOptions *GlobalOptions, frontendFS fs.FS) error {
 	cfg := globalOptions.Conf
 	logger := globalOptions.Logger
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
 
 	logger.Info("Bootstrapping MediaHub server...")
 
@@ -200,6 +202,12 @@ func serve(globalOptions *GlobalOptions, frontendFS fs.FS) error {
 		return err
 	}
 	defer svcs.mediaConverter.Shutdown(context.Background())
+
+	// Cancel the context (stopping housekeeping scheduler and queue monitor)
+	// before the repository and converter are torn down. Defers run in reverse
+	// order, so this must be registered last: workers get the stop signal first,
+	// then the converter shuts down, then the repository closes.
+	defer stop()
 
 	// 5. Build REST handlers.
 	handlers, err := buildHandlers(cfg, repo, storageProvider, svcs, logger, startTime)

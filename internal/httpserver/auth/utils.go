@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"mediahub_oss/internal/repository"
+	"mediahub_oss/internal/shared/customerrors"
 	"strings"
 	"time"
 
@@ -18,11 +19,13 @@ import (
 // validateJWT parses the token string, validates the signature, and retrieves the user.
 func (am *AuthMiddleware) validateJWT(ctx context.Context, tokenString string) (repository.User, error) {
 	token, err := jwt.Parse(tokenString, func(token *jwt.Token) (any, error) {
-		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
-			return repository.User{}, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
+		// Pin the algorithm to HS256. Accepting any HMAC method (HS384/HS512)
+		// widens the attack surface for algorithm-confusion issues.
+		if token.Method != jwt.SigningMethodHS256 {
+			return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
 		}
 		return am.JWTSecret, nil
-	})
+	}, jwt.WithValidMethods([]string{jwt.SigningMethodHS256.Alg()}))
 
 	if err != nil {
 		return repository.User{}, err
@@ -63,21 +66,32 @@ func (am *AuthMiddleware) validateBasicAuth(ctx context.Context, encodedValue st
 		return repository.User{}, errors.New("invalid basic auth format")
 	}
 
-	username, password := pair[0], pair[1]
+	return ValidateBasicAuth(ctx, am.Repo, pair[0], pair[1])
+}
 
-	user, err := am.Repo.GetUserByUsername(ctx, username)
+// ValidateBasicAuth verifies that the user exists and the password is correct.
+// It is the shared Basic Auth credential check used by both the auth middleware
+// and the token handler.
+//
+// Service Accounts and OIDC accounts are rejected because they must not log in
+// interactively via Basic Auth. Credential failures return errors matching
+// customerrors.ErrPermissionDenied and a missing user wraps the repository's
+// not-found error, so callers can map them to 401 responses; any other
+// repository error indicates an infrastructure failure.
+func ValidateBasicAuth(ctx context.Context, repo repository.Repository, username, password string) (repository.User, error) {
+	user, err := repo.GetUserByUsername(ctx, username)
 	if err != nil {
-		return repository.User{}, errors.New("user not found")
+		return repository.User{}, fmt.Errorf("user not found: %w", err)
 	}
 
 	// Prevent Service Accounts and OIDC accounts from using Basic Auth
 	if user.IsServiceAccount() || user.IsOIDC() {
-		return repository.User{}, errors.New("basic auth is not allowed for this account type")
+		return repository.User{}, fmt.Errorf("%w: basic auth is not allowed for this account type", customerrors.ErrPermissionDenied)
 	}
 
 	// Verify Password using bcrypt
 	if err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(password)); err != nil {
-		return repository.User{}, errors.New("invalid password")
+		return repository.User{}, fmt.Errorf("%w: invalid password", customerrors.ErrPermissionDenied)
 	}
 
 	return user, nil

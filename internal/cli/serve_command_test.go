@@ -153,4 +153,31 @@ func TestValidateOIDCRedirectURL(t *testing.T) {
 	}
 }
 
+func TestServeCommand_OperationalFlagBinding(t *testing.T) {
+	viper.Reset()
+
+	globalOptions := &cli.GlobalOptions{}
+	cmd := cli.NewServeCommand(globalOptions, nil)
+
+	args := []string{
+		"--password=secret123",
+		"--reset_pw=true",
+		"--init_config=/path/to/init.toml",
+	}
+
+	if err := cmd.ParseFlags(args); err != nil {
+		t.Fatalf("ParseFlags failed: %v", err)
+	}
+
+	if val := viper.GetString("password"); val != "secret123" {
+		t.Errorf("expected viper.GetString(\"password\") to be 'secret123', got %q", val)
+	}
+	if val := viper.GetBool("reset_pw"); !val {
+		t.Errorf("expected viper.GetBool(\"reset_pw\") to be true, got %v", val)
+	}
+	if val := viper.GetString("init_config"); val != "/path/to/init.toml" {
+		t.Errorf("expected viper.GetString(\"init_config\") to be '/path/to/init.toml', got %q", val)
+	}
+}
+
 

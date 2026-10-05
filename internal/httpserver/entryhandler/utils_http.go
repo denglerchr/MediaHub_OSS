@@ -1,32 +1,70 @@
 package entryhandler
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
-	"net/http"
 	"strconv"
 	"strings"
 )
 
+// sanitizeZipEntryName makes a user-provided file name safe for use as a ZIP
+// entry name. Path separators are replaced and empty/relative-segment names are
+// neutralized, so a crafted file name like "../../evil.sh" can never escape the
+// intended directory when the export archive is extracted (zip-slip).
+func sanitizeZipEntryName(name string) string {
+	name = strings.ReplaceAll(name, "\\", "_")
+	name = strings.ReplaceAll(name, "/", "_")
+	if name == "" || name == "." || name == ".." {
+		return "unnamed"
+	}
+	return name
+}
+
+// jsonString renders s as a JSON string literal without HTML escaping, keeping
+// response bytes byte-compatible with plain values (no \u003c-style escapes)
+// while still escaping quotes, backslashes and control characters so the value
+// can never break out of the surrounding JSON string.
+func jsonString(s string) (string, error) {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(s); err != nil {
+		return "", err
+	}
+	return strings.TrimSuffix(buf.String(), "\n"), nil
+}
+
 // writeJSONFileResponseStream streams a binary io.Reader as a Base64-encoded Data URI JSON response directly to w.
 // This eliminates buffering full files in memory.
 func writeJSONFileResponseStream(w io.Writer, filename, mimeType string, size uint64, reader io.Reader) error {
-	fnBytes, err := json.Marshal(filename)
+	fnJSON, err := jsonString(filename)
 	if err != nil {
 		return err
 	}
-	mtBytes, err := json.Marshal(mimeType)
+	mtJSON, err := jsonString(mimeType)
 	if err != nil {
 		return err
 	}
 
+	// The data URI is rendered as a complete JSON string literal (with its
+	// opening quote) minus the trailing quote, so the base64 payload can be
+	// streamed directly into the JSON string value afterwards. Rendering the
+	// whole prefix through the JSON encoder keeps untrusted MIME types from
+	// breaking out of the string literal.
+	dataPrefix, err := jsonString(fmt.Sprintf("data:%s;base64,", mimeType))
+	if err != nil {
+		return err
+	}
+	dataPrefix = dataPrefix[:len(dataPrefix)-1]
+
 	var prefix string
 	if size > 0 {
-		prefix = fmt.Sprintf(`{"filename":%s,"mime_type":%s,"size":%d,"data":"data:%s;base64,`, string(fnBytes), string(mtBytes), size, mimeType)
+		prefix = fmt.Sprintf(`{"filename":%s,"mime_type":%s,"size":%d,"data":%s`, fnJSON, mtJSON, size, dataPrefix)
 	} else {
-		prefix = fmt.Sprintf(`{"filename":%s,"mime_type":%s,"data":"data:%s;base64,`, string(fnBytes), string(mtBytes), mimeType)
+		prefix = fmt.Sprintf(`{"filename":%s,"mime_type":%s,"data":%s`, fnJSON, mtJSON, dataPrefix)
 	}
 	if _, err := io.WriteString(w, prefix); err != nil {
 		return err
@@ -115,28 +153,4 @@ func parseRange(header string, fileSize int64) ([]byteRange, error) {
 		})
 	}
 	return ranges, nil
-}
-
-// parseQueryInt safely parses an integer from query parameters, falling back to a default value if omitted.
-func parseQueryInt(r *http.Request, key string, defaultValue int) (int, error) {
-	if val := r.URL.Query().Get(key); val != "" {
-		parsed, err := strconv.Atoi(val)
-		if err != nil {
-			return 0, fmt.Errorf("invalid value for parameter '%s': must be an integer", key)
-		}
-		return parsed, nil
-	}
-	return defaultValue, nil
-}
-
-// parseQueryInt64 safely parses a 64-bit integer from query parameters, falling back to a default value if omitted.
-func parseQueryInt64(r *http.Request, key string, defaultValue int64) (int64, error) {
-	if val := r.URL.Query().Get(key); val != "" {
-		parsed, err := strconv.ParseInt(val, 10, 64)
-		if err != nil {
-			return 0, fmt.Errorf("invalid value for parameter '%s': must be an integer", key)
-		}
-		return parsed, nil
-	}
-	return defaultValue, nil
 }

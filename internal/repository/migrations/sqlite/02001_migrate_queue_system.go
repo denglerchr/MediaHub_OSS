@@ -133,8 +133,8 @@ func up02001(ctx context.Context, tx *sql.Tx) error {
 		for _, m := range migrations {
 			for i, cf := range m.customFields {
 				// Insert into new table
-				insertCFSQL := `INSERT INTO database_custom_fields (database_id, field_id, name, type, is_indexed) VALUES (?, ?, ?, ?, 1)`
-				if _, err := tx.ExecContext(ctx, insertCFSQL, m.dbID, i, cf.Name, cf.Type.String()); err != nil {
+				insertCFSQL := `INSERT INTO database_custom_fields (database_id, field_id, name, type, is_indexed) VALUES (?, ?, ?, ?, ?)`
+				if _, err := tx.ExecContext(ctx, insertCFSQL, m.dbID, i, cf.Name, cf.Type.String(), cf.IsIndexed); err != nil {
 					return fmt.Errorf("failed to insert custom field: %w", err)
 				}
 
@@ -170,10 +170,12 @@ func up02001(ctx context.Context, tx *sql.Tx) error {
 						}
 					}
 
-					// Create new index (since is_indexed defaults to true)
-					createIdx := fmt.Sprintf(`CREATE INDEX IF NOT EXISTS "idx_entries_%s_cf_%d" ON "entries_%s"("cf_%d")`, m.dbID, i, m.dbID, i)
-					if _, err := tx.ExecContext(ctx, createIdx); err != nil {
-						return fmt.Errorf("failed to create index: %w", err)
+					// Create new index if is_indexed is true
+					if cf.IsIndexed {
+						createIdx := fmt.Sprintf(`CREATE INDEX IF NOT EXISTS "idx_entries_%s_cf_%d" ON "entries_%s"("cf_%d")`, m.dbID, i, m.dbID, i)
+						if _, err := tx.ExecContext(ctx, createIdx); err != nil {
+							return fmt.Errorf("failed to create index: %w", err)
+						}
 					}
 				}
 			}
@@ -454,9 +456,30 @@ func migrateCheckConstraints(ctx context.Context, tx *sql.Tx, allowedStatuses []
 		if err != nil {
 			return fmt.Errorf("failed to build dynamic schema SQL for db %s: %w", db.ID, err)
 		}
+
+		// Fetch existing column names from the current table to construct an explicit column list
+		var colNames []string
+		colRows, err := tx.QueryContext(ctx, fmt.Sprintf(`PRAGMA table_info(%s)`, tableName))
 		if err != nil {
-			return fmt.Errorf("failed to build dynamic schema SQL for db %s: %w", db.ID, err)
+			return fmt.Errorf("failed to query table_info for %s: %w", tableName, err)
 		}
+		for colRows.Next() {
+			var cid int
+			var name, dtype string
+			var notnull, pk int
+			var dfltVal any
+			if err := colRows.Scan(&cid, &name, &dtype, &notnull, &dfltVal, &pk); err != nil {
+				colRows.Close()
+				return fmt.Errorf("failed to scan table_info for %s: %w", tableName, err)
+			}
+			colNames = append(colNames, fmt.Sprintf(`"%s"`, name))
+		}
+		colRows.Close()
+
+		if len(colNames) == 0 {
+			return fmt.Errorf("no columns found for table %s", tableName)
+		}
+		colsList := strings.Join(colNames, ", ")
 
 		// Rename old table
 		renameSQL := fmt.Sprintf(`ALTER TABLE %s RENAME TO %s`, tableName, oldTableName)
@@ -469,8 +492,8 @@ func migrateCheckConstraints(ctx context.Context, tx *sql.Tx, allowedStatuses []
 			return fmt.Errorf("failed to create new table: %w", err)
 		}
 
-		// Copy data
-		copySQL := fmt.Sprintf(`INSERT INTO %s SELECT * FROM %s`, tableName, oldTableName)
+		// Copy data with explicit column list
+		copySQL := fmt.Sprintf(`INSERT INTO %s (%s) SELECT %s FROM %s`, tableName, colsList, colsList, oldTableName)
 		if _, err := tx.ExecContext(ctx, copySQL); err != nil {
 			return fmt.Errorf("failed to copy data: %w", err)
 		}

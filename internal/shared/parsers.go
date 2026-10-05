@@ -2,6 +2,7 @@ package shared
 
 import (
 	"fmt"
+	"math"
 	"regexp"
 	"strconv"
 	"strings"
@@ -17,7 +18,7 @@ var (
 func ParseSize(sizeStr string) (uint64, error) {
 	matches := sizeRegex.FindStringSubmatch(strings.TrimSpace(sizeStr))
 
-	if len(matches) < 2 {
+	if len(matches) < 3 {
 		return 0, fmt.Errorf("invalid size format: %s", sizeStr)
 	}
 
@@ -26,25 +27,31 @@ func ParseSize(sizeStr string) (uint64, error) {
 		return 0, fmt.Errorf("invalid size number: %s", matches[1])
 	}
 
-	unit := ""
-	if len(matches) > 2 {
-		unit = strings.ToUpper(matches[2]) // Normalize to uppercase for the switch
-	}
+	unit := strings.ToUpper(matches[2]) // Normalize to uppercase for the switch
 
 	switch unit {
 	case "T", "TB":
-		return value * (1 << 40), nil
+		return scaleSize(value, 1<<40, sizeStr)
 	case "G", "GB":
-		return value * (1 << 30), nil
+		return scaleSize(value, 1<<30, sizeStr)
 	case "M", "MB":
-		return value * (1 << 20), nil
+		return scaleSize(value, 1<<20, sizeStr)
 	case "K", "KB":
-		return value * (1 << 10), nil
+		return scaleSize(value, 1<<10, sizeStr)
 	case "", "B", "BYTE", "BYTES":
 		return value, nil
 	default:
 		return 0, fmt.Errorf("unsupported size unit: %s", unit)
 	}
+}
+
+// scaleSize multiplies value by factor and reports an error instead of silently
+// wrapping around on overflow.
+func scaleSize(value, factor uint64, sizeStr string) (uint64, error) {
+	if value > math.MaxUint64/factor {
+		return 0, fmt.Errorf("size value out of range: %s", sizeStr)
+	}
+	return value * factor, nil
 }
 
 // ParseDuration parses a duration string with support for days and various aliases
@@ -77,14 +84,23 @@ func ParseDuration(durationStr string) (time.Duration, error) {
 	unit := strings.ToLower(matches[2]) // Normalize to lowercase for the switch
 	switch unit {
 	case "d", "day", "days":
-		return time.Duration(value) * 24 * time.Hour, nil
+		return scaleDuration(value, 24*time.Hour, durationStr)
 	case "h", "hr", "hrs", "hour", "hours":
-		return time.Duration(value) * time.Hour, nil
+		return scaleDuration(value, time.Hour, durationStr)
 	case "m", "min", "mins", "minute", "minutes":
-		return time.Duration(value) * time.Minute, nil
+		return scaleDuration(value, time.Minute, durationStr)
 	case "s", "sec", "secs", "second", "seconds":
-		return time.Duration(value) * time.Second, nil
+		return scaleDuration(value, time.Second, durationStr)
 	default:
 		return 0, fmt.Errorf("unsupported duration unit: %s", unit)
 	}
+}
+
+// scaleDuration multiplies value by unit and reports an error instead of silently
+// wrapping around on overflow.
+func scaleDuration(value int, unit time.Duration, durationStr string) (time.Duration, error) {
+	if value > int(math.MaxInt64/int64(unit)) {
+		return 0, fmt.Errorf("duration value out of range: %s", durationStr)
+	}
+	return time.Duration(value) * unit, nil
 }

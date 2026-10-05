@@ -21,15 +21,15 @@ import (
 //
 // It takes ownership of originalTempPath and removes it (plus any intermediate
 // conversion output) when done. On failure the entry is marked as erroneous via
-// failProcessedEntry; the previously stored original file (for queued entries)
-// is preserved.
+// failProcessedEntry and the error is returned; the previously stored original
+// file (for queued entries) is preserved.
 func (p *Processor) finalizeEntryFile(
 	ctx context.Context,
 	db repo.Database,
 	entry repo.Entry,
 	originalTempPath string,
 	plan ProcessingPlan,
-) {
+) (retErr error) {
 	p.Logger.Debug("Worker: Starting finalization pipeline", "entry", entry.ID)
 
 	var processErr error
@@ -43,6 +43,7 @@ func (p *Processor) finalizeEntryFile(
 			p.Logger.Error("Worker: Processing failed", "entry", entry.ID, "error", processErr)
 			p.failProcessedEntry(ctx, db.ID, entry)
 		}
+		retErr = processErr
 	}()
 
 	currentPath := originalTempPath
@@ -118,4 +119,5 @@ func (p *Processor) finalizeEntryFile(
 	}
 
 	p.Logger.Info("Worker: Successfully processed entry", "entry", entry.ID)
+	return
 }

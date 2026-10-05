@@ -24,11 +24,11 @@ func (r *SQLiteRepository) CreateEntry(ctx context.Context, db repo.Database, en
 
 	// Verify mime type matching DB's content type
 	isValidMime, err := media.IsMimeOfType(db.ContentType, entry.MimeType)
-	if !isValidMime {
-		return repo.Entry{}, customerrors.ErrBadMimeType
-	}
 	if err != nil {
 		return repo.Entry{}, err
+	}
+	if !isValidMime {
+		return repo.Entry{}, customerrors.ErrBadMimeType
 	}
 
 	// Establish timing (SQLite case, with single client, we take client time)
@@ -212,23 +212,16 @@ func (r *SQLiteRepository) GetEntries(ctx context.Context, dbID repo.ULID, opts 
 	return entries, nil
 }
 
-// UpdateEntry modifies an existing entry's metadata and safely adjusts the parent database's size statistics.
+// UpdateEntry modifies the processing-owned fields of an existing entry (status,
+// sizes, mime type, file name, media fields) and safely adjusts the parent
+// database's size statistics. It intentionally leaves timestamp and custom
+// fields untouched; use UpdateEntryMetadata for those.
 func (r *SQLiteRepository) UpdateEntry(ctx context.Context, dbID repo.ULID, entry repo.Entry) (repo.Entry, error) {
 	if !shared.IsValidULID(dbID.String()) {
 		return repo.Entry{}, fmt.Errorf("%w: invalid database id", customerrors.ErrValidation)
 	}
 
 	tableName := fmt.Sprintf(`"entries_%s"`, dbID.String())
-
-	var entryTime time.Time
-	if !entry.Timestamp.IsZero() {
-		entryTime = entry.Timestamp
-	}
-
-	customFields, err := r.getCustomFields(ctx, dbID)
-	if err != nil {
-		return repo.Entry{}, err
-	}
 
 	// 1. Begin SQL Transaction
 	tx, err := r.DB.BeginTx(ctx, nil)
@@ -259,7 +252,6 @@ func (r *SQLiteRepository) UpdateEntry(ctx context.Context, dbID repo.ULID, entr
 	// 3. Update the entry row with new data
 	now := time.Now().UnixMilli()
 	updateData := map[string]any{
-		"timestamp":        entryTime.UnixMilli(),
 		"updated_at":       now,
 		"filesize":         entry.Size,
 		"preview_filesize": entry.PreviewSize,
@@ -270,9 +262,6 @@ func (r *SQLiteRepository) UpdateEntry(ctx context.Context, dbID repo.ULID, entr
 
 	for key, value := range entry.MediaFields {
 		updateData[key] = value
-	}
-	if err := mapCustomFieldsToSQLiteColumns(customFields, entry.CustomFields, updateData); err != nil {
-		return repo.Entry{}, err
 	}
 
 	updateQuery, argsUpdate, err := r.Builder.Update(tableName).
@@ -326,6 +315,57 @@ func (r *SQLiteRepository) UpdateEntry(ctx context.Context, dbID repo.ULID, entr
 
 	entry.UpdatedAt = time.UnixMilli(now)
 
+	return entry, nil
+}
+
+// UpdateEntryMetadata modifies only the user-editable metadata of an entry
+// (file name, timestamp, custom fields). It never touches the processing-owned
+// columns (status, sizes, mime type, media fields), so a metadata edit cannot
+// revert a concurrent background processing update (and vice versa).
+func (r *SQLiteRepository) UpdateEntryMetadata(ctx context.Context, dbID repo.ULID, entry repo.Entry) (repo.Entry, error) {
+	if !shared.IsValidULID(dbID.String()) {
+		return repo.Entry{}, fmt.Errorf("%w: invalid database id", customerrors.ErrValidation)
+	}
+
+	customFields, err := r.getCustomFields(ctx, dbID)
+	if err != nil {
+		return repo.Entry{}, err
+	}
+
+	// A zero timestamp means "missing"; store it as 0 instead of a year-1 epoch.
+	var tsMs int64
+	if !entry.Timestamp.IsZero() {
+		tsMs = entry.Timestamp.UnixMilli()
+	}
+	now := time.Now().UnixMilli()
+
+	updateData := map[string]any{
+		"timestamp":  tsMs,
+		"updated_at": now,
+		"filename":   entry.FileName,
+	}
+	if err := mapCustomFieldsToSQLiteColumns(customFields, entry.CustomFields, updateData); err != nil {
+		return repo.Entry{}, err
+	}
+
+	tableName := fmt.Sprintf(`"entries_%s"`, dbID.String())
+	query, args, err := r.Builder.Update(tableName).
+		SetMap(updateData).
+		Where(squirrel.Eq{"id": entry.ID}).
+		ToSql()
+	if err != nil {
+		return repo.Entry{}, fmt.Errorf("failed to build metadata update query: %w", err)
+	}
+
+	res, err := r.DB.ExecContext(ctx, query, args...)
+	if err != nil {
+		return repo.Entry{}, fmt.Errorf("failed to update entry metadata: %w", err)
+	}
+	if rowsAffected, _ := res.RowsAffected(); rowsAffected == 0 {
+		return repo.Entry{}, customerrors.ErrNotFound
+	}
+
+	entry.UpdatedAt = time.UnixMilli(now)
 	return entry, nil
 }
 

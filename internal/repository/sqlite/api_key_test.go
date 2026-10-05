@@ -103,16 +103,7 @@ func TestAPIKeysRepository(t *testing.T) {
 		t.Errorf("expected ScopeCreate true, got false")
 	}
 
-	// 7. Test GetAPIKeyByHash
-	hashRetrieved, err := r.GetAPIKeyByHash(ctx, hash1)
-	if err != nil {
-		t.Fatalf("failed to get api key by hash: %v", err)
-	}
-	if hashRetrieved.ID != createdKey1.ID {
-		t.Errorf("expected key ID %s, got %s", createdKey1.ID, hashRetrieved.ID)
-	}
-
-	// 8. Test GetAPIKeyWithOwnerByHash
+	// 7. Test GetAPIKeyWithOwnerByHash
 	keyWithOwner, ownerUser, err := r.GetAPIKeyWithOwnerByHash(ctx, hash1)
 	if err != nil {
 		t.Fatalf("failed to get api key with owner: %v", err)

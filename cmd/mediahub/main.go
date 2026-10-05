@@ -1,4 +1,3 @@
-// filepath: cmd/mediahub_oss/main.go
 package main
 
 import (

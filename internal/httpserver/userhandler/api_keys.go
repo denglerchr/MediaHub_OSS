@@ -170,9 +170,6 @@ func (h *UserHandler) GetAllAPIKeys(w http.ResponseWriter, r *http.Request) {
 func (h *UserHandler) CreateAPIKey(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	userIDStr := r.PathValue("user_ulid")
-	if userIDStr == "" {
-		userIDStr = r.PathValue("user_id")
-	}
 
 	var userID repository.ULID
 	var targetUsername string
@@ -279,9 +276,6 @@ func (h *UserHandler) CreateAPIKey(w http.ResponseWriter, r *http.Request) {
 func (h *UserHandler) GetAPIKeys(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	userIDStr := r.PathValue("user_ulid")
-	if userIDStr == "" {
-		userIDStr = r.PathValue("user_id")
-	}
 
 	// Check if context user matches the target ULID to avoid a DB query
 	ctxUser := utils.GetUserFromContext(ctx)
@@ -337,13 +331,7 @@ func (h *UserHandler) GetAPIKeys(w http.ResponseWriter, r *http.Request) {
 func (h *UserHandler) GetAPIKey(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	userIDStr := r.PathValue("user_ulid")
-	if userIDStr == "" {
-		userIDStr = r.PathValue("user_id")
-	}
 	keyIDStr := r.PathValue("key_ulid")
-	if keyIDStr == "" {
-		keyIDStr = r.PathValue("key_id")
-	}
 
 	key, err := h.Repo.GetAPIKeyByID(ctx, repository.ULID(keyIDStr))
 	if err != nil {
@@ -390,13 +378,7 @@ func (h *UserHandler) GetAPIKey(w http.ResponseWriter, r *http.Request) {
 func (h *UserHandler) UpdateAPIKey(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	userIDStr := r.PathValue("user_ulid")
-	if userIDStr == "" {
-		userIDStr = r.PathValue("user_id")
-	}
 	keyIDStr := r.PathValue("key_ulid")
-	if keyIDStr == "" {
-		keyIDStr = r.PathValue("key_id")
-	}
 
 	key, err := h.Repo.GetAPIKeyByID(ctx, repository.ULID(keyIDStr))
 	if err != nil {
@@ -503,13 +485,7 @@ func (h *UserHandler) UpdateAPIKey(w http.ResponseWriter, r *http.Request) {
 func (h *UserHandler) DeleteAPIKey(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	userIDStr := r.PathValue("user_ulid")
-	if userIDStr == "" {
-		userIDStr = r.PathValue("user_id")
-	}
 	keyIDStr := r.PathValue("key_ulid")
-	if keyIDStr == "" {
-		keyIDStr = r.PathValue("key_id")
-	}
 
 	key, err := h.Repo.GetAPIKeyByID(ctx, repository.ULID(keyIDStr))
 	if err != nil {

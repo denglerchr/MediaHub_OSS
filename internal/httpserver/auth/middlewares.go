@@ -110,15 +110,16 @@ func (am *AuthMiddleware) extractAuthCredentials(r *http.Request) (string, strin
 }
 
 func (am *AuthMiddleware) authenticateRequest(ctx context.Context, schema, value string) (repository.User, repository.APIKey, error) {
-	switch schema {
-	case "Bearer":
+	// RFC 7235 auth schemes are case-insensitive.
+	switch strings.ToLower(schema) {
+	case "bearer":
 		if strings.HasPrefix(value, "srv_") {
 			user, apiKey, err := am.validateAPIKey(ctx, value)
 			return user, apiKey, err
 		}
 		user, err := am.validateJWT(ctx, value)
 		return user, repository.APIKey{}, err
-	case "Basic":
+	case "basic":
 		user, err := am.validateBasicAuth(ctx, value)
 		return user, repository.APIKey{}, err
 	default:
@@ -150,7 +151,6 @@ func (am *AuthMiddleware) cacheUserPermissions(ctx context.Context, user reposit
 	if isEffectiveAdmin {
 		holder = &utils.GlobalAdmin{
 			UserULID: user.ID,
-			Repo:     am.Repo,
 		}
 		return context.WithValue(ctx, utils.PermissionHolderKey, holder)
 	}
@@ -231,10 +231,6 @@ func (am *AuthMiddleware) RequireSelfOrAdmin() func(http.Handler) http.Handler {
 			}
 
 			userULID := r.PathValue("user_ulid")
-			if userULID == "" {
-				userULID = r.PathValue("user_id")
-			}
-
 			if userULID == "" || repository.ULID(userULID) != user.ID {
 				utils.RespondWithError(w, http.StatusForbidden, "Forbidden: You are not authorized to manage this resource")
 				return

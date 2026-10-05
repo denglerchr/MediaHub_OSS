@@ -32,7 +32,6 @@ func NewInfoHandler(
 
 	handler := &InfoHandler{
 		Logger:       logger,
-		Auditor:      auditor,
 		Version:      version,
 		StartTime:    time.Now(),
 		ConversionTo: convertTo,
@@ -83,6 +82,5 @@ func (h *InfoHandler) GetInfo(w http.ResponseWriter, r *http.Request) {
 		Features:     h.Features,
 	}
 
-	// h.Auditor.Log(r.Context(), "system.info", "anonymous", "server", nil) // this is public, not audit logging
 	utils.RespondWithJSON(w, http.StatusOK, resp)
 }

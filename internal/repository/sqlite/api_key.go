@@ -8,6 +8,7 @@ import (
 	repo "mediahub_oss/internal/repository"
 	"mediahub_oss/internal/shared"
 	"mediahub_oss/internal/shared/customerrors"
+	"strings"
 	"time"
 
 	"github.com/Masterminds/squirrel"
@@ -56,6 +57,10 @@ func (r *SQLiteRepository) CreateAPIKey(ctx context.Context, apiKey repo.APIKey)
 
 	_, err = r.DB.ExecContext(ctx, query, args...)
 	if err != nil {
+		// SQLite error for duplicate unique constraint (e.g., id or key_hash already taken)
+		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
+			return repo.APIKey{}, customerrors.ErrConflict
+		}
 		return repo.APIKey{}, fmt.Errorf("failed to insert api_key: %w", err)
 	}
 
@@ -92,53 +97,6 @@ func (r *SQLiteRepository) GetAPIKeyByID(ctx context.Context, id repo.ULID) (rep
 			return repo.APIKey{}, customerrors.ErrNotFound
 		}
 		return repo.APIKey{}, fmt.Errorf("failed to execute get api_key by id query: %w", err)
-	}
-
-	key.ID = repo.ULID(idStr)
-	key.UserID = repo.ULID(userIDStr)
-	key.Scope = repo.NewAccessGrant(scopeView, scopeCreate, scopeEdit, scopeDelete, scopeAdmin)
-	key.CreatedAt = time.UnixMilli(createdAtVal)
-
-	if expiresAtNull.Valid {
-		key.ExpiresAt = time.UnixMilli(expiresAtNull.Int64)
-	}
-	if lastUsedAtNull.Valid {
-		key.LastUsedAt = time.UnixMilli(lastUsedAtNull.Int64)
-	}
-
-	return key, nil
-}
-
-// GetAPIKeyByHash retrieves an API key by its hash.
-func (r *SQLiteRepository) GetAPIKeyByHash(ctx context.Context, keyHash string) (repo.APIKey, error) {
-	query, args, err := r.Builder.Select(
-		"id", "user_id", "name", "key_hash", "key_hint",
-		"scope_view", "scope_create", "scope_edit", "scope_delete", "scope_admin",
-		"created_at", "expires_at", "last_used_at",
-	).
-		From("api_keys").
-		Where(squirrel.Eq{"key_hash": keyHash}).
-		ToSql()
-	if err != nil {
-		return repo.APIKey{}, fmt.Errorf("failed to build get api_key by hash query: %w", err)
-	}
-
-	var key repo.APIKey
-	var idStr, userIDStr string
-	var createdAtVal int64
-	var expiresAtNull, lastUsedAtNull sql.NullInt64
-	var scopeView, scopeCreate, scopeEdit, scopeDelete, scopeAdmin bool
-
-	err = r.DB.QueryRowContext(ctx, query, args...).Scan(
-		&idStr, &userIDStr, &key.Name, &key.KeyHash, &key.KeyHint,
-		&scopeView, &scopeCreate, &scopeEdit, &scopeDelete, &scopeAdmin,
-		&createdAtVal, &expiresAtNull, &lastUsedAtNull,
-	)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return repo.APIKey{}, customerrors.ErrNotFound
-		}
-		return repo.APIKey{}, fmt.Errorf("failed to execute get api_key by hash query: %w", err)
 	}
 
 	key.ID = repo.ULID(idStr)
