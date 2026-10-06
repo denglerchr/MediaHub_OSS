@@ -39,6 +39,7 @@ services:
       - "localhost:host-gateway"
     environment:
       - MEDIAHUB_PASSWORD=${MEDIAHUB_PASSWORD:-password123}
+      - MEDIAHUB_SERVER_MAX_SYNC_UPLOAD=1MB
       - MEDIAHUB_AUTH_OIDC_ENABLED=true
       - MEDIAHUB_AUTH_OIDC_DISABLE_LOGIN_PAGE=true
       - MEDIAHUB_AUTH_OIDC_ISSUER_URL=http://localhost:8081/realms/mediahub

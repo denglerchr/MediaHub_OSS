@@ -1,9 +1,10 @@
-# v3.2 (upcoming)
+# v3.2
 
 Features
 - add OIDC compatibility and docker compose example
 - add COORDINATE field type to store location
 - auto-extract location from uploads in the frontend if available
+- allow selecting resolution and format when retrieving certain media files
 
 Improvements:
 - cleaning up of CSS styles
