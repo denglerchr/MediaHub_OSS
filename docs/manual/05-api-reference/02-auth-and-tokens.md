@@ -17,6 +17,8 @@ Obtain an internal JWT Access and Refresh token pair using local HTTP Basic Auth
 * **Header**: `Authorization: Basic <base64(username:password)>`
 * **Body**: None
 
+> **Note**: This endpoint always accepts Basic Auth, even when the frontend login form is hidden by `auth.oidc.disable_login_page = true` — that setting only controls the browser UI, so local credentials keep working for API integrations and administrators.
+
 ### Response (`200 OK`)
 ```json
 {

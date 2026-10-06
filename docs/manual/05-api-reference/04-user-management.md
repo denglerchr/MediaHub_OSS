@@ -20,7 +20,7 @@ Retrieves the user record and specific database permissions for the currently au
     "id": "01J2A3X9D4B5C6E7F8G9H0J1K2",
     "username": "viewer",
     "is_admin": false,
-    "is_service_account": false,
+    "account_type": "local",
     "permissions": [
       {
         "database_id": "01HGFB9Z5W7ABCDEFGHJKMNPQR",
@@ -63,7 +63,7 @@ Retrieves a list of all registered user accounts and their database permissions.
 
 * **Role Required**: `IsAdmin`
 * **Query Parameters**:
-  * `is_service_account` (boolean, optional): If `true`, returns only service accounts; if `false`, returns standard users; if omitted, returns all users.
+  * `account_type` (string, optional): Filter by account type. Accepted values: `local`, `service_account`, or `oidc`. If omitted, returns all users. Invalid values return `400 Bad Request`.
 * **Response (`200 OK`)**:
   ```json
   [
@@ -71,14 +71,14 @@ Retrieves a list of all registered user accounts and their database permissions.
       "id": "01HGFB9Z5W7ABCDEFGHJKMNPQR",
       "username": "admin",
       "is_admin": true,
-      "is_service_account": false,
+      "account_type": "local",
       "permissions": []
     },
     {
       "id": "01J2A3X9D4B5C6E7F8G9H0J1K2",
       "username": "editor_bob",
       "is_admin": false,
-      "is_service_account": false,
+      "account_type": "local",
       "permissions": [
         {
           "database_id": "01HGFB9Z5W7ABCDEFGHJKMNPQR",
@@ -106,7 +106,7 @@ Creates a new user or service account.
     "username": "new_editor",
     "password": "a-strong-password-123",
     "is_admin": false,
-    "is_service_account": false,
+    "account_type": "local",
     "permissions": [
       {
         "database_id": "01HGFB9Z5W7ABCDEFGHJKMNPQR",
@@ -119,14 +119,15 @@ Creates a new user or service account.
     ]
   }
   ```
-  *(Note: If `is_service_account` is `true`, `password` is optional).*
+  * `account_type` (string, optional, defaults to `"local"`): Either `local` or `service_account`. If `service_account`, `password` is optional (the account authenticates exclusively via API keys).
+  * *(Note: `oidc` accounts cannot be created through this endpoint — they are provisioned automatically (JIT) during their first SSO login.)*
 * **Response (`201 Created`)**:
   ```json
   {
     "id": "01K3B4Y0E5C6D7F8G9H0J1K2L3",
     "username": "new_editor",
     "is_admin": false,
-    "is_service_account": false,
+    "account_type": "local",
     "permissions": [ ... ]
   }
   ```

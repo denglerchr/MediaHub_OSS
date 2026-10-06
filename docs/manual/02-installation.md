@@ -100,6 +100,16 @@ services:
       - ./mediahub_storage:/storage
 ```
 
+### 4. OIDC / Keycloak Example Stack *(New in v3.2)*
+
+A ready-to-run Compose stack that starts MediaHub together with a Keycloak server (port `8081`, Keycloak 26.1) pre-loaded with a `mediahub` realm (client ID `mediahub`, valid redirect URIs `http://localhost:4200/*` and `http://localhost:8080/*`) and two test accounts is included in the repository:
+
+```bash
+docker/examples/oidc_keycloak/compose.yaml
+```
+
+See [`docker/examples/oidc_keycloak/README.md`](https://github.com/denglerchr/MediaHub_OSS/blob/main/docker/examples/oidc_keycloak/README.md) for setup instructions (including running a local backend/frontend against the Keycloak container), and [Configuration](./03-configuration.md) for the matching `[auth.oidc]` settings.
+
 ---
 
 ## 🔒 Recommended Docker Configuration via Environment Variables

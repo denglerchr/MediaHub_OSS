@@ -31,8 +31,9 @@ Of course it can also be used to store media in other contexts, but in that case
   * **Database Drivers**: Built-in support for **SQLite** (single file / edge) and **PostgreSQL** (production scaling).
   * **Storage Drivers**: Local filesystem storage or **S3-compatible object storage** (AWS S3, MinIO, Wasabi, Ceph).
 * **Dynamic Metadata & Custom Fields**:
-  * Define custom typed metadata schemas (e.g., `confidence_score` [REAL], `location` [TEXT], `is_defective` [BOOLEAN]) per database.
-  * Fields are indexed directly for fast range, comparison, and wildcard text searches (`>`, `<`, `>=`, `<=`, `!=`, `LIKE`).
+  * Define custom typed metadata schemas (e.g., `confidence_score` [REAL], `is_defective` [BOOLEAN], `location` [COORDINATE] for GPS positions) per database.
+  * Fields are indexed directly for fast range, comparison, and wildcard text searches (`>`, `<`, `>=`, `<=`, `!=`, `LIKE`), plus bounding-box (`in_box`) spatial searches on `COORDINATE` fields.
+  * Automatic client-side extraction of capture timestamps and GPS coordinates (JPEG EXIF / MP4) during upload, pre-filling `COORDINATE` fields.
 * **Automated Housekeeping**:
   * Background worker periodically enforces retention rules.
   * Configure cleanup based on **maximum entry age** (e.g., 30 days, or `0` to disable) and **disk space limits** (e.g., 100GB, or `0` to disable).

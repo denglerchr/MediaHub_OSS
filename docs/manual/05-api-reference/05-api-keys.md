@@ -36,7 +36,7 @@ Retrieves a list of all active API keys in the system across all user accounts.
         "id": "01K3B4Y0E5C6D7F8G9H0J1K2L3",
         "username": "backup_service_account",
         "is_admin": false,
-        "is_service_account": true
+        "account_type": "service_account"
       }
     }
   ]

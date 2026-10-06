@@ -30,6 +30,7 @@ Uploads a single media file into a database using `multipart/form-data`.
        }
      }
      ```
+     * **`COORDINATE` custom fields** *(New in v3.2)* are sent as an object: `{"location": {"latitude": 48.137154, "longitude": 11.576124}}` (aliases `lat` / `lon` / `lng` are accepted; latitude must be within `-90…90`, longitude within `-180…180`).
   2. `file` (binary file part): Raw binary content of the file.
 
 ### Response Case 1: Synchronous Processing (`201 Created`)
@@ -105,9 +106,10 @@ Retrieves the raw file binary or an on-the-fly transformed derivative. Supports 
   * `database_id` (string, required): Database ULID.
   * `id` (integer, required): Unique entry ID.
 * **Query Parameters (Optional — On-The-Fly Transformations)**:
-  * `format` (string): Desired output format or MIME type. Accepts either a short format name (e.g., `webp`, `jpeg`, `png`, `flac`, `mp3`, `opus`) or a full MIME type (e.g., `image/webp`, `audio/ogg`). Common aliases like `jpg`, `tif`, and `mp3` are automatically normalized.
-    * **Supported Image Formats**: `jpeg` (`image/jpeg`), `png` (`image/png`), `webp` (`image/webp`), `gif` (`image/gif`), `bmp` (`image/bmp`), `tiff` (`image/tiff`).
-    * **Supported Audio Formats**: `mp3` (`audio/mpeg`), `wav` (`audio/wav`), `ogg` (`audio/ogg`), `flac` (`audio/flac`), `aac` (`audio/aac`), `opus` (`audio/opus`).
+  * `format` (string): Desired output format or MIME type. Accepts either a short format name (e.g., `webp`, `jpeg`, `png`, `flac`, `mp3`, `opus`) or a full MIME type (e.g., `image/webp`, `audio/ogg`). Common aliases like `jpg` and `mp3` are automatically normalized.
+    * **Supported Image Formats**: `jpeg` (`image/jpeg`), `png` (`image/png`), `webp` (`image/webp`), `gif` (`image/gif`), `avif` (`image/avif`).
+    * **Supported Audio Formats**: `mp3` (`audio/mpeg`), `wav` (`audio/wav`), `ogg` (`audio/ogg`), `flac` (`audio/flac`), `opus` (`audio/opus`).
+    * Any other target format returns `400 Bad Request`.
   * `width` (integer, `> 0`): Target width in pixels (`image` databases only).
   * `height` (integer, `> 0`): Target height in pixels (`image` databases only).
     * If only one of `width` or `height` is provided, the other dimension is calculated automatically to preserve the original aspect ratio (`fit` is ignored).

@@ -47,6 +47,7 @@ Retrieves general information about the backend service. This endpoint does not 
 * `oidc_issuer_url` (`string`): The base URL of the OpenID Connect identity provider.
 * `oidc_client_id` (`string`): The client identifier registered with the identity provider.
 * `oidc_redirect_url` (`string`): The authorized redirect callback URL (`/auth/callback`).
+* `oidc_auth_endpoint` (`string`, *optional*): The provider's authorization endpoint, dynamically discovered. Only present when `enabled` is `true`.
 
 ### Error Responses
 

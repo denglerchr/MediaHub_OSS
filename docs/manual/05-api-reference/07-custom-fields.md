@@ -5,7 +5,25 @@ title: Custom Fields Endpoints
 
 # Custom Fields Endpoints
 
-Endpoints for defining and modifying custom metadata field schemas on a database. Custom fields support data types `TEXT`, `INTEGER`, `REAL`, and `BOOLEAN`. Each database supports up to 255 custom fields identified by integer IDs (`0` to `254`).
+Endpoints for defining and modifying custom metadata field schemas on a database. Custom fields support data types `TEXT`, `INTEGER`, `REAL`, `BOOLEAN` and `COORDINATE`. Each database supports up to 255 custom fields identified by integer IDs (`0` to `254`).
+
+---
+
+## Field Types
+
+| Type | Description |
+| :--- | :--- |
+| `TEXT` | String value. |
+| `INTEGER` | Whole number. |
+| `REAL` | Floating-point number. |
+| `BOOLEAN` | Flag (`true`/`false`). |
+| `COORDINATE` *(New in v3.2)* | Geographic location as a `{ "latitude": …, "longitude": … }` object. |
+
+### `COORDINATE` Storage & Indexing *(New in v3.2)*
+
+* **Value format** in `custom_fields` payloads: an object with `latitude` (`-90.0` … `90.0`) and `longitude` (`-180.0` … `180.0`); the aliases `lat`, `lon`/`lng` are accepted on input. Out-of-range values return `400 Bad Request`.
+* **PostgreSQL**: stored as a single native `POINT` column (`point(longitude, latitude)`); when `is_indexed` is `true`, a **GiST** index is created.
+* **SQLite**: stored as two `REAL` columns (`…_lat`, `…_lng`); when `is_indexed` is `true`, a **composite B-Tree index** over both columns is created.
 
 ---
 
@@ -21,7 +39,8 @@ Retrieves a list of all custom fields defined for a database.
   [
     { "id": 0, "name": "artist", "type": "TEXT", "is_indexed": true },
     { "id": 1, "name": "album", "type": "TEXT", "is_indexed": true },
-    { "id": 2, "name": "song_name", "type": "TEXT", "is_indexed": false }
+    { "id": 2, "name": "location", "type": "COORDINATE", "is_indexed": true },
+    { "id": 3, "name": "song_name", "type": "TEXT", "is_indexed": false }
   ]
   ```
 
@@ -42,7 +61,8 @@ Adds a new custom field to an existing database schema.
     "is_indexed": false
   }
   ```
-  *(Note: `is_indexed` defaults to `true` if omitted).*
+  * `type` (string, required): One of `TEXT`, `INTEGER`, `REAL`, `BOOLEAN`, `COORDINATE`.
+  * *(Note: `is_indexed` defaults to `true` if omitted).*
 * **Response (`201 Created`)**:
   ```json
   {

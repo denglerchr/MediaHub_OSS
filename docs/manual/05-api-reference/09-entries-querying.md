@@ -58,6 +58,18 @@ Executes structured, multi-condition search queries across native and custom met
 * **Role Required**: `can_view` on database
 * **Path Parameters**:
   * `database_id` (string, required): Database ULID.
+* **Operators**:
+  * Scalar fields (`TEXT`, `INTEGER`, `REAL`, `BOOLEAN`): `=`, `!=`, `>`, `<`, `>=`, `<=`, `LIKE`.
+  * `COORDINATE` fields *(New in v3.2)*: only the spatial operator `in_box`, whose `value` is a bounding box:
+    ```json
+    {
+      "field": "location",
+      "operator": "in_box",
+      "value": { "min_lat": 48.0, "max_lat": 48.3, "min_lng": 11.3, "max_lng": 11.7 }
+    }
+    ```
+    A bounding box crossing the antimeridian (`min_lng > max_lng`) is automatically split into two query regions.
+* **Sorting**: `sort.field` must be a scalar field. Sorting by a `COORDINATE` field returns `400 Bad Request` (2D coordinates have no natural ordering). `pagination.limit` is required.
 * **Request Body**:
   ```json
   {
@@ -65,7 +77,12 @@ Executes structured, multi-condition search queries across native and custom met
       "operator": "and",
       "conditions": [
         { "field": "duration", "operator": ">", "value": 60.0 },
-        { "field": "artist", "operator": "=", "value": "Demo" }
+        { "field": "artist", "operator": "=", "value": "Demo" },
+        {
+          "field": "location",
+          "operator": "in_box",
+          "value": { "min_lat": 48.0, "max_lat": 48.3, "min_lng": 11.3, "max_lng": 11.7 }
+        }
       ]
     },
     "sort": {
@@ -78,7 +95,8 @@ Executes structured, multi-condition search queries across native and custom met
     }
   }
   ```
-* **Response (`200 OK`)**: Returns array of matching entry metadata objects.
+* **Response (`200 OK`)**: Returns array of matching entry metadata objects (empty array if nothing matches).
+* **Error Responses**: `400 Bad Request` for unknown/whitelisted-invalid fields, using `in_box` on a non-`COORDINATE` field, using a scalar operator on a `COORDINATE` field, sorting by a `COORDINATE` field, or a missing `pagination.limit`.
 
 ---
 
@@ -96,6 +114,7 @@ Streams a ZIP archive containing media files and an `entries.csv` metadata sheet
   }
   ```
 * **Response (`200 OK`)**: Binary stream with `Content-Type: application/zip` and `Content-Disposition: attachment; filename="{database_id}_export.zip"`.
+* **CSV Columns**: one column per custom field; `COORDINATE` fields are serialized as `"<latitude>, <longitude>"` (e.g. `48.137154, 11.576124`).
 
 ---
 

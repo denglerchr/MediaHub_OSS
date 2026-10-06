@@ -44,8 +44,9 @@ You can attach typed custom fields to a database. Every entry uploaded to the da
 ### Available Field Types:
 * `TEXT`: String metadata (e.g. camera location, operator name, description).
 * `INTEGER`: Whole numbers (e.g. sample count, error code).
-* `REAL`: Floating-point values (e.g. confidence score, temperature, latitude).
+* `REAL`: Floating-point values (e.g. confidence score, temperature).
 * `BOOLEAN`: Flag (`true`/`false`).
+* `COORDINATE` *(New in v3.2)*: Geographic location stored as a latitude/longitude pair (e.g. GPS capture position). Entered in the UI as two numeric inputs (`-90…90` / `-180…180`), displayed as `📍 lat, lng` with an OpenStreetMap link, and filterable with a bounding-box (`in box`) filter. In the API it is represented as `{ "latitude": 48.137154, "longitude": 11.576124 }`.
 
 ### Indexing:
 Check **Is Indexed** when defining a custom field to enable fast index-accelerated filtering (e.g., `confidence_score > 0.85`).

@@ -175,8 +175,7 @@ content_type = "image"
 config = { create_preview = true, auto_conversion = "image/webp" }
 housekeeping = { interval = "1h", disk_space = "100G", max_age = "0" }
 custom_fields = [
-    {name = "latitude", type = "REAL"},
-    {name = "longitude", type = "REAL"},
+    {name = "location", type = "COORDINATE"}, # GPS position (New in v3.2)
     {name = "device_id", type = "TEXT"}
 ]
 ```

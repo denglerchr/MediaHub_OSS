@@ -1,4 +1,4 @@
-# MediaHub API & Web Interface (upcoming v3.2.0) ✨
+# MediaHub API & Web Interface (v3.2.0) ✨
 
 This open source project provides a HTTP REST API and web frontend for working with images, audio, videos or generic files The software has a dependency on ffmpeg for automatic transcoding of files and metadata extraction.
 

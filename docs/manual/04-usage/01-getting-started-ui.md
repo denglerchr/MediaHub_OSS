@@ -41,7 +41,7 @@ On startup, MediaHub updates the existing `admin` user's password to `NewSecureP
 ### 4. Single Sign-On (OIDC / SSO) *(New in v3.2)*
 When OIDC integration is enabled (`auth.oidc.enabled = true`), the login page presents a **Login via Single Sign-On** button alongside the standard username/password form. 
 
-Clicking this button redirects users to your enterprise Identity Provider (e.g., Keycloak, Authentik, Okta) to complete authentication. Upon first successful login, MediaHub automatically provisions a local user identity matched to the external OIDC subject.
+Clicking this button redirects users to your enterprise Identity Provider (e.g., Keycloak, Authentik, Okta) to complete authentication. Upon first successful login, MediaHub automatically provisions an SSO account (account type `oidc`) matched to the external OIDC subject, seeded with the permissions of the template user configured in `auth.oidc.default_user_rights` (if such a user exists).
 
 ### 5. Enforced SSO & Administrator Break-Glass (`/login?local=1`)
 In enterprise environments, administrators can disable local login forms to enforce SSO-only access across the organization by configuring:
@@ -70,3 +70,11 @@ Once logged in, the top navigation header provides access to:
 * **User Management** *(Admin only)*: Manage global users, grant database-level permissions, and manage Service Accounts & API keys.
 * **Audit Logs** *(Admin only)*: View detailed access logs (if audit logging is enabled).
 * **Settings & Logout**: Manage individual profile settings or end your session.
+
+---
+
+## 📥 Viewing & Downloading Entries
+
+* Entries can be displayed as a **grid** or **list**; the list view renders one column per custom field, showing `COORDINATE` values as `📍 lat, lng` with a link to OpenStreetMap.
+* Opening an entry shows its full metadata, preview, and a **Download** button. The Web UI always downloads the file **exactly as stored** (original format and resolution).
+* To retrieve a file as a **different format or resolution** (e.g. `?format=webp&width=1024&fit=cut`), use the [`GET /api/database/{id}/entry/{id}/file`](../05-api-reference/08-entry-management.md) endpoint — on-the-fly transformations are an API capability and do not modify the stored original.
