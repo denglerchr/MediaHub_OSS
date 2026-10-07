@@ -39,10 +39,41 @@ func (dbc DatabaseCreatePayload) toModel() (repository.Database, error) {
 	}, nil
 }
 
+// reservedCustomFieldNames are the standard entry and media field names that a
+// custom field must never collide with (FE-049). Besides the entry/media columns
+// this includes the standard search fields `created_at`, `updated_at` and
+// `preview_filesize` (see internal/repository/sqlite/entries_utils.go
+// standardFields): a custom field with one of those names resolves to the
+// standard column in search/filter and never to its own cf_N column — the exact
+// wrong-filter-column bug FE-049 was filed for.
+var reservedCustomFieldNames = map[string]struct{}{
+	"id": {}, "status": {}, "timestamp": {}, "filename": {}, "filesize": {},
+	"mime_type": {}, "width": {}, "height": {}, "duration": {}, "channels": {},
+	"created_at": {}, "updated_at": {}, "preview_filesize": {},
+}
+
+// IsReservedCustomFieldName reports whether the given custom-field name collides
+// with a standard or media entry field. Matching is case-insensitive.
+func IsReservedCustomFieldName(name string) bool {
+	_, reserved := reservedCustomFieldNames[strings.ToLower(strings.TrimSpace(name))]
+	return reserved
+}
+
 func (cf DatabaseCustomField) toModel() (repository.CustomFieldDef, error) {
 	name := strings.TrimSpace(cf.Name)
 	if name == "" {
 		return repository.CustomFieldDef{}, fmt.Errorf("missing required field: name")
+	}
+
+	// FE-049: custom-field names colliding with the standard entry/media fields
+	// break clients (duplicate keys in entry tables, wrong filter/search column)
+	// and cannot be read back distinctly. Reserved set kept in sync with the
+	// frontend (frontend/src/app/utils/validation.ts) and documented in
+	// AI/Concept/03_01_Database_Dynamic.md. Enforced here so both
+	// POST /api/database (inline custom_fields) and POST .../field (AddField)
+	// reject such names.
+	if IsReservedCustomFieldName(name) {
+		return repository.CustomFieldDef{}, fmt.Errorf("custom field name '%s' is reserved (standard or media field)", name)
 	}
 
 	fieldType, err := repository.ParseCustomFieldType(cf.Type)

@@ -136,6 +136,13 @@ func (h *DatabaseHandler) UpdateField(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// FE-049: a rename must not land on a reserved standard/media field name either
+	// (same rule as AddField / DatabaseCustomField.toModel).
+	if payload.Name != nil && IsReservedCustomFieldName(*payload.Name) {
+		utils.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf("custom field name '%s' is reserved (standard or media field)", strings.TrimSpace(*payload.Name)))
+		return
+	}
+
 	updated, err := h.Repo.UpdateCustomField(ctx, repository.ULID(dbID), fieldID, payload.Name, payload.IsIndexed)
 	if err != nil {
 		if errors.Is(err, customerrors.ErrNotFound) {
