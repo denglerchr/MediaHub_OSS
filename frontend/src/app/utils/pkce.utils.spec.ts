@@ -1,4 +1,9 @@
-import { generateRandomState, generateCodeVerifier, generateCodeChallenge, bufferToBase64Url } from './pkce.utils';
+import {
+  generateRandomState,
+  generateCodeVerifier,
+  generateCodeChallenge,
+  bufferToBase64Url,
+} from './pkce.utils';
 
 describe('PKCE and State Utilities', () => {
   it('should generate non-empty unique random states', () => {

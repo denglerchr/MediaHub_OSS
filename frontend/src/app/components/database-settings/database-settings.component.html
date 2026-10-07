@@ -1,8 +1,21 @@
-<div class="settings-container page-container" *ngIf="selectedDatabase$ | async as db; else loadingOrError">
+<div
+  class="settings-container page-container"
+  *ngIf="selectedDatabase$ | async as db; else loadingOrError"
+>
   <div class="sticky-header">
-    <div style="display: flex; align-items: center; gap: 0.75rem; min-width: 0;">
+    <div style="display: flex; align-items: center; gap: 0.75rem; min-width: 0">
       <a routerLink="/dashboard" class="back-btn" title="Back to Overview">
-        <svg xmlns="http://www.w3.org/2000/svg" width="1.5em" height="1.5em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <svg
+          xmlns="http://www.w3.org/2000/svg"
+          width="1.5em"
+          height="1.5em"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="2"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+        >
           <line x1="19" y1="12" x2="5" y2="12"></line>
           <polyline points="12 19 5 12 12 5"></polyline>
         </svg>
@@ -12,332 +25,535 @@
   </div>
 
   <div class="scroll-content">
-
-  <div class="settings-card">
-     <h3>Statistics</h3>
-    <div class="stats-grid" *ngIf="db.stats">
-      <div class="stat-item">
-        <span class="stat-label">Entry Count</span>
-        <span class="stat-value">{{ db.stats.entry_count | number }}</span>
-      </div>
-      <div class="stat-item">
-        <span class="stat-label">Total Disk Space</span>
-        <span class="stat-value">{{ db.stats.total_disk_space_bytes | formatBytes }}</span>
-      </div>
-    </div>
-    <p *ngIf="!db.stats" class="text-muted">Stats are currently unavailable.</p>
-  </div>
-
-  <form [formGroup]="settingsForm" (ngSubmit)="onSaveSettings()">
-    
     <div class="settings-card">
-      <h3>General Settings</h3>
-      <div class="form-group">
-        <label for="dbName" class="form-label">Database Name</label>
-        <input type="text" id="dbName" class="form-control" formControlName="name" [readOnly]="!canAdmin">
-        <small class="text-muted">The display name of your database. Changing this will not break any existing file links or uploads.</small>
-      </div>
-
-      <div class="form-group" style="margin-top: 1.5rem;">
-        <label for="nMaxQueued" class="form-label">Max Queued Conversions</label>
-        <input type="number" id="nMaxQueued" class="form-control" formControlName="n_max_queued" [readOnly]="!canAdmin" min="0">
-        <small class="text-muted">Maximum number of entries that can be queued for processing at once. Set to 0 to disable queuing.</small>
-        <div *ngIf="settingsForm.get('n_max_queued')?.invalid && settingsForm.get('n_max_queued')?.touched" class="form-error" style="color: var(--text-danger); font-size: 0.85rem; margin-top: 0.25rem;">
-          <span *ngIf="settingsForm.get('n_max_queued')?.hasError('required')">Max queued conversions is required.</span>
-          <span *ngIf="settingsForm.get('n_max_queued')?.hasError('min')">Max queued conversions cannot be negative.</span>
+      <h3>Statistics</h3>
+      <div class="stats-grid" *ngIf="db.stats">
+        <div class="stat-item">
+          <span class="stat-label">Entry Count</span>
+          <span class="stat-value">{{ db.stats.entry_count | number }}</span>
+        </div>
+        <div class="stat-item">
+          <span class="stat-label">Total Disk Space</span>
+          <span class="stat-value">{{ db.stats.total_disk_space_bytes | formatBytes }}</span>
         </div>
       </div>
+      <p *ngIf="!db.stats" class="text-muted">Stats are currently unavailable.</p>
     </div>
 
-    <div class="settings-card">
-      <h3>Custom Metadata Fields</h3>
-      <p class="text-muted" style="margin-bottom: 1.5rem;">
-        Define custom fields to store extra metadata on your database entries. Columns will be dynamically created or removed in the underlying table.
-      </p>
-
-      <!-- Custom Fields List Container with max-height and scrolling -->
-      <div class="custom-fields-list-container" *ngIf="db.custom_fields && db.custom_fields.length > 0; else noFields">
-        <div class="custom-fields-header-row">
-          <span class="field-col-id">ID</span>
-          <span class="field-col-name">Name</span>
-          <span class="field-col-type">Type</span>
-          <span class="field-col-indexed">Indexed</span>
-          <span class="field-col-actions" *ngIf="canAdmin">Actions</span>
+    <form [formGroup]="settingsForm" (ngSubmit)="onSaveSettings()">
+      <div class="settings-card">
+        <h3>General Settings</h3>
+        <div class="form-group">
+          <label for="dbName" class="form-label">Database Name</label>
+          <input
+            type="text"
+            id="dbName"
+            class="form-control"
+            formControlName="name"
+            [readOnly]="!canAdmin"
+          />
+          <small class="text-muted"
+            >The display name of your database. Changing this will not break any existing file links
+            or uploads.</small
+          >
         </div>
-        
-        <div class="custom-fields-scroll-area">
-          <div class="custom-field-item-row" *ngFor="let field of db.custom_fields; trackBy: trackByFieldId">
-            <!-- Read Mode -->
-            <ng-container *ngIf="editingFieldId !== field.id; else editMode">
-              <span class="field-col-id">#{{ field.id }}</span>
-              <span class="field-col-name">{{ field.name }}</span>
-              <span class="field-col-type"><span class="type-badge">{{ field.type }}</span></span>
-              <span class="field-col-indexed">
-                <span class="indexed-badge" [class.indexed-true]="field.is_indexed">
-                  {{ field.is_indexed ? 'Yes' : 'No' }}
+
+        <div class="form-group" style="margin-top: 1.5rem">
+          <label for="nMaxQueued" class="form-label">Max Queued Conversions</label>
+          <input
+            type="number"
+            id="nMaxQueued"
+            class="form-control"
+            formControlName="n_max_queued"
+            [readOnly]="!canAdmin"
+            min="0"
+          />
+          <small class="text-muted"
+            >Maximum number of entries that can be queued for processing at once. Set to 0 to
+            disable queuing.</small
+          >
+          <div
+            *ngIf="
+              settingsForm.get('n_max_queued')?.invalid && settingsForm.get('n_max_queued')?.touched
+            "
+            class="form-error"
+            style="color: var(--text-danger); font-size: 0.85rem; margin-top: 0.25rem"
+          >
+            <span *ngIf="settingsForm.get('n_max_queued')?.hasError('required')"
+              >Max queued conversions is required.</span
+            >
+            <span *ngIf="settingsForm.get('n_max_queued')?.hasError('min')"
+              >Max queued conversions cannot be negative.</span
+            >
+          </div>
+        </div>
+      </div>
+
+      <div class="settings-card">
+        <h3>Custom Metadata Fields</h3>
+        <p class="text-muted" style="margin-bottom: 1.5rem">
+          Define custom fields to store extra metadata on your database entries. Columns will be
+          dynamically created or removed in the underlying table.
+        </p>
+
+        <!-- Custom Fields List Container with max-height and scrolling -->
+        <div
+          class="custom-fields-list-container"
+          *ngIf="db.custom_fields && db.custom_fields.length > 0; else noFields"
+        >
+          <div class="custom-fields-header-row">
+            <span class="field-col-id">ID</span>
+            <span class="field-col-name">Name</span>
+            <span class="field-col-type">Type</span>
+            <span class="field-col-indexed">Indexed</span>
+            <span class="field-col-actions" *ngIf="canAdmin">Actions</span>
+          </div>
+
+          <div class="custom-fields-scroll-area">
+            <div
+              class="custom-field-item-row"
+              *ngFor="let field of db.custom_fields; trackBy: trackByFieldId"
+            >
+              <!-- Read Mode -->
+              <ng-container *ngIf="editingFieldId !== field.id; else editMode">
+                <span class="field-col-id">#{{ field.id }}</span>
+                <span class="field-col-name">{{ field.name }}</span>
+                <span class="field-col-type"
+                  ><span class="type-badge">{{ field.type }}</span></span
+                >
+                <span class="field-col-indexed">
+                  <span class="indexed-badge" [class.indexed-true]="field.is_indexed">
+                    {{ field.is_indexed ? 'Yes' : 'No' }}
+                  </span>
                 </span>
-              </span>
-              <span class="field-col-actions" *ngIf="canAdmin">
-                <button type="button" class="btn-icon" (click)="onStartEditField(field)" title="Edit field">✏️</button>
-                <button type="button" class="btn-icon btn-icon-danger" (click)="onDeleteField(field)" title="Delete field">🗑️</button>
-              </span>
-            </ng-container>
+                <span class="field-col-actions" *ngIf="canAdmin">
+                  <button
+                    type="button"
+                    class="btn-icon"
+                    (click)="onStartEditField(field)"
+                    title="Edit field"
+                  >
+                    ✏️
+                  </button>
+                  <button
+                    type="button"
+                    class="btn-icon btn-icon-danger"
+                    (click)="onDeleteField(field)"
+                    title="Delete field"
+                  >
+                    🗑️
+                  </button>
+                </span>
+              </ng-container>
 
-            <!-- Edit Mode -->
-            <ng-template #editMode>
-              <span class="field-col-id">#{{ field.id }}</span>
-              <span class="field-col-name">
-                <input type="text" [(ngModel)]="editingFieldName" [ngModelOptions]="{standalone: true}" class="form-control form-control-sm" placeholder="Field name">
-              </span>
-              <span class="field-col-type"><span class="type-badge">{{ field.type }}</span></span>
-              <span class="field-col-indexed">
-                <label class="checkbox-container" style="display: flex; align-items: center; cursor: pointer;">
-                  <input type="checkbox" [(ngModel)]="editingFieldIsIndexed" [ngModelOptions]="{standalone: true}">
-                </label>
-              </span>
-              <span class="field-col-actions" *ngIf="canAdmin">
-                <button type="button" class="btn-icon btn-icon-success" (click)="onSaveField(field.id!)" title="Save changes" [disabled]="isLoading || !editingFieldName">✔️</button>
-                <button type="button" class="btn-icon" (click)="onCancelEditField()" title="Cancel">❌</button>
-              </span>
-            </ng-template>
+              <!-- Edit Mode -->
+              <ng-template #editMode>
+                <span class="field-col-id">#{{ field.id }}</span>
+                <span class="field-col-name">
+                  <input
+                    type="text"
+                    [(ngModel)]="editingFieldName"
+                    [ngModelOptions]="{ standalone: true }"
+                    class="form-control form-control-sm"
+                    placeholder="Field name"
+                  />
+                </span>
+                <span class="field-col-type"
+                  ><span class="type-badge">{{ field.type }}</span></span
+                >
+                <span class="field-col-indexed">
+                  <label
+                    class="checkbox-container"
+                    style="display: flex; align-items: center; cursor: pointer"
+                  >
+                    <input
+                      type="checkbox"
+                      [(ngModel)]="editingFieldIsIndexed"
+                      [ngModelOptions]="{ standalone: true }"
+                    />
+                  </label>
+                </span>
+                <span class="field-col-actions" *ngIf="canAdmin">
+                  <button
+                    type="button"
+                    class="btn-icon btn-icon-success"
+                    (click)="onSaveField(field.id!)"
+                    title="Save changes"
+                    [disabled]="isLoading || !editingFieldName"
+                  >
+                    ✔️
+                  </button>
+                  <button
+                    type="button"
+                    class="btn-icon"
+                    (click)="onCancelEditField()"
+                    title="Cancel"
+                  >
+                    ❌
+                  </button>
+                </span>
+              </ng-template>
+            </div>
+          </div>
+        </div>
+
+        <ng-template #noFields>
+          <p class="text-muted" style="font-style: italic; margin-bottom: 1.5rem">
+            No custom metadata fields have been added yet.
+          </p>
+        </ng-template>
+
+        <!-- Add New Custom Field Form (Only if canAdmin) -->
+        <div
+          class="add-field-form"
+          *ngIf="canAdmin"
+          style="
+            margin-top: 1.5rem;
+            padding-top: 1.5rem;
+            border-top: 1px dashed var(--border-color);
+          "
+        >
+          <h4>Add New Custom Field</h4>
+          <div class="add-field-row">
+            <div class="form-group" style="margin: 0">
+              <input
+                type="text"
+                [(ngModel)]="newFieldName"
+                [ngModelOptions]="{ standalone: true }"
+                placeholder="Field name (e.g. genre)"
+                class="form-control"
+              />
+            </div>
+            <div class="form-group" style="margin: 0">
+              <select
+                [(ngModel)]="newFieldType"
+                [ngModelOptions]="{ standalone: true }"
+                class="form-control"
+              >
+                <option value="TEXT">Text</option>
+                <option value="INTEGER">Integer</option>
+                <option value="REAL">Real (Decimal)</option>
+                <option value="BOOLEAN">Boolean</option>
+                <option value="COORDINATE">Coordinate</option>
+              </select>
+            </div>
+            <div
+              class="form-group"
+              style="
+                margin: 0;
+                display: flex;
+                align-items: center;
+                gap: 0.5rem;
+                white-space: nowrap;
+                color: var(--text-secondary);
+              "
+            >
+              <label
+                class="checkbox-container"
+                style="display: flex; align-items: center; gap: 0.5rem; cursor: pointer"
+              >
+                <input
+                  type="checkbox"
+                  [(ngModel)]="newFieldIsIndexed"
+                  [ngModelOptions]="{ standalone: true }"
+                />
+                <span>Indexed</span>
+              </label>
+            </div>
+            <button
+              type="button"
+              class="btn btn-primary"
+              (click)="onAddField()"
+              [disabled]="isLoading || !newFieldName"
+              style="padding: 0.5rem 1.5rem"
+            >
+              Add
+            </button>
           </div>
         </div>
       </div>
 
-      <ng-template #noFields>
-        <p class="text-muted" style="font-style: italic; margin-bottom: 1.5rem;">No custom metadata fields have been added yet.</p>
-      </ng-template>
+      <div class="settings-card">
+        <h3>Configuration</h3>
 
-      <!-- Add New Custom Field Form (Only if canAdmin) -->
-      <div class="add-field-form" *ngIf="canAdmin" style="margin-top: 1.5rem; padding-top: 1.5rem; border-top: 1px dashed var(--border-color);">
-        <h4>Add New Custom Field</h4>
-        <div class="add-field-row">
-          <div class="form-group" style="margin: 0;">
-            <input type="text" [(ngModel)]="newFieldName" [ngModelOptions]="{standalone: true}" placeholder="Field name (e.g. genre)" class="form-control">
+        <div class="form-group">
+          <label class="form-label">Content Type</label>
+          <input type="text" class="form-control" [value]="db.content_type | titlecase" readonly />
+        </div>
+
+        <div [ngSwitch]="db.content_type">
+          <ng-container *ngSwitchCase="'image'">
+            <h4 class="sub-heading">Image Settings</h4>
+            <div class="form-group">
+              <label for="auto_conversion_image" class="form-label">Auto-Conversion</label>
+              <select
+                id="auto_conversion_image"
+                formControlName="auto_conversion"
+                class="form-control"
+              >
+                <option value="">None</option>
+                <option value="image/jpeg">JPEG</option>
+                <option value="image/webp">WebP</option>
+                <option value="image/avif">AVIF</option>
+              </select>
+              <small class="text-muted">Converts uploads to the selected format.</small>
+            </div>
+
+            <div class="form-group">
+              <label for="create_previews_image" class="form-label">Generate Previews</label>
+              <div class="bool-field-container">
+                <label class="toggle-switch">
+                  <input
+                    type="checkbox"
+                    id="create_previews_image"
+                    formControlName="create_preview"
+                  />
+                  <span class="toggle-slider"></span>
+                </label>
+                <span class="bool-field-value">
+                  {{ settingsForm.get('create_preview')?.value ? 'True' : 'False' }}
+                </span>
+              </div>
+              <small class="text-muted">Generates WebP thumbnails on upload.</small>
+            </div>
+          </ng-container>
+
+          <ng-container *ngSwitchCase="'audio'">
+            <h4 class="sub-heading">Audio Settings</h4>
+            <div class="form-group">
+              <label for="auto_conversion_audio" class="form-label">Auto-Conversion</label>
+              <select
+                id="auto_conversion_audio"
+                formControlName="auto_conversion"
+                class="form-control"
+              >
+                <option value="">None</option>
+                <option value="audio/flac">FLAC</option>
+                <option value="audio/opus">Opus</option>
+              </select>
+              <small class="text-muted">Converts uploads to the selected format.</small>
+            </div>
+
+            <div class="form-group">
+              <label for="create_previews_audio" class="form-label">Generate Previews</label>
+              <div class="bool-field-container">
+                <label class="toggle-switch">
+                  <input
+                    type="checkbox"
+                    id="create_previews_audio"
+                    formControlName="create_preview"
+                  />
+                  <span class="toggle-slider"></span>
+                </label>
+                <span class="bool-field-value">
+                  {{ settingsForm.get('create_preview')?.value ? 'True' : 'False' }}
+                </span>
+              </div>
+              <small class="text-muted">Generates WebP thumbnails on upload.</small>
+            </div>
+          </ng-container>
+
+          <ng-container *ngSwitchCase="'video'">
+            <h4 class="sub-heading">Video Settings</h4>
+            <div class="form-group">
+              <label for="auto_conversion_video" class="form-label">Auto-Conversion</label>
+              <select
+                id="auto_conversion_video"
+                formControlName="auto_conversion"
+                class="form-control"
+              >
+                <option value="">None</option>
+                <option value="video/mp4">MP4 (H.264 codec)</option>
+                <option value="video/webm">WebM (AV1 codec)</option>
+              </select>
+              <small class="text-muted"
+                >Converts uploads to the selected format. Transcoding videos can take significant
+                time.</small
+              >
+            </div>
+
+            <div class="form-group">
+              <label for="create_previews_video" class="form-label">Generate Previews</label>
+              <div class="bool-field-container">
+                <label class="toggle-switch">
+                  <input
+                    type="checkbox"
+                    id="create_previews_video"
+                    formControlName="create_preview"
+                  />
+                  <span class="toggle-slider"></span>
+                </label>
+                <span class="bool-field-value">
+                  {{ settingsForm.get('create_preview')?.value ? 'True' : 'False' }}
+                </span>
+              </div>
+              <small class="text-muted">Generates WebP thumbnails on upload.</small>
+            </div>
+          </ng-container>
+
+          <ng-container *ngSwitchCase="'file'">
+            <h4 class="sub-heading">File Settings</h4>
+            <p class="text-muted">
+              No specific configuration is available for 'Generic File' databases.
+            </p>
+          </ng-container>
+        </div>
+
+        <h4 class="sub-heading">Housekeeping Rules</h4>
+        <div formGroupName="housekeeping">
+          <div class="form-grid-three">
+            <div class="form-group">
+              <label class="form-label">Run Interval</label>
+              <div style="display: flex; gap: 0.5rem">
+                <input
+                  type="number"
+                  formControlName="interval_value"
+                  class="form-control"
+                  min="0"
+                  [readOnly]="!canAdmin"
+                />
+                <select
+                  formControlName="interval_unit"
+                  class="form-control"
+                  style="width: 100px"
+                  *ngIf="canAdmin"
+                >
+                  <option value="s">Seconds</option>
+                  <option value="m">Minutes</option>
+                  <option value="h">Hours</option>
+                  <option value="d">Days</option>
+                </select>
+              </div>
+              <small class="text-muted">Set to 0 to disable automated runs.</small>
+            </div>
+
+            <div class="form-group">
+              <label class="form-label form-label-helper">
+                <span>Max Disk Space</span>
+              </label>
+              <div style="display: flex; gap: 0.5rem">
+                <input
+                  type="number"
+                  formControlName="disk_space_value"
+                  class="form-control"
+                  min="0"
+                  [readOnly]="!canAdmin"
+                />
+                <select
+                  formControlName="disk_space_unit"
+                  class="form-control"
+                  style="width: 100px"
+                  *ngIf="canAdmin"
+                >
+                  <option value="B">Bytes</option>
+                  <option value="K">KB</option>
+                  <option value="M">MB</option>
+                  <option value="G">GB</option>
+                  <option value="T">TB</option>
+                </select>
+              </div>
+              <small class="text-muted">Set to 0 to disable size limit.</small>
+            </div>
+
+            <div class="form-group">
+              <label class="form-label form-label-helper">
+                <span>Max Entry Age</span>
+              </label>
+              <div style="display: flex; gap: 0.5rem">
+                <input
+                  type="number"
+                  formControlName="max_age_value"
+                  class="form-control"
+                  min="0"
+                  [readOnly]="!canAdmin"
+                />
+                <select
+                  formControlName="max_age_unit"
+                  class="form-control"
+                  style="width: 100px"
+                  *ngIf="canAdmin"
+                >
+                  <option value="s">Seconds</option>
+                  <option value="m">Minutes</option>
+                  <option value="h">Hours</option>
+                  <option value="d">Days</option>
+                </select>
+              </div>
+              <small class="text-muted">Set to 0 to disable age limit.</small>
+            </div>
           </div>
-          <div class="form-group" style="margin: 0;">
-            <select [(ngModel)]="newFieldType" [ngModelOptions]="{standalone: true}" class="form-control">
-              <option value="TEXT">Text</option>
-              <option value="INTEGER">Integer</option>
-              <option value="REAL">Real (Decimal)</option>
-              <option value="BOOLEAN">Boolean</option>
-              <option value="COORDINATE">Coordinate</option>
-            </select>
+          <div *ngIf="housekeepingParseWarning" class="form-error">
+            {{ housekeepingParseWarning }}
           </div>
-          <div class="form-group" style="margin: 0; display: flex; align-items: center; gap: 0.5rem; white-space: nowrap; color: var(--text-secondary);">
-            <label class="checkbox-container" style="display: flex; align-items: center; gap: 0.5rem; cursor: pointer;">
-              <input type="checkbox" [(ngModel)]="newFieldIsIndexed" [ngModelOptions]="{standalone: true}">
-              <span>Indexed</span>
-            </label>
-          </div>
-          <button type="button" class="btn btn-primary" (click)="onAddField()" [disabled]="isLoading || !newFieldName" style="padding: 0.5rem 1.5rem;">
-            Add
+        </div>
+
+        <div class="form-actions">
+          <button
+            *ngIf="canAdmin"
+            type="submit"
+            class="btn btn-primary"
+            [disabled]="
+              settingsForm.invalid ||
+              settingsForm.pristine ||
+              isLoading ||
+              hasUnparseableHousekeeping
+            "
+          >
+            {{ isLoading ? 'Saving...' : 'Save Changes' }}
+          </button>
+          <button
+            *ngIf="canDelete"
+            type="button"
+            class="btn btn-secondary"
+            (click)="onTriggerHousekeeping()"
+            [disabled]="isLoading"
+          >
+            {{ isLoading ? 'Running...' : 'Run Housekeeping Now' }}
           </button>
         </div>
       </div>
-    </div>
+    </form>
 
-    <div class="settings-card">
-      <h3>Configuration</h3>
-      
-      <div class="form-group">
-        <label class="form-label">Content Type</label>
-        <input type="text" class="form-control" [value]="db.content_type | titlecase" readonly>
-      </div>
+    <div class="settings-card" *ngIf="canCreate">
+      <h3>Data Management</h3>
+      <p class="text-muted" style="margin-bottom: 1.5rem">
+        Import new entries from a ZIP archive or export your existing database structure and media.
+      </p>
 
-      <div [ngSwitch]="db.content_type">
-        
-        <ng-container *ngSwitchCase="'image'">
-          <h4 class="sub-heading">Image Settings</h4>
-          <div class="form-group">
-            <label for="auto_conversion_image" class="form-label">Auto-Conversion</label>
-            <select id="auto_conversion_image" formControlName="auto_conversion" class="form-control">
-              <option value="">None</option>
-              <option value="image/jpeg">JPEG</option>
-              <option value="image/webp">WebP</option>
-              <option value="image/avif">AVIF</option>
-            </select>
-            <small class="text-muted">Converts uploads to the selected format.</small>
-          </div>
+      <div style="display: flex; gap: 12px">
+        <!--An export button will come here some day...-->
 
-          <div class="form-group">
-            <label for="create_previews_image" class="form-label">Generate Previews</label>
-            <div class="bool-field-container">
-              <label class="toggle-switch">
-                <input type="checkbox" id="create_previews_image" formControlName="create_preview">
-                <span class="toggle-slider"></span>
-              </label>
-              <span class="bool-field-value">
-                {{ settingsForm.get('create_preview')?.value ? 'True' : 'False' }}
-              </span>
-            </div>
-            <small class="text-muted">Generates WebP thumbnails on upload.</small>
-          </div>
-        </ng-container>
-
-        <ng-container *ngSwitchCase="'audio'">
-          <h4 class="sub-heading">Audio Settings</h4>
-          <div class="form-group">
-            <label for="auto_conversion_audio" class="form-label">Auto-Conversion</label>
-            <select id="auto_conversion_audio" formControlName="auto_conversion" class="form-control">
-              <option value="">None</option>
-              <option value="audio/flac">FLAC</option>
-              <option value="audio/opus">Opus</option>
-            </select>
-            <small class="text-muted">Converts uploads to the selected format.</small>
-          </div>
-          
-          <div class="form-group">
-            <label for="create_previews_audio" class="form-label">Generate Previews</label>
-            <div class="bool-field-container">
-              <label class="toggle-switch">
-                <input type="checkbox" id="create_previews_audio" formControlName="create_preview">
-                <span class="toggle-slider"></span>
-              </label>
-              <span class="bool-field-value">
-                {{ settingsForm.get('create_preview')?.value ? 'True' : 'False' }}
-              </span>
-            </div>
-            <small class="text-muted">Generates WebP thumbnails on upload.</small>
-          </div>
-        </ng-container>
-
-        <ng-container *ngSwitchCase="'video'">
-          <h4 class="sub-heading">Video Settings</h4>
-          <div class="form-group">
-            <label for="auto_conversion_video" class="form-label">Auto-Conversion</label>
-            <select id="auto_conversion_video" formControlName="auto_conversion" class="form-control">
-              <option value="">None</option>
-              <option value="video/mp4">MP4 (H.264 codec)</option>
-              <option value="video/webm">WebM (AV1 codec)</option>
-            </select>
-            <small class="text-muted">Converts uploads to the selected format. Transcoding videos can take significant time.</small>
-          </div>
-          
-          <div class="form-group">
-            <label for="create_previews_video" class="form-label">Generate Previews</label>
-            <div class="bool-field-container">
-              <label class="toggle-switch">
-                <input type="checkbox" id="create_previews_video" formControlName="create_preview">
-                <span class="toggle-slider"></span>
-              </label>
-              <span class="bool-field-value">
-                {{ settingsForm.get('create_preview')?.value ? 'True' : 'False' }}
-              </span>
-            </div>
-            <small class="text-muted">Generates WebP thumbnails on upload.</small>
-          </div>
-        </ng-container>
-
-        <ng-container *ngSwitchCase="'file'">
-          <h4 class="sub-heading">File Settings</h4>
-          <p class="text-muted">No specific configuration is available for 'Generic File' databases.</p>
-        </ng-container>
-
-      </div>
-
-      <h4 class="sub-heading">Housekeeping Rules</h4>
-      <div formGroupName="housekeeping">
-         <div class="form-grid-three">
-          
-          <div class="form-group">
-            <label class="form-label">Run Interval</label>
-            <div style="display: flex; gap: 0.5rem;">
-              <input type="number" formControlName="interval_value" class="form-control" min="0" [readOnly]="!canAdmin">
-              <select formControlName="interval_unit" class="form-control" style="width: 100px;" *ngIf="canAdmin">
-                <option value="m">Minutes</option>
-                <option value="h">Hours</option>
-                <option value="d">Days</option>
-              </select>
-            </div>
-            <small class="text-muted">Set to 0 to disable automated runs.</small>
-          </div>
-          
-          <div class="form-group">
-            <label class="form-label form-label-helper">
-              <span>Max Disk Space</span>
-            </label>
-            <div style="display: flex; gap: 0.5rem;">
-              <input type="number" formControlName="disk_space_value" class="form-control" min="0" [readOnly]="!canAdmin">
-              <select formControlName="disk_space_unit" class="form-control" style="width: 100px;" *ngIf="canAdmin">
-                <option value="M">MB</option>
-                <option value="G">GB</option>
-                <option value="T">TB</option>
-              </select>
-            </div>
-            <small class="text-muted">Set to 0 to disable size limit.</small>
-          </div>
-          
-          <div class="form-group">
-            <label class="form-label form-label-helper">
-              <span>Max Entry Age</span>
-            </label>
-            <div style="display: flex; gap: 0.5rem;">
-              <input type="number" formControlName="max_age_value" class="form-control" min="0" [readOnly]="!canAdmin">
-              <select formControlName="max_age_unit" class="form-control" style="width: 100px;" *ngIf="canAdmin">
-                <option value="h">Hours</option>
-                <option value="d">Days</option>
-              </select>
-            </div>
-            <small class="text-muted">Set to 0 to disable age limit.</small>
-          </div>
-
-        </div>
-      </div>
-      
-      <div class="form-actions">
-        <button 
-          *ngIf="canAdmin"
-          type="submit" 
+        <button
+          type="button"
           class="btn btn-primary"
-          [disabled]="settingsForm.invalid || settingsForm.pristine || isLoading">
-          {{ isLoading ? 'Saving...' : 'Save Changes' }}
-        </button>
-        <button 
-          *ngIf="canDelete"
-          type="button" 
-          class="btn btn-secondary"
-          (click)="onTriggerHousekeeping()"
-          [disabled]="isLoading">
-          {{ isLoading ? 'Running...' : 'Run Housekeeping Now' }}
+          [routerLink]="['/dashboard/db', db.id, 'import']"
+        >
+          Import Archive
         </button>
       </div>
     </div>
-  </form>
 
-  <div class="settings-card" *ngIf="canCreate">
-    <h3>Data Management</h3>
-    <p class="text-muted" style="margin-bottom: 1.5rem;">Import new entries from a ZIP archive or export your existing database structure and media.</p>
-    
-    <div style="display: flex; gap: 12px;">
-       <!--An export button will come here some day...-->
-
-      <button 
-        type="button" 
-        class="btn btn-primary" 
-        [routerLink]="['/dashboard/db', db.id, 'import']">
-        Import Archive
-      </button>
+    <div class="settings-card danger-zone" *ngIf="isGlobalAdmin">
+      <h3>Danger Zone</h3>
+      <div class="danger-content">
+        <p>
+          Deleting a database is permanent and cannot be undone. This will remove all entries and
+          metadata associated with it.
+        </p>
+        <button class="btn btn-danger" (click)="onDeleteDatabase()" [disabled]="isLoading">
+          Delete this Database
+        </button>
+      </div>
     </div>
-  </div>
-
-  <div class="settings-card danger-zone" *ngIf="isGlobalAdmin">
-     <h3>Danger Zone</h3>
-    <div class="danger-content">
-      <p>Deleting a database is permanent and cannot be undone. This will remove all entries and metadata associated with it.</p>
-      <button 
-        class="btn btn-danger" 
-        (click)="onDeleteDatabase()"
-        [disabled]="isLoading">
-        Delete this Database
-      </button>
-    </div>
-  </div>
   </div>
 </div>
 
 <ng-template #loadingOrError>
   <div class="state-message">
-    <p>{{ isLoading ? 'Loading database settings...' : 'Database not found or could not be loaded.' }}</p>
+    <p>
+      {{
+        isLoading ? 'Loading database settings...' : 'Database not found or could not be loaded.'
+      }}
+    </p>
   </div>
 </ng-template>

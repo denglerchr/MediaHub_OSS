@@ -1,21 +1,24 @@
-<div 
-  *ngIf="isOpen" 
-  class="modal-overlay" 
-  (click)="closeModal()"
-  role="dialog"
-  aria-modal="true"
-  [attr.aria-labelledby]="modalId + '-title'">
-  
-  <div class="modal-content" [class.modal-lg]="size === 'lg'" [class.modal-sm]="size === 'sm'" (click)="onContentClick($event)">
-    
+<div *ngIf="isOpen" class="modal-overlay" (click)="closeModal()">
+  <!-- FE-044: the dialog roles belong on the dialog itself (was on the backdrop);
+       tabindex="-1" makes the dialog focusable for the initial-focus/restore logic. -->
+  <div
+    class="modal-content"
+    role="dialog"
+    aria-modal="true"
+    [attr.aria-labelledby]="modalId + '-title'"
+    tabindex="-1"
+    #modalContent
+    [class.modal-lg]="size === 'lg'"
+    [class.modal-sm]="size === 'sm'"
+    (click)="onContentClick($event)"
+  >
     <div class="modal-header">
       <h2 class="modal-title" [id]="modalId + '-title'">{{ modalTitle }}</h2>
       <button (click)="closeModal()" class="close-button" aria-label="Close modal">&times;</button>
     </div>
-    
+
     <div class="modal-body">
       <ng-content></ng-content>
     </div>
-    
   </div>
 </div>

@@ -1,18 +1,45 @@
 <div class="audit-log-container page-container">
-  
   <div class="sticky-header">
-    <div style="display: flex; align-items: center; gap: 0.75rem; min-width: 0;">
+    <div style="display: flex; align-items: center; gap: 0.75rem; min-width: 0">
       <a routerLink="/dashboard" class="back-btn" title="Back to Overview">
-        <svg xmlns="http://www.w3.org/2000/svg" width="1.5em" height="1.5em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <svg
+          xmlns="http://www.w3.org/2000/svg"
+          width="1.5em"
+          height="1.5em"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="2"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+        >
           <line x1="19" y1="12" x2="5" y2="12"></line>
           <polyline points="12 19 5 12 12 5"></polyline>
         </svg>
       </a>
       <h2 class="shortened-title" title="System Audit Logs">System Audit Logs</h2>
     </div>
-    
-    <button class="btn btn-outline" style="padding: 0.5rem 0.75rem;" (click)="toggleFilter()" title="Toggle Filters">
-      <span class="badge" style="background-color: var(--button-primary-bg); color: var(--text-primary); border-radius: 0.25rem; padding: 0.1rem 0.35rem; margin-right: 0.35rem; font-size: 0.75rem; font-weight: bold;" *ngIf="activeFiltersCount > 0">{{ activeFiltersCount }}</span>
+
+    <button
+      class="btn btn-outline"
+      style="padding: 0.5rem 0.75rem"
+      (click)="toggleFilter()"
+      title="Toggle Filters"
+    >
+      <span
+        class="badge"
+        style="
+          background-color: var(--button-primary-bg);
+          color: var(--text-primary);
+          border-radius: 0.25rem;
+          padding: 0.1rem 0.35rem;
+          margin-right: 0.35rem;
+          font-size: 0.75rem;
+          font-weight: bold;
+        "
+        *ngIf="activeFiltersCount > 0"
+        >{{ activeFiltersCount }}</span
+      >
       Filter
     </button>
   </div>
@@ -20,79 +47,105 @@
   <div class="filters-container" [class.collapsed]="isFilterCollapsed">
     <div class="form-group flex-1">
       <label class="form-label">Start Date (Local)</label>
-      <input type="datetime-local" class="form-control" [(ngModel)]="startDate" [disabled]="isLoading" appDatetimeDefault>
+      <input
+        type="datetime-local"
+        class="form-control"
+        [(ngModel)]="startDate"
+        (ngModelChange)="onDateChange()"
+        [disabled]="isLoading"
+        appDatetimeDefault
+      />
     </div>
-    
+
     <div class="form-group flex-1">
       <label class="form-label">End Date (Local)</label>
-      <input type="datetime-local" class="form-control" [(ngModel)]="endDate" [disabled]="isLoading" appDatetimeDefault>
+      <!-- FE-048: end-of-range default is 23:59 (the generic 00:00 default silently excluded the whole selected day) -->
+      <input
+        type="datetime-local"
+        class="form-control"
+        [(ngModel)]="endDate"
+        (ngModelChange)="onDateChange()"
+        [disabled]="isLoading"
+        appDatetimeDefault="end"
+      />
     </div>
-    
+
     <div class="filter-actions">
-      <button class="btn btn-secondary" (click)="clearFilters()" [disabled]="isLoading || (!startDate && !endDate)">
+      <button
+        class="btn btn-secondary"
+        (click)="clearFilters()"
+        [disabled]="isLoading || (!startDate && !endDate)"
+      >
         Clear Filters
       </button>
       <button class="btn btn-primary btn-icon" (click)="refresh()" [disabled]="isLoading">
-        <img src="assets/icons/refresh-icon.svg" alt="Refresh" class="refresh-icon" [class.spin]="isLoading">
+        <img
+          src="assets/icons/refresh-icon.svg"
+          alt="Refresh"
+          class="refresh-icon"
+          [class.spin]="isLoading"
+        />
         {{ isLoading ? 'Loading...' : 'Refresh' }}
       </button>
     </div>
   </div>
 
   <div class="scroll-content">
+    <div *ngIf="isLoading && logRows.length === 0" class="loading-state">
+      <p>Loading audit logs...</p>
+    </div>
 
-  <div *ngIf="isLoading && logs.length === 0" class="loading-state">
-    <p>Loading audit logs...</p>
-  </div>
+    <div class="table-wrapper" *ngIf="!isLoading || logRows.length > 0">
+      <table class="table">
+        <thead>
+          <tr>
+            <th style="width: 80px">ID</th>
+            <th style="width: 200px">Timestamp</th>
+            <th style="width: 150px">Action</th>
+            <th style="width: 150px">Actor</th>
+            <th style="width: 250px">Resource</th>
+            <th>Details</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr *ngIf="logRows.length === 0 && !isLoading">
+            <td colspan="6" class="empty-state text-center">
+              No audit logs found matching the criteria.
+            </td>
+          </tr>
 
-  <div class="table-wrapper" *ngIf="!isLoading || logs.length > 0">
-    <table class="table">
-      <thead>
-        <tr>
-          <th style="width: 80px;">ID</th>
-          <th style="width: 200px;">Timestamp</th>
-          <th style="width: 150px;">Action</th>
-          <th style="width: 150px;">Actor</th>
-          <th style="width: 250px;">Resource</th>
-          <th>Details</th>
-        </tr>
-      </thead>
-      <tbody>
-        <tr *ngIf="logs.length === 0 && !isLoading">
-          <td colspan="6" class="empty-state text-center">
-            No audit logs found matching the criteria.
-          </td>
-        </tr>
-        
-        <tr *ngFor="let log of logs; trackBy: trackByLogId">
-          <td class="log-id">#{{ log.id }}</td>
-          <td>{{ log.timestamp | date:'yyyy-MM-dd HH:mm:ss' }}</td>
-          <td>
-            <span class="action-badge">{{ log.action }}</span>
-          </td>
-          <td style="font-weight: 500; color: var(--text-primary);">
-            {{ log.actor }}
-          </td>
-          <td class="resource-text">
-            {{ log.resource }}
-          </td>
-          <td class="details-text">
-            {{ formatDetails(log.details) }}
-          </td>
-        </tr>
-      </tbody>
-    </table>
-  </div>
+          <tr *ngFor="let log of logRows; trackBy: trackByLogId">
+            <td class="log-id">#{{ log.id }}</td>
+            <td>{{ log.timestamp | date: 'yyyy-MM-dd HH:mm:ss' }}</td>
+            <td>
+              <span class="action-badge">{{ log.action }}</span>
+            </td>
+            <td style="font-weight: 500; color: var(--text-primary)">
+              {{ log.actor }}
+            </td>
+            <td class="resource-text">
+              {{ log.resource }}
+            </td>
+            <td class="details-text">
+              {{ log.detailsText }}
+            </td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
 
-  <div class="pagination-controls" *ngIf="logs.length > 0 || currentPage > 1">
-    <button class="btn btn-secondary" [disabled]="offset === 0 || isLoading" (click)="previousPage()">
-      &laquo; Previous
-    </button>
-    <span class="page-indicator">Page {{ currentPage }}</span>
-    <button class="btn btn-secondary" [disabled]="!hasNextPage || isLoading" (click)="nextPage()">
-      Next &raquo;
-    </button>
-  </div>
-
+    <div class="pagination-controls" *ngIf="logRows.length > 0 || currentPage > 1">
+      <button
+        class="btn btn-secondary"
+        [disabled]="offset === 0 || isLoading"
+        (click)="previousPage()"
+      >
+        &laquo; Previous
+      </button>
+      <span class="page-indicator">Page {{ currentPage }}</span>
+      <button class="btn btn-secondary" [disabled]="!hasNextPage || isLoading" (click)="nextPage()">
+        Next &raquo;
+      </button>
+    </div>
   </div>
 </div>

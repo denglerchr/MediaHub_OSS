@@ -1,81 +1,150 @@
 <div class="groups-container" [class.selection-active]="selectedIds.size > 0">
-  <div class="date-group" *ngFor="let group of dateGroups; trackBy: trackByDateStr"
-       [class.large-group]="isLargeGroup(group)"
-       [style.flex-grow]="isLargeGroup(group) ? 1 : getGroupAspectRatio(group)"
-       [style.flex-basis]="isLargeGroup(group) ? '100%' : 'calc(var(--tile-height) * ' + getGroupAspectRatio(group) + ')'">
+  <div
+    class="date-group"
+    *ngFor="let group of dateGroups; trackBy: trackByDateStr"
+    [class.large-group]="group.isLarge"
+    [style.flex-grow]="group.isLarge ? 1 : group.aspectRatio"
+    [style.flex-basis]="
+      group.isLarge ? '100%' : 'calc(var(--tile-height) * ' + group.aspectRatio + ')'
+    "
+  >
     <div class="group-header">{{ group.dateStr }}</div>
-    <div class="group-items" [class.nowrap]="!isLargeGroup(group)">
-      <div 
-        *ngFor="let entry of group.entries; trackBy: trackById" 
+    <div class="group-items" [class.nowrap]="!group.isLarge">
+      <div
+        *ngFor="let entry of group.entries; trackBy: trackById"
         class="grid-card"
         [class.selected]="isSelected(entry)"
         (click)="onEntryClick(entry, $event)"
         [style.flex-grow]="getAspectRatio(entry)"
-        [style.flex-basis]="'calc(var(--tile-height) * ' + getAspectRatio(entry) + ')'">
-        
+        [style.flex-basis]="'calc(var(--tile-height) * ' + getAspectRatio(entry) + ')'"
+      >
         <div class="selection-overlay" (click)="onCheckboxClick(entry, $event)">
           <div class="checkbox-circle" [class.checked]="isSelected(entry)">
-            <svg *ngIf="isSelected(entry)" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor">
-              <path fill-rule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clip-rule="evenodd" />
+            <svg
+              *ngIf="isSelected(entry)"
+              xmlns="http://www.w3.org/2000/svg"
+              viewBox="0 0 20 20"
+              fill="currentColor"
+            >
+              <path
+                fill-rule="evenodd"
+                d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z"
+                clip-rule="evenodd"
+              />
             </svg>
           </div>
         </div>
 
         <div class="grid-card-preview">
           <ng-container [ngSwitch]="entry.status">
-            
             <div *ngSwitchCase="'queued'" class="grid-card-placeholder status-queued">
-              <svg class="placeholder-icon" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <svg
+                class="placeholder-icon"
+                xmlns="http://www.w3.org/2000/svg"
+                fill="none"
+                viewBox="0 0 24 24"
+                stroke="currentColor"
+              >
                 <circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="2"></circle>
-                <polyline points="12 6 12 12 16 14" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"></polyline>
+                <polyline
+                  points="12 6 12 12 16 14"
+                  stroke="currentColor"
+                  stroke-width="2"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                ></polyline>
               </svg>
               <span>QUEUED</span>
             </div>
 
             <div *ngSwitchCase="'processing'" class="grid-card-placeholder status-processing">
-              <svg class="placeholder-icon processing-icon" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-                <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+              <svg
+                class="placeholder-icon processing-icon"
+                xmlns="http://www.w3.org/2000/svg"
+                fill="none"
+                viewBox="0 0 24 24"
+              >
+                <circle
+                  class="opacity-25"
+                  cx="12"
+                  cy="12"
+                  r="10"
+                  stroke="currentColor"
+                  stroke-width="4"
+                ></circle>
+                <path
+                  class="opacity-75"
+                  fill="currentColor"
+                  d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
+                ></path>
               </svg>
               <span>PROCESSING</span>
             </div>
 
             <div *ngSwitchCase="'error'" class="grid-card-placeholder status-error">
-              <svg class="placeholder-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor">
-                <path fill-rule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 3.006-1.742 3.006H4.42c-1.53 0-2.493-1.672-1.743-3.006l5.58-9.92zM10 13a1 1 0 100-2 1 1 0 000 2zm-1-8a1 1 0 011 1v3a1 1 0 11-2 0V6a1 1 0 011-1z" clip-rule="evenodd" />
+              <svg
+                class="placeholder-icon"
+                xmlns="http://www.w3.org/2000/svg"
+                viewBox="0 0 20 20"
+                fill="currentColor"
+              >
+                <path
+                  fill-rule="evenodd"
+                  d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 3.006-1.742 3.006H4.42c-1.53 0-2.493-1.672-1.743-3.006l5.58-9.92zM10 13a1 1 0 100-2 1 1 0 000 2zm-1-8a1 1 0 011 1v3a1 1 0 11-2 0V6a1 1 0 011-1z"
+                  clip-rule="evenodd"
+                />
               </svg>
               <span>ERROR</span>
             </div>
 
             <ng-container *ngSwitchCase="'ready'">
-              <img *ngIf="!failedImageIds.has(entry.id)"
-                   [secureSrc]="getPreviewUrl(entry)" 
-                   (imageError)="onImageError(entry.id)"
-                   (aspectLoaded)="onAspectLoaded(entry.id, $event)"
-                   class="grid-card-img" 
-                   alt="Preview for {{entry.id}}"/>
+              <img
+                *ngIf="!failedImageIds.has(entry.id)"
+                [secureSrc]="getPreviewUrl(entry)"
+                (imageError)="onImageError(entry.id)"
+                (aspectLoaded)="onAspectLoaded(entry.id, $event)"
+                class="grid-card-img"
+                alt="Preview for {{ entry.id }}"
+              />
 
               <div *ngIf="failedImageIds.has(entry.id)" class="grid-card-placeholder">
-                 <svg class="placeholder-icon" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
-                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 3l18 18" />
+                <svg
+                  class="placeholder-icon"
+                  xmlns="http://www.w3.org/2000/svg"
+                  fill="none"
+                  viewBox="0 0 24 24"
+                  stroke="currentColor"
+                >
+                  <path
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                    stroke-width="2"
+                    d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"
+                  />
+                  <path
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                    stroke-width="2"
+                    d="M3 3l18 18"
+                  />
                 </svg>
                 <span>NO PREVIEW</span>
               </div>
             </ng-container>
 
             <ng-container *ngSwitchDefault>
-               <img *ngIf="!failedImageIds.has(entry.id)"
-                   [secureSrc]="getPreviewUrl(entry)" 
-                   (imageError)="onImageError(entry.id)"
-                   (aspectLoaded)="onAspectLoaded(entry.id, $event)"
-                   class="grid-card-img" 
-                   alt="Preview"/>
-                <div *ngIf="failedImageIds.has(entry.id)" class="grid-card-placeholder">
-                 <span>NO PREVIEW</span>
-               </div>
+              <img
+                *ngIf="!failedImageIds.has(entry.id)"
+                [secureSrc]="getPreviewUrl(entry)"
+                (imageError)="onImageError(entry.id)"
+                (aspectLoaded)="onAspectLoaded(entry.id, $event)"
+                class="grid-card-img"
+                alt="Preview"
+              />
+              <div *ngIf="failedImageIds.has(entry.id)" class="grid-card-placeholder">
+                <span>NO PREVIEW</span>
+              </div>
             </ng-container>
-
           </ng-container>
         </div>
       </div>

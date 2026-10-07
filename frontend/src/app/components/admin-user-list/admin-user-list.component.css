@@ -10,18 +10,9 @@
 }
 
 /* --- Headers & States --- */
-.header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 1rem;
-}
-
-.header h2 {
-  margin: 0;
-}
-
-.loading-state, .empty-state, .empty-state-detail {
+.loading-state,
+.empty-state,
+.empty-state-detail {
   padding: 1.5rem;
   color: var(--text-muted);
 }
@@ -169,7 +160,7 @@
 }
 
 /* Keep checkboxes centered in the table cells */
-.table td input[type="checkbox"] {
+.table td input[type='checkbox'] {
   display: block;
 }
 
@@ -272,7 +263,7 @@
 }
 
 .hint-code {
-  font-family: SFMono-Regular, Consolas, "Liberation Mono", Menlo, monospace;
+  font-family: SFMono-Regular, Consolas, 'Liberation Mono', Menlo, monospace;
   background-color: var(--input-bg);
   padding: 0.15rem 0.4rem;
   border-radius: 0.25rem;
@@ -282,23 +273,4 @@
 }
 
 /* Action button icons */
-.btn-icon {
-  background: transparent;
-  border: none;
-  color: var(--text-muted);
-  border-radius: 0.375rem;
-  cursor: pointer;
-  display: inline-flex;
-  padding: 0.35rem;
-  transition: all 0.2s ease;
-}
-
-.btn-icon:hover {
-  background-color: var(--item-bg-hover);
-  color: var(--text-primary);
-}
-
-.btn-icon-danger:hover {
-  background-color: rgba(229, 62, 98, 0.15);
-  color: var(--text-danger);
-}
+/* FE-040: .btn-icon/.btn-icon:hover/.btn-icon-danger:hover hoisted to styles.css */

@@ -13,14 +13,20 @@ import { Router } from '@angular/router';
   selector: 'app-overview-page',
   templateUrl: './overview-page.component.html',
   styleUrls: ['./overview-page.component.css'],
-  standalone: false
+  standalone: false,
 })
 export class OverviewPageComponent implements OnInit, OnDestroy {
   public databases: Database[] = [];
   public currentUser: User | null = null;
   public dbPreviews: Record<string, string> = {};
   public failedPreviews = new Set<string>();
-  
+
+  // FE-034: the entry_count each preview was derived from — databases$ emits on
+  // unrelated updates and used to re-issue one searchEntries call per database on
+  // every emission. (Accepted tradeoff per the review: two changes that keep the
+  // count identical — delete one + upload one — refresh on the next count change.)
+  private previewSearchCounts = new Map<string, number>();
+
   private destroy$ = new Subject<void>();
 
   constructor(
@@ -29,16 +35,16 @@ export class OverviewPageComponent implements OnInit, OnDestroy {
     private authService: AuthService,
     private modalService: ModalService,
     private router: Router,
-    private cdr: ChangeDetectorRef
+    private cdr: ChangeDetectorRef,
   ) {}
 
   ngOnInit(): void {
-    this.authService.currentUser$.pipe(takeUntil(this.destroy$)).subscribe(user => {
+    this.authService.currentUser$.pipe(takeUntil(this.destroy$)).subscribe((user) => {
       this.currentUser = user;
       this.cdr.markForCheck();
     });
 
-    this.databaseService.databases$.pipe(takeUntil(this.destroy$)).subscribe(databases => {
+    this.databaseService.databases$.pipe(takeUntil(this.destroy$)).subscribe((databases) => {
       this.databases = databases || [];
       this.loadPreviews();
       this.cdr.markForCheck();
@@ -49,12 +55,21 @@ export class OverviewPageComponent implements OnInit, OnDestroy {
 
   private loadPreviews(): void {
     for (const db of this.databases) {
-      if (db.stats && db.stats.entry_count > 0) {
-        // Query the latest entry to use as preview
-        this.entryService.searchEntries(db.id, {
+      const entryCount = db.stats?.entry_count ?? 0;
+      // FE-034: only re-query the latest entry when the count actually changed.
+      if (entryCount <= 0 || this.previewSearchCounts.get(db.id) === entryCount) {
+        continue;
+      }
+      this.previewSearchCounts.set(db.id, entryCount);
+
+      // Query the latest entry to use as preview
+      this.entryService
+        .searchEntries(db.id, {
           pagination: { limit: 1 },
-          sort: { field: 'timestamp', direction: 'desc' }
-        }).pipe(takeUntil(this.destroy$)).subscribe({
+          sort: { field: 'timestamp', direction: 'desc' },
+        })
+        .pipe(takeUntil(this.destroy$))
+        .subscribe({
           next: (entries) => {
             if (entries && entries.length > 0) {
               const latestEntry = entries[0];
@@ -64,20 +79,29 @@ export class OverviewPageComponent implements OnInit, OnDestroy {
           },
           error: (err) => {
             console.error(`Failed to load latest entry for database ${db.name}`, err);
-          }
+          },
         });
-      }
     }
   }
 
   public getIconForDb(db: Database): string {
     switch (db.content_type) {
-      case 'image': return 'assets/icons/image-icon.svg';
-      case 'audio': return 'assets/icons/audio-icon.svg';
-      case 'video': return 'assets/icons/video-icon.svg';
-      case 'file': return 'assets/icons/file-icon.svg';
-      default: return 'assets/icons/db-icon.svg';
+      case 'image':
+        return 'assets/icons/image-icon.svg';
+      case 'audio':
+        return 'assets/icons/audio-icon.svg';
+      case 'video':
+        return 'assets/icons/video-icon.svg';
+      case 'file':
+        return 'assets/icons/file-icon.svg';
+      default:
+        return 'assets/icons/db-icon.svg';
     }
+  }
+
+  /** FE-028: stable trackBy key for the database cards. */
+  public trackByDbId(index: number, db: Database): string {
+    return db.id;
   }
 
   public handleImageError(dbId: string): void {

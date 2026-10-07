@@ -3,55 +3,17 @@
   display: flex;
   flex-direction: column;
   height: 100%;
-  position: relative; 
+  position: relative;
 }
 
-/* --- Header Bar & View Toggle --- */
-.header-bar {
-  display: flex;
-  /* MOBILE FIRST: Stack items, but reverse the order so buttons are on top */
-  flex-direction: column-reverse; 
-  align-items: flex-end; /* Push the buttons to the right edge */
-  gap: 1rem;
-  margin-bottom: 1.5rem;
-}
-
-.header-bar .header {
-  margin-bottom: 0; 
-  width: 100%; /* Force the title wrapper to take the full width on mobile */
-  align-self: flex-start; /* Ensure the title text stays aligned to the left */
-}
-
-.header-bar .header h2 {
-  /* color and top-margin are inherited from styles.css */
-  margin-bottom: 0;
-  /* Ensure super long unbroken text wraps nicely instead of stretching the screen */
-  word-break: break-word; 
-}
-
+/* --- View Toggle --- */
 .view-mode-toggle {
   display: flex;
   background-color: var(--content-bg);
   border: 1px solid var(--border-color-light);
   border-radius: 0.375rem;
   overflow: hidden;
-  flex-shrink: 0; 
-}
-
-/* DESKTOP RESPONSIVE BREAKPOINT */
-@media (min-width: 768px) {
-  .header-bar {
-    flex-direction: row; /* Switch back to side-by-side layout */
-    align-items: center;
-    justify-content: space-between;
-  }
-  
-  .header-bar .header {
-    width: auto;
-    flex: 1 1 min-content; /* Allow shrinking but take remaining space */
-    min-width: 0; 
-    align-self: auto;
-  }
+  flex-shrink: 0;
 }
 
 .toggle-btn {
@@ -61,7 +23,7 @@
   color: var(--text-muted);
   cursor: pointer;
   transition: all 0.2s;
-  flex-shrink: 0; 
+  flex-shrink: 0;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -109,9 +71,9 @@
   color: var(--text-muted);
   /* font-size inherited globally but bumped slightly here for emphasis */
   font-size: 1.1rem;
-  background-color: var(--content-bg); 
+  background-color: var(--content-bg);
   border-radius: 0.5rem;
-  border: 1px dashed var(--border-color-light); 
+  border: 1px dashed var(--border-color-light);
 }
 
 /* --- Floating Actions Wrapper --- */
@@ -123,7 +85,7 @@
   align-items: center;
   gap: 1.5rem;
   /* UPDATED: Use the global floating z-index */
-  z-index: var(--z-floating); 
+  z-index: var(--z-floating);
 }
 
 /* Upload FAB */
@@ -156,8 +118,14 @@
 }
 
 @keyframes slideIn {
-  from { opacity: 0; transform: translateY(10px); }
-  to { opacity: 1; transform: translateY(0); }
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 
 .selection-count {
@@ -181,10 +149,4 @@
   padding: 0.4rem 0.8rem;
   /* Keep buttons small regardless of fluid typography base */
   font-size: 0.85rem;
-}
-
-@media (min-width: 1024px) {
-  .header-bar .header h2 {
-    font-size: 1.35rem;
-  }
 }

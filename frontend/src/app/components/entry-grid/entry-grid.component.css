@@ -140,17 +140,27 @@
   height: 2rem;
 }
 
-.status-queued { color: var(--text-warning); }
-.status-processing { color: var(--text-accent); }
-.status-error { color: var(--text-danger); }
+.status-queued {
+  color: var(--text-warning);
+}
+.status-processing {
+  color: var(--text-accent);
+}
+.status-error {
+  color: var(--text-danger);
+}
 
 .processing-icon {
   animation: spin 1s linear infinite;
 }
 
 @keyframes spin {
-  from { transform: rotate(0deg); }
-  to { transform: rotate(360deg); }
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .grid-card-img {

@@ -22,19 +22,20 @@ export class ConfirmationModalComponent implements OnInit, OnDestroy {
   public static readonly MODAL_ID = 'confirmationModal';
 
   // 2. Provide sensible defaults
-  modalData: ConfirmationModalData = { 
+  modalData: ConfirmationModalData = {
     message: 'Are you sure?',
     confirmText: 'Confirm',
     cancelText: 'Cancel',
-    confirmButtonClass: 'btn-danger'
+    confirmButtonClass: 'btn-danger',
   };
-  
+
   private destroy$ = new Subject<void>();
 
   constructor(private modalService: ModalService) {}
 
   ngOnInit(): void {
-    this.modalService.getModalEvents(ConfirmationModalComponent.MODAL_ID)
+    this.modalService
+      .getModalEvents(ConfirmationModalComponent.MODAL_ID)
       .pipe(takeUntil(this.destroy$))
       .subscribe((event: ModalEvent) => {
         if (event.action === 'open' && event.data) {
@@ -44,18 +45,18 @@ export class ConfirmationModalComponent implements OnInit, OnDestroy {
             message: event.data.message || 'Are you sure?',
             confirmText: event.data.confirmText || 'Confirm',
             cancelText: event.data.cancelText || 'Cancel',
-            confirmButtonClass: event.data.confirmButtonClass || 'btn-danger'
+            confirmButtonClass: event.data.confirmButtonClass || 'btn-danger',
           };
         }
       });
   }
 
   onConfirm(): void {
-    this.modalService.close(true); // Close with a `true` result
+    this.modalService.close(ConfirmationModalComponent.MODAL_ID, true); // Close with a `true` result
   }
 
   onCancel(): void {
-    this.modalService.close(false); // Close with a `false` result
+    this.modalService.close(ConfirmationModalComponent.MODAL_ID, false); // Close with a `false` result
   }
 
   ngOnDestroy(): void {

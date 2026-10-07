@@ -1,33 +1,38 @@
 <app-modal [modalId]="'editEntryModal'" [modalTitle]="'Edit Entry Metadata'">
   <div *ngIf="currentEntry && editForm && currentDatabase">
     <form [formGroup]="editForm" (ngSubmit)="onSubmit()">
-
       <div class="form-grid">
         <div class="form-group">
           <label for="edit-timestamp" class="form-label">Timestamp</label>
-          <input id="edit-timestamp" type="datetime-local" formControlName="timestamp" class="form-control">
+          <input
+            id="edit-timestamp"
+            type="datetime-local"
+            formControlName="timestamp"
+            class="form-control"
+            step="1"
+          />
         </div>
-        
+
         <div class="form-group">
           <label for="edit-filename" class="form-label">Filename</label>
-          <input id="edit-filename" type="text" formControlName="filename" class="form-control">
+          <input id="edit-filename" type="text" formControlName="filename" class="form-control" />
         </div>
       </div>
 
       <div *ngIf="currentDatabase.custom_fields.length > 0" class="custom-fields-section">
         <h4>Custom Metadata</h4>
         <div class="form-grid" formGroupName="custom_fields">
-          
-          <div *ngFor="let field of currentDatabase.custom_fields; trackBy: trackByFieldId" class="form-group">
-            
+          <div
+            *ngFor="let field of currentDatabase.custom_fields; trackBy: trackByFieldId"
+            class="form-group"
+          >
             <ng-container [ngSwitch]="field.type">
-
               <ng-container *ngSwitchCase="'BOOLEAN'">
                 <label [for]="field.name" class="form-label">{{ field.name }} (BOOLEAN)</label>
-                
+
                 <div class="bool-field-container">
                   <label class="toggle-switch">
-                    <input type="checkbox" [id]="field.name" [formControlName]="field.name">
+                    <input type="checkbox" [id]="field.name" [formControlName]="field.name" />
                     <span class="toggle-slider"></span>
                   </label>
                   <span class="bool-field-value">
@@ -38,47 +43,63 @@
 
               <ng-container *ngSwitchCase="'COORDINATE'">
                 <label class="form-label">{{ field.name }} (COORDINATE)</label>
-                <div [formGroupName]="field.name" class="coordinate-input-group" style="display: flex; gap: 0.5rem;">
-                  <input type="number"
-                         step="any"
-                         min="-90"
-                         max="90"
-                         formControlName="latitude"
-                         placeholder="Latitude (-90 to 90)"
-                         class="form-control"
-                         style="flex: 1;">
-                  <input type="number"
-                         step="any"
-                         min="-180"
-                         max="180"
-                         formControlName="longitude"
-                         placeholder="Longitude (-180 to 180)"
-                         class="form-control"
-                         style="flex: 1;">
+                <div
+                  [formGroupName]="field.name"
+                  class="coordinate-input-group"
+                  style="display: flex; gap: 0.5rem"
+                >
+                  <input
+                    type="number"
+                    step="any"
+                    min="-90"
+                    max="90"
+                    formControlName="latitude"
+                    placeholder="Latitude (-90 to 90)"
+                    class="form-control"
+                    style="flex: 1"
+                  />
+                  <input
+                    type="number"
+                    step="any"
+                    min="-180"
+                    max="180"
+                    formControlName="longitude"
+                    placeholder="Longitude (-180 to 180)"
+                    class="form-control"
+                    style="flex: 1"
+                  />
                 </div>
               </ng-container>
 
               <ng-container *ngSwitchDefault>
-                <label [for]="field.name" class="form-label">{{ field.name }} ({{ field.type }})</label>
+                <label [for]="field.name" class="form-label"
+                  >{{ field.name }} ({{ field.type }})</label
+                >
 
                 <ng-container [ngSwitch]="field.type">
-                  <input *ngSwitchCase="'INTEGER'"
-                         [id]="field.name"
-                         type="number"
-                         step="1"
-                         [formControlName]="field.name"
-                         class="form-control">
-                  <input *ngSwitchCase="'REAL'"
-                         [id]="field.name"
-                         type="number"
-                         step="any"
-                         [formControlName]="field.name"
-                         class="form-control">
-                  <input *ngSwitchDefault
-                         [id]="field.name"
-                         type="text"
-                         [formControlName]="field.name"
-                         class="form-control">
+                  <input
+                    *ngSwitchCase="'INTEGER'"
+                    [id]="field.name"
+                    type="number"
+                    step="1"
+                    [formControlName]="field.name"
+                    class="form-control"
+                  />
+                  <input
+                    *ngSwitchCase="'REAL'"
+                    [id]="field.name"
+                    type="number"
+                    step="any"
+                    [formControlName]="field.name"
+                    class="form-control"
+                  />
+                  <input
+                    *ngSwitchDefault
+                    [id]="field.name"
+                    type="text"
+                    [formControlName]="field.name"
+                    class="form-control"
+                  />
                 </ng-container>
               </ng-container>
             </ng-container>
@@ -92,7 +113,6 @@
           {{ isLoading ? 'Saving...' : 'Save Changes' }}
         </button>
       </div>
-
     </form>
   </div>
 

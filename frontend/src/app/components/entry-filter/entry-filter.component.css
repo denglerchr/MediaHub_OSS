@@ -4,10 +4,11 @@
   border-radius: 0.5rem;
   margin-bottom: 1.5rem;
   overflow: hidden; /* Keeps the rounded corners clean when collapsed */
-  transition: max-height 0.35s cubic-bezier(0.4, 0, 0.2, 1), 
-              opacity 0.25s ease-in-out, 
-              margin-bottom 0.35s cubic-bezier(0.4, 0, 0.2, 1),
-              border-color 0.25s ease-in-out;
+  transition:
+    max-height 0.35s cubic-bezier(0.4, 0, 0.2, 1),
+    opacity 0.25s ease-in-out,
+    margin-bottom 0.35s cubic-bezier(0.4, 0, 0.2, 1),
+    border-color 0.25s ease-in-out;
   max-height: 1000px; /* High enough to contain all filter rows */
   opacity: 1;
 }
@@ -26,7 +27,6 @@
   display: block;
 }
 
-
 .filter-controls {
   display: flex;
   flex-wrap: wrap;
@@ -42,7 +42,7 @@
 }
 
 .limit-group {
-  max-width: 100px; 
+  max-width: 100px;
 }
 
 .custom-filters-array {
@@ -52,14 +52,14 @@
 .custom-filter-row {
   display: flex;
   gap: 0.5rem;
-  align-items: center; 
+  align-items: center;
   flex-basis: 100%; /* Force new line on small screens */
   flex-wrap: wrap; /* Allow wrapping on very tiny screens */
 }
 
 @media (min-width: 1024px) {
   .custom-filter-row {
-    flex-basis: auto; 
+    flex-basis: auto;
     flex-wrap: nowrap;
   }
 }
@@ -72,7 +72,7 @@
 }
 
 .filter-actions {
-  margin-left: auto; 
+  margin-left: auto;
   display: flex;
   align-items: center;
   gap: 1rem;
@@ -92,7 +92,7 @@
   border: none;
   cursor: pointer;
   color: var(--text-muted);
-  padding: 0.5rem; 
+  padding: 0.5rem;
   border-radius: 50%;
   display: flex;
   align-items: center;

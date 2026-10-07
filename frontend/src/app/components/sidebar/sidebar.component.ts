@@ -1,9 +1,9 @@
 import { Component, OnDestroy, OnInit, Input, Output, EventEmitter } from '@angular/core';
 import { Observable, Subject } from 'rxjs';
-import { takeUntil, map } from 'rxjs/operators';
+import { takeUntil } from 'rxjs/operators';
 import { User, AppInfo } from '../../models';
 import { AuthService } from '../../services/auth.service';
-import { AppInfoService } from '../../services/app-info.service'; 
+import { AppInfoService } from '../../services/app-info.service';
 import { ThemeService } from '../../services/theme.service';
 
 @Component({
@@ -17,21 +17,27 @@ export class SidebarComponent implements OnInit, OnDestroy {
   @Output() toggleSidebar = new EventEmitter<void>();
 
   public currentUser$: Observable<User | null>;
-  public appInfo$: Observable<AppInfo | null>; 
-  public isLightTheme$: Observable<boolean>;
+  // FE-029: single subscriptions instead of 5× `isLightTheme$ | async` and
+  // 2× `appInfo$ | async` in the template. (The report's `*ngIf="… | async as light"`
+  // suggestion cannot work — the stream emits a boolean, so a `false` would hide the
+  // whole block; a plain property keeps one subscription and no re-subscribes.)
+  public isLightTheme = true;
+  public appInfo: AppInfo | null = null;
 
   private destroy$ = new Subject<void>();
 
   constructor(
     private authService: AuthService,
     private appInfoService: AppInfoService,
-    private themeService: ThemeService
+    private themeService: ThemeService,
   ) {
     this.currentUser$ = this.authService.currentUser$;
-    this.appInfo$ = this.appInfoService.info$; 
-    this.isLightTheme$ = this.themeService.theme$.pipe(
-      map(theme => theme === 'light')
-    );
+    this.themeService.theme$.pipe(takeUntil(this.destroy$)).subscribe((theme) => {
+      this.isLightTheme = theme === 'light';
+    });
+    this.appInfoService.info$.pipe(takeUntil(this.destroy$)).subscribe((info) => {
+      this.appInfo = info;
+    });
   }
 
   toggleTheme(): void {
@@ -54,4 +60,4 @@ export class SidebarComponent implements OnInit, OnDestroy {
     this.destroy$.next();
     this.destroy$.complete();
   }
-}
+}

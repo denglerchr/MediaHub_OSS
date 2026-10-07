@@ -1,9 +1,18 @@
 <div class="user-management-container page-container">
-  
   <div class="sticky-header">
-    <div style="display: flex; align-items: center; gap: 0.75rem; min-width: 0;">
+    <div style="display: flex; align-items: center; gap: 0.75rem; min-width: 0">
       <a routerLink="/dashboard" class="back-btn" title="Back to Overview">
-        <svg xmlns="http://www.w3.org/2000/svg" width="1.5em" height="1.5em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <svg
+          xmlns="http://www.w3.org/2000/svg"
+          width="1.5em"
+          height="1.5em"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="2"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+        >
           <line x1="19" y1="12" x2="5" y2="12"></line>
           <polyline points="12 19 5 12 12 5"></polyline>
         </svg>
@@ -20,90 +29,154 @@
   </div>
 
   <div *ngIf="!isLoading" class="split-pane-container">
-    
     <!-- Left Pane: Sidebar List with Tabs -->
     <div class="sidebar-pane">
       <div class="list-tabs-container">
-        <button class="tab-btn list-tab-btn" [class.active]="activeListTab === 'standard'" (click)="setListTab('standard')">
+        <button
+          class="tab-btn list-tab-btn"
+          [class.active]="activeListTab === 'standard'"
+          (click)="setListTab('standard')"
+        >
           Standard Users
         </button>
-        <button class="tab-btn list-tab-btn" [class.active]="activeListTab === 'service'" (click)="setListTab('service')">
+        <button
+          class="tab-btn list-tab-btn"
+          [class.active]="activeListTab === 'service'"
+          (click)="setListTab('service')"
+        >
           Service Accounts
         </button>
-        <button class="tab-btn list-tab-btn" [class.active]="activeListTab === 'oidc'" (click)="setListTab('oidc')">
+        <button
+          class="tab-btn list-tab-btn"
+          [class.active]="activeListTab === 'oidc'"
+          (click)="setListTab('oidc')"
+        >
           SSO / OIDC
         </button>
       </div>
 
       <ul class="user-list">
         <li *ngIf="users.length === 0" class="empty-state">
-          No {{ activeListTab === 'service' ? 'service accounts' : (activeListTab === 'oidc' ? 'SSO/OIDC users' : 'users') }} found.
+          No
+          {{
+            activeListTab === 'service'
+              ? 'service accounts'
+              : activeListTab === 'oidc'
+                ? 'SSO/OIDC users'
+                : 'users'
+          }}
+          found.
         </li>
-        
+
         <li *ngIf="isNewUser" class="user-list-item draft-item" (click)="createNewUser()">
-          <div class="username-text" style="color: var(--text-accent);">
+          <div class="username-text" style="color: var(--text-accent)">
             ✨ New {{ activeListTab === 'service' ? 'Service Account' : 'User' }} Draft
           </div>
           <div class="user-id">Unsaved</div>
         </li>
 
-        <li *ngFor="let user of users; trackBy: trackById" 
-            (click)="selectUser(user)"
-            class="user-list-item"
-            [ngClass]="{'selected': selectedUser?.id === user.id}">
-            
+        <li
+          *ngFor="let user of users; trackBy: trackById"
+          (click)="selectUser(user)"
+          class="user-list-item"
+          [ngClass]="{ selected: selectedUser?.id === user.id }"
+        >
           <div class="username-text">{{ user.username }}</div>
-          
+
           <div class="user-meta">
-            <span class="user-id">ID: {{ user.id | slice:0:8 }}...</span>
+            <span class="user-id">ID: {{ user.id | slice: 0 : 8 }}...</span>
             <span *ngIf="user.is_admin" class="admin-badge">Admin</span>
             <span *ngIf="user.account_type === 'service_account'" class="service-badge">SA</span>
-            <span *ngIf="user.account_type === 'oidc'" class="service-badge" style="background: var(--color-primary, #3b82f6);">OIDC</span>
+            <!-- Same style as the SA badge (blue accent text, no background). The previous
+                 inline `background: var(--color-primary, #3b82f6)` painted a solid blue box
+                 over the badge while the text stayed --text-accent blue — invisible text. -->
+            <span *ngIf="user.account_type === 'oidc'" class="service-badge">OIDC</span>
           </div>
-          
         </li>
       </ul>
     </div>
 
     <!-- Right Pane: Detail View -->
     <div class="detail-pane">
-      
       <div *ngIf="!selectedUser && !isNewUser" class="empty-state-detail">
         <p>Select a user to view or edit their settings.</p>
       </div>
 
       <div *ngIf="selectedUser || isNewUser">
-        
         <div class="detail-header-row">
           <div class="detail-header">
             <h3>
-              {{ isNewUser ? 'Create New ' + (activeListTab === 'service' ? 'Service Account' : 'User') : 'Edit User: ' + selectedUser?.username }}
+              {{
+                isNewUser
+                  ? 'Create New ' + (activeListTab === 'service' ? 'Service Account' : 'User')
+                  : 'Edit User: ' + selectedUser?.username
+              }}
             </h3>
             <button *ngIf="!isNewUser" (click)="openDeleteConfirm()" class="btn btn-danger">
-              Delete {{ selectedUser?.account_type === 'service_account' ? 'Service Account' : (selectedUser?.account_type === 'oidc' ? 'OIDC User' : 'User') }}
+              Delete
+              {{
+                selectedUser?.account_type === 'service_account'
+                  ? 'Service Account'
+                  : selectedUser?.account_type === 'oidc'
+                    ? 'OIDC User'
+                    : 'User'
+              }}
             </button>
           </div>
 
           <!-- Detail Tabs (Only when editing an existing user) -->
           <div class="detail-tabs-container" *ngIf="selectedUser">
-            <button class="tab-btn detail-tab-btn" [class.active]="activeDetailTab === 'settings'" (click)="setDetailTab('settings')">
+            <button
+              class="tab-btn detail-tab-btn"
+              [class.active]="activeDetailTab === 'settings'"
+              (click)="setDetailTab('settings')"
+            >
               Settings & Rights
             </button>
-            <button class="tab-btn detail-tab-btn" [class.active]="activeDetailTab === 'keys'" (click)="setDetailTab('keys')">
+            <button
+              class="tab-btn detail-tab-btn"
+              [class.active]="activeDetailTab === 'keys'"
+              (click)="setDetailTab('keys')"
+            >
               API Keys ({{ userKeys.length }})
             </button>
           </div>
         </div>
 
         <!-- Detail Tab 1: Settings Form -->
-        <form [formGroup]="detailForm" (ngSubmit)="onSaveUser()" *ngIf="activeDetailTab === 'settings'">
-          
+        <form
+          [formGroup]="detailForm"
+          (ngSubmit)="onSaveUser()"
+          *ngIf="activeDetailTab === 'settings'"
+        >
           <div class="form-row">
             <div class="form-group">
               <label class="form-label">Username <span class="required-asterisk">*</span></label>
-              <input type="text" formControlName="username" class="form-control" placeholder="Enter username">
-              <div *ngIf="detailForm.get('username')?.touched && detailForm.get('username')?.invalid" class="form-error">
-                Valid username is required.
+              <input
+                type="text"
+                formControlName="username"
+                class="form-control"
+                placeholder="Enter username"
+              />
+              <div
+                *ngIf="
+                  detailForm.get('username')?.invalid &&
+                  (detailForm.get('username')?.touched || submitted)
+                "
+                class="form-error"
+              >
+                Username is required and must be at most 64 characters.
+              </div>
+              <div
+                *ngIf="detailForm.get('username')?.disabled"
+                class="description-text"
+                style="color: var(--text-secondary)"
+              >
+                {{
+                  detailForm.get('account_type')?.value === 'oidc'
+                    ? 'Managed via Single Sign-On Identity Provider'
+                    : 'Service account names are fixed at creation.'
+                }}
               </div>
             </div>
 
@@ -112,14 +185,31 @@
               <label class="form-label">
                 Password <span *ngIf="isNewUser" class="required-asterisk">*</span>
               </label>
-              <input type="password" formControlName="password" class="form-control" [placeholder]="isNewUser ? 'Enter secure password' : 'Leave blank to keep current'">
-              <div *ngIf="detailForm.get('password')?.touched && detailForm.get('password')?.invalid" class="form-error">
-                Min. 8 characters.
+              <input
+                type="password"
+                formControlName="password"
+                class="form-control"
+                [placeholder]="isNewUser ? 'Enter secure password' : 'Leave blank to keep current'"
+              />
+              <!-- FE-053: say *which* rule failed ("Min. 8 characters." used to show even for a missing password) -->
+              <div
+                *ngIf="detailForm.get('password')?.touched && detailForm.get('password')?.invalid"
+                class="form-error"
+              >
+                <span *ngIf="detailForm.get('password')?.errors?.['required']"
+                  >Password is required.</span
+                >
+                <span *ngIf="detailForm.get('password')?.errors?.['minlength']"
+                  >Min. 8 characters.</span
+                >
               </div>
             </div>
             <div class="form-group" *ngIf="detailForm.get('account_type')?.value === 'oidc'">
               <label class="form-label">Password</label>
-              <div class="description-text" style="padding-top: 0.5rem; color: var(--text-secondary);">
+              <div
+                class="description-text"
+                style="padding-top: 0.5rem; color: var(--text-secondary)"
+              >
                 Managed via Single Sign-On Identity Provider
               </div>
             </div>
@@ -127,70 +217,141 @@
 
           <div class="form-group admin-toggle-wrapper">
             <label class="checkbox-group">
-              <input type="checkbox" formControlName="is_admin" class="form-checkbox">
-              <span class="form-label" style="font-weight: 600; color: #f6ad55;">Global Administrator</span>
+              <input type="checkbox" formControlName="is_admin" class="form-checkbox" />
+              <span class="form-label" style="font-weight: 600; color: #f6ad55"
+                >Global Administrator</span
+              >
             </label>
           </div>
 
           <div class="permissions-section">
             <h4>Database Permissions</h4>
-            
+
             <div *ngIf="detailForm.get('is_admin')?.value" class="admin-notice">
               Administrators automatically have full access to all databases.
             </div>
 
-            <div class="table-wrapper" [ngClass]="{'table-disabled': detailForm.get('is_admin')?.value}">
+            <div
+              class="table-wrapper"
+              [ngClass]="{ 'table-disabled': detailForm.get('is_admin')?.value }"
+            >
               <table class="table">
                 <thead>
                   <tr>
                     <th>Database</th>
-                    <th style="text-align: center;">
-                      <div style="margin-bottom: 0.25rem;">View</div>
-                      <button type="button" (click)="toggleColumnAll('can_view')" class="btn-link" style="font-size: 0.7rem;">Toggle All</button>
+                    <th style="text-align: center">
+                      <div style="margin-bottom: 0.25rem">View</div>
+                      <button
+                        type="button"
+                        (click)="toggleColumnAll('can_view')"
+                        class="btn-link"
+                        style="font-size: 0.7rem"
+                      >
+                        Toggle All
+                      </button>
                     </th>
-                    <th style="text-align: center;">
-                      <div style="margin-bottom: 0.25rem;">Create</div>
-                      <button type="button" (click)="toggleColumnAll('can_create')" class="btn-link" style="font-size: 0.7rem;">Toggle All</button>
+                    <th style="text-align: center">
+                      <div style="margin-bottom: 0.25rem">Create</div>
+                      <button
+                        type="button"
+                        (click)="toggleColumnAll('can_create')"
+                        class="btn-link"
+                        style="font-size: 0.7rem"
+                      >
+                        Toggle All
+                      </button>
                     </th>
-                    <th style="text-align: center;">
-                      <div style="margin-bottom: 0.25rem;">Edit</div>
-                      <button type="button" (click)="toggleColumnAll('can_edit')" class="btn-link" style="font-size: 0.7rem;">Toggle All</button>
+                    <th style="text-align: center">
+                      <div style="margin-bottom: 0.25rem">Edit</div>
+                      <button
+                        type="button"
+                        (click)="toggleColumnAll('can_edit')"
+                        class="btn-link"
+                        style="font-size: 0.7rem"
+                      >
+                        Toggle All
+                      </button>
                     </th>
-                    <th style="text-align: center;">
-                      <div style="margin-bottom: 0.25rem;">Delete</div>
-                      <button type="button" (click)="toggleColumnAll('can_delete')" class="btn-link" style="font-size: 0.7rem;">Toggle All</button>
+                    <th style="text-align: center">
+                      <div style="margin-bottom: 0.25rem">Delete</div>
+                      <button
+                        type="button"
+                        (click)="toggleColumnAll('can_delete')"
+                        class="btn-link"
+                        style="font-size: 0.7rem"
+                      >
+                        Toggle All
+                      </button>
                     </th>
-                    <th style="text-align: center;">
-                      <div style="margin-bottom: 0.25rem;">Admin</div>
-                      <button type="button" (click)="toggleColumnAll('can_admin')" class="btn-link" style="font-size: 0.7rem;">Toggle All</button>
+                    <th style="text-align: center">
+                      <div style="margin-bottom: 0.25rem">Admin</div>
+                      <button
+                        type="button"
+                        (click)="toggleColumnAll('can_admin')"
+                        class="btn-link"
+                        style="font-size: 0.7rem"
+                      >
+                        Toggle All
+                      </button>
                     </th>
                   </tr>
                 </thead>
-                
+
                 <tbody formArrayName="permissions">
-                  <tr *ngFor="let p of permissions.controls; let i = index; trackBy: trackByDbId" [formGroupName]="i">
-                    <td style="font-weight: 500; color: var(--text-primary);">
+                  <tr
+                    *ngFor="let p of permissions.controls; let i = index; trackBy: trackByDbId"
+                    [formGroupName]="i"
+                  >
+                    <td style="font-weight: 500; color: var(--text-primary)">
                       {{ p.get('database_name')?.value }}
                     </td>
-                    <td style="text-align: center;">
-                      <input type="checkbox" formControlName="can_view" class="form-checkbox" style="margin: 0 auto;">
+                    <td style="text-align: center">
+                      <input
+                        type="checkbox"
+                        formControlName="can_view"
+                        class="form-checkbox"
+                        style="margin: 0 auto"
+                      />
                     </td>
-                    <td style="text-align: center;">
-                      <input type="checkbox" formControlName="can_create" class="form-checkbox" style="margin: 0 auto;">
+                    <td style="text-align: center">
+                      <input
+                        type="checkbox"
+                        formControlName="can_create"
+                        class="form-checkbox"
+                        style="margin: 0 auto"
+                      />
                     </td>
-                    <td style="text-align: center;">
-                      <input type="checkbox" formControlName="can_edit" class="form-checkbox" style="margin: 0 auto;">
+                    <td style="text-align: center">
+                      <input
+                        type="checkbox"
+                        formControlName="can_edit"
+                        class="form-checkbox"
+                        style="margin: 0 auto"
+                      />
                     </td>
-                    <td style="text-align: center;">
-                      <input type="checkbox" formControlName="can_delete" class="form-checkbox" style="margin: 0 auto;">
+                    <td style="text-align: center">
+                      <input
+                        type="checkbox"
+                        formControlName="can_delete"
+                        class="form-checkbox"
+                        style="margin: 0 auto"
+                      />
                     </td>
-                    <td style="text-align: center;">
-                      <input type="checkbox" formControlName="can_admin" class="form-checkbox" style="margin: 0 auto;">
+                    <td style="text-align: center">
+                      <input
+                        type="checkbox"
+                        formControlName="can_admin"
+                        class="form-checkbox"
+                        style="margin: 0 auto"
+                      />
                     </td>
                   </tr>
-                  
+
                   <tr *ngIf="permissions.controls.length === 0">
-                    <td colspan="6" style="text-align: center; color: var(--text-muted); font-style: italic;">
+                    <td
+                      colspan="6"
+                      style="text-align: center; color: var(--text-muted); font-style: italic"
+                    >
                       No databases created in the system yet.
                     </td>
                   </tr>
@@ -200,12 +361,17 @@
           </div>
 
           <div class="form-actions">
-            <button type="button" class="btn btn-secondary" (click)="clearSelection()">Cancel</button>
-            <button type="submit" class="btn btn-primary" [disabled]="detailForm.invalid || isSaving">
+            <button type="button" class="btn btn-secondary" (click)="clearSelection()">
+              Cancel
+            </button>
+            <button
+              type="submit"
+              class="btn btn-primary"
+              [disabled]="detailForm.invalid || isSaving"
+            >
               {{ isSaving ? 'Saving...' : 'Save User Settings' }}
             </button>
           </div>
-
         </form>
 
         <!-- Detail Tab 2: Delegated API Keys Pane -->
@@ -217,11 +383,9 @@
             </button>
           </div>
 
-          <div *ngIf="isKeysLoading" class="loading-state">
-            Loading keys...
-          </div>
+          <div *ngIf="isKeysLoading" class="loading-state">Loading keys...</div>
 
-          <div *ngIf="!isKeysLoading" class="table-wrapper" style="margin-top: 1rem;">
+          <div *ngIf="!isKeysLoading" class="table-wrapper" style="margin-top: 1rem">
             <table class="table" *ngIf="userKeys.length > 0">
               <thead>
                 <tr>
@@ -229,28 +393,74 @@
                   <th>Hint</th>
                   <th>Expires</th>
                   <th>Last Used</th>
-                  <th style="text-align: right; width: 80px;">Actions</th>
+                  <th style="text-align: right; width: 80px">Actions</th>
                 </tr>
               </thead>
               <tbody>
                 <tr *ngFor="let key of userKeys; trackBy: trackByKeyId">
-                  <td style="font-weight: 600;">{{ key.name }}</td>
-                  <td><code class="hint-code">{{ key.key_hint }}</code></td>
+                  <td style="font-weight: 600">{{ key.name }}</td>
                   <td>
-                    <span *ngIf="key.expires_at">{{ key.expires_at | date:'shortDate' }}</span>
-                    <span *ngIf="!key.expires_at" class="text-muted" style="font-size: 0.8rem;">Never</span>
+                    <code class="hint-code">{{ key.key_hint }}</code>
                   </td>
                   <td>
-                    <span *ngIf="key.last_used_at">{{ key.last_used_at | date:'short' }}</span>
-                    <span *ngIf="!key.last_used_at" class="text-muted" style="font-size: 0.8rem;">Never</span>
+                    <span *ngIf="key.expires_at">{{ key.expires_at | date: 'shortDate' }}</span>
+                    <span *ngIf="!key.expires_at" class="text-muted" style="font-size: 0.8rem"
+                      >Never</span
+                    >
                   </td>
-                  <td style="text-align: right;">
-                    <div style="display: flex; gap: 0.5rem; justify-content: flex-end;">
-                      <button class="btn-icon" (click)="openEditKeyModal(key)" title="Edit Scopes / Expiry">
-                        <svg xmlns="http://www.w3.org/2000/svg" width="1.1em" height="1.1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path><path d="M18.5 2.5a2.121 2.121 0 1 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path></svg>
+                  <td>
+                    <span *ngIf="key.last_used_at">{{ key.last_used_at | date: 'short' }}</span>
+                    <span *ngIf="!key.last_used_at" class="text-muted" style="font-size: 0.8rem"
+                      >Never</span
+                    >
+                  </td>
+                  <td style="text-align: right">
+                    <div style="display: flex; gap: 0.5rem; justify-content: flex-end">
+                      <button
+                        class="btn-icon"
+                        (click)="openEditKeyModal(key)"
+                        title="Edit Scopes / Expiry"
+                      >
+                        <svg
+                          xmlns="http://www.w3.org/2000/svg"
+                          width="1.1em"
+                          height="1.1em"
+                          viewBox="0 0 24 24"
+                          fill="none"
+                          stroke="currentColor"
+                          stroke-width="2"
+                          stroke-linecap="round"
+                          stroke-linejoin="round"
+                        >
+                          <path
+                            d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"
+                          ></path>
+                          <path d="M18.5 2.5a2.121 2.121 0 1 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path>
+                        </svg>
                       </button>
-                      <button class="btn-icon btn-icon-danger" (click)="openRevokeKeyConfirm(key)" title="Revoke API Key">
-                        <svg xmlns="http://www.w3.org/2000/svg" width="1.1em" height="1.1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path><line x1="10" y1="11" x2="10" y2="17"></line><line x1="14" y1="11" x2="14" y2="17"></line></svg>
+                      <button
+                        class="btn-icon btn-icon-danger"
+                        (click)="openRevokeKeyConfirm(key)"
+                        title="Revoke API Key"
+                      >
+                        <svg
+                          xmlns="http://www.w3.org/2000/svg"
+                          width="1.1em"
+                          height="1.1em"
+                          viewBox="0 0 24 24"
+                          fill="none"
+                          stroke="currentColor"
+                          stroke-width="2"
+                          stroke-linecap="round"
+                          stroke-linejoin="round"
+                        >
+                          <polyline points="3 6 5 6 21 6"></polyline>
+                          <path
+                            d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"
+                          ></path>
+                          <line x1="10" y1="11" x2="10" y2="17"></line>
+                          <line x1="14" y1="11" x2="14" y2="17"></line>
+                        </svg>
                       </button>
                     </div>
                   </td>
@@ -258,12 +468,11 @@
               </tbody>
             </table>
 
-            <div class="empty-state" *ngIf="userKeys.length === 0" style="padding: 2rem 1.25rem;">
+            <div class="empty-state" *ngIf="userKeys.length === 0" style="padding: 2rem 1.25rem">
               No API keys generated for this account yet.
             </div>
           </div>
         </div>
-
       </div>
     </div>
   </div>

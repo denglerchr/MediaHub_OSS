@@ -29,7 +29,13 @@ jobs:
         run: |
           cd frontend
           npm ci
+          npm run lint
+          npm run typecheck
+          npm test
           npm run build -- --configuration production
+        env:
+          # Karma needs a browser; GitHub-hosted runners ship Google Chrome here.
+          CHROME_BIN: /usr/bin/google-chrome
 
       - name: Set up Go
         uses: actions/setup-go@v5

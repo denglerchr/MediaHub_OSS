@@ -5,7 +5,10 @@ import { ModalService } from '../../services/modal.service';
 import { finalize, takeUntil } from 'rxjs/operators';
 import { Subject } from 'rxjs';
 import { DatabaseConfig } from '../../models';
-import { CUSTOM_FIELD_NAME_PATTERN } from '../../utils/validation';
+import {
+  CUSTOM_FIELD_NAME_PATTERN,
+  reservedCustomFieldNameValidator,
+} from '../../utils/validation';
 
 @Component({
   selector: 'app-create-database-modal',
@@ -22,14 +25,14 @@ export class CreateDatabaseModalComponent implements OnInit, OnDestroy {
   constructor(
     private fb: FormBuilder,
     private databaseService: DatabaseService,
-    private modalService: ModalService
+    private modalService: ModalService,
   ) {
     this.createDbForm = this.fb.group({
       name: ['', [Validators.required, Validators.maxLength(100)]],
       content_type: ['image', Validators.required],
       n_max_queued: [0, [Validators.required, Validators.min(0)]],
       create_preview: [true],
-      auto_conversion: [''], 
+      auto_conversion: [''],
 
       housekeeping: this.fb.group({
         interval_value: [1, [Validators.required, Validators.min(0)]],
@@ -44,8 +47,9 @@ export class CreateDatabaseModalComponent implements OnInit, OnDestroy {
   }
 
   ngOnInit(): void {
-    this.createDbForm.get('content_type')?.valueChanges
-      .pipe(takeUntil(this.destroy$))
+    this.createDbForm
+      .get('content_type')
+      ?.valueChanges.pipe(takeUntil(this.destroy$))
       .subscribe(() => {
         this.createDbForm.get('auto_conversion')?.setValue('');
       });
@@ -61,7 +65,16 @@ export class CreateDatabaseModalComponent implements OnInit, OnDestroy {
 
   addCustomField(): void {
     const fieldGroup = this.fb.group({
-      name: ['', [Validators.required, Validators.pattern(CUSTOM_FIELD_NAME_PATTERN)]],
+      // FE-049/FE-053: reserved names are rejected up front (the backend refuses
+      // them in AddField/toModel) and the row renders the specific error.
+      name: [
+        '',
+        [
+          Validators.required,
+          Validators.pattern(CUSTOM_FIELD_NAME_PATTERN),
+          reservedCustomFieldNameValidator,
+        ],
+      ],
       type: ['TEXT', Validators.required],
       is_indexed: [true],
     });
@@ -89,47 +102,50 @@ export class CreateDatabaseModalComponent implements OnInit, OnDestroy {
 
     const hkForm = formValue.housekeeping;
     const reconstructedHousekeeping = {
-      interval: hkForm.interval_value > 0 ? `${hkForm.interval_value}${hkForm.interval_unit}` : "0",
-      disk_space: hkForm.disk_space_value > 0 ? `${hkForm.disk_space_value}${hkForm.disk_space_unit}` : "0",
-      max_age: hkForm.max_age_value > 0 ? `${hkForm.max_age_value}${hkForm.max_age_unit}` : "0",
+      interval: hkForm.interval_value > 0 ? `${hkForm.interval_value}${hkForm.interval_unit}` : '0',
+      disk_space:
+        hkForm.disk_space_value > 0 ? `${hkForm.disk_space_value}${hkForm.disk_space_unit}` : '0',
+      max_age: hkForm.max_age_value > 0 ? `${hkForm.max_age_value}${hkForm.max_age_unit}` : '0',
     };
 
     const payload = {
       name: formValue.name,
       content_type: formValue.content_type,
       n_max_queued: formValue.n_max_queued,
-      config: config, 
-      housekeeping: reconstructedHousekeeping, 
+      config: config,
+      housekeeping: reconstructedHousekeeping,
       custom_fields: formValue.custom_fields,
     };
 
-    this.databaseService.createDatabase(payload)
-      .pipe(
-        finalize(() => this.isLoading = false)
-      )
+    this.databaseService
+      .createDatabase(payload)
+      .pipe(finalize(() => (this.isLoading = false)))
       .subscribe({
         next: () => {
-          this.modalService.close(true); 
-          
+          this.modalService.close(CreateDatabaseModalComponent.MODAL_ID, true);
+
           this.createDbForm.reset({
             name: '',
             content_type: 'image',
             n_max_queued: 0,
-            create_preview: true, 
+            create_preview: true,
             auto_conversion: '',
-            housekeeping: { 
-              interval_value: 1, interval_unit: 'h', 
-              disk_space_value: 100, disk_space_unit: 'G', 
-              max_age_value: 0, max_age_unit: 'd' 
-            } 
+            housekeeping: {
+              interval_value: 1,
+              interval_unit: 'h',
+              disk_space_value: 100,
+              disk_space_unit: 'G',
+              max_age_value: 0,
+              max_age_unit: 'd',
+            },
           });
           this.customFields.clear();
-        }
+        },
       });
   }
 
   closeModal(): void {
-    this.modalService.close(false);
+    this.modalService.close(CreateDatabaseModalComponent.MODAL_ID, false);
   }
 
   ngOnDestroy(): void {

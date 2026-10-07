@@ -4,85 +4,167 @@
       <tr>
         <th class="select-col"></th>
 
-        <th *ngFor="let col of tableColumns; trackBy: trackByColumn" 
-            [class.actions-col]="col === 'actions'"
-            [class.preview-col]="col === 'Preview'">
+        <th
+          *ngFor="let col of tableColumns; trackBy: trackByColumn"
+          [class.actions-col]="col === 'actions'"
+          [class.preview-col]="col === 'Preview'"
+        >
           {{ col }}
         </th>
       </tr>
     </thead>
     <tbody>
-      <tr *ngFor="let entry of entries; trackBy: trackById"
-          [class.selected-row]="isSelected(entry)">
-        
+      <tr
+        *ngFor="let entry of entries; trackBy: trackById"
+        [class.selected-row]="isSelected(entry)"
+      >
         <td class="select-cell">
-          <input type="checkbox" 
-                 [checked]="isSelected(entry)" 
-                 (click)="onCheckboxClick(entry, $event)"
-                 class="form-checkbox">
+          <input
+            type="checkbox"
+            [checked]="isSelected(entry)"
+            (click)="onCheckboxClick(entry, $event)"
+            class="form-checkbox"
+          />
         </td>
 
-        <td *ngFor="let col of tableColumns; trackBy: trackByColumn" 
-            [class.actions-cell]="col === 'actions'"
-            [class.preview-cell]="col === 'Preview'">
-          
+        <td
+          *ngFor="let col of tableColumns; trackBy: trackByColumn"
+          [class.actions-cell]="col === 'actions'"
+          [class.preview-cell]="col === 'Preview'"
+        >
           <ng-container [ngSwitch]="col">
-
             <ng-container *ngSwitchCase="'Preview'">
               <ng-container [ngSwitch]="entry.status">
-                
-                <div *ngSwitchCase="'queued'" class="list-preview-placeholder status-queued" title="Queued...">
-                  <svg class="placeholder-icon" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <div
+                  *ngSwitchCase="'queued'"
+                  class="list-preview-placeholder status-queued"
+                  title="Queued..."
+                >
+                  <svg
+                    class="placeholder-icon"
+                    xmlns="http://www.w3.org/2000/svg"
+                    fill="none"
+                    viewBox="0 0 24 24"
+                    stroke="currentColor"
+                  >
                     <circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="2"></circle>
-                    <polyline points="12 6 12 12 16 14" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"></polyline>
+                    <polyline
+                      points="12 6 12 12 16 14"
+                      stroke="currentColor"
+                      stroke-width="2"
+                      stroke-linecap="round"
+                      stroke-linejoin="round"
+                    ></polyline>
                   </svg>
                 </div>
 
-                <div *ngSwitchCase="'processing'" class="list-preview-placeholder status-processing" title="Processing...">
-                  <svg class="placeholder-icon processing-icon" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                    <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-                    <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                <div
+                  *ngSwitchCase="'processing'"
+                  class="list-preview-placeholder status-processing"
+                  title="Processing..."
+                >
+                  <svg
+                    class="placeholder-icon processing-icon"
+                    xmlns="http://www.w3.org/2000/svg"
+                    fill="none"
+                    viewBox="0 0 24 24"
+                  >
+                    <circle
+                      class="opacity-25"
+                      cx="12"
+                      cy="12"
+                      r="10"
+                      stroke="currentColor"
+                      stroke-width="4"
+                    ></circle>
+                    <path
+                      class="opacity-75"
+                      fill="currentColor"
+                      d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
+                    ></path>
                   </svg>
                 </div>
-                
-                <div *ngSwitchCase="'error'" class="list-preview-placeholder status-error" title="Processing Error">
-                  <svg class="placeholder-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor">
-                    <path fill-rule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 3.006-1.742 3.006H4.42c-1.53 0-2.493-1.672-1.743-3.006l5.58-9.92zM10 13a1 1 0 100-2 1 1 0 000 2zm-1-8a1 1 0 011 1v3a1 1 0 11-2 0V6a1 1 0 011-1z" clip-rule="evenodd" />
+
+                <div
+                  *ngSwitchCase="'error'"
+                  class="list-preview-placeholder status-error"
+                  title="Processing Error"
+                >
+                  <svg
+                    class="placeholder-icon"
+                    xmlns="http://www.w3.org/2000/svg"
+                    viewBox="0 0 20 20"
+                    fill="currentColor"
+                  >
+                    <path
+                      fill-rule="evenodd"
+                      d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 3.006-1.742 3.006H4.42c-1.53 0-2.493-1.672-1.743-3.006l5.58-9.92zM10 13a1 1 0 100-2 1 1 0 000 2zm-1-8a1 1 0 011 1v3a1 1 0 11-2 0V6a1 1 0 011-1z"
+                      clip-rule="evenodd"
+                    />
                   </svg>
                 </div>
-                
+
                 <ng-container *ngSwitchDefault>
-                    <img *ngIf="!failedImageIds.has(entry.id)"
-                         [secureSrc]="getPreviewUrl(entry)"
-                         (imageError)="onImageError(entry.id)" 
-                         class="list-preview-img"
-                         (click)="onEntryClick(entry)"
-                         alt="Preview for {{entry.id}}">
+                  <img
+                    *ngIf="!failedImageIds.has(entry.id)"
+                    [secureSrc]="getPreviewUrl(entry)"
+                    (imageError)="onImageError(entry.id)"
+                    class="list-preview-img"
+                    (click)="onEntryClick(entry)"
+                    alt="Preview for {{ entry.id }}"
+                  />
 
-                     <div *ngIf="failedImageIds.has(entry.id)" class="list-preview-placeholder" title="No Preview Available">
-                        <svg class="placeholder-icon" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
-                           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 3l18 18" />
-                        </svg>
-                     </div>
+                  <div
+                    *ngIf="failedImageIds.has(entry.id)"
+                    class="list-preview-placeholder"
+                    title="No Preview Available"
+                  >
+                    <svg
+                      class="placeholder-icon"
+                      xmlns="http://www.w3.org/2000/svg"
+                      fill="none"
+                      viewBox="0 0 24 24"
+                      stroke="currentColor"
+                    >
+                      <path
+                        stroke-linecap="round"
+                        stroke-linejoin="round"
+                        stroke-width="2"
+                        d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"
+                      />
+                      <path
+                        stroke-linecap="round"
+                        stroke-linejoin="round"
+                        stroke-width="2"
+                        d="M3 3l18 18"
+                      />
+                    </svg>
+                  </div>
                 </ng-container>
-
               </ng-container>
             </ng-container>
 
             <ng-container *ngSwitchCase="'actions'">
-             <div class="actions" *ngIf="canEdit || canDelete">
-               <button *ngIf="canEdit" 
-                       (click)="onEditClick(entry)" 
-                       class="btn-link" 
-                       title="Edit Metadata"
-                       [disabled]="entry.status === 'processing'">Edit</button>
-               <button *ngIf="canDelete" 
-                       (click)="onDeleteClick(entry)" 
-                       class="btn-link btn-link-danger" 
-                       title="Delete Entry"
-                       [disabled]="entry.status === 'processing' || entry.status === 'queued'">Delete</button>
-             </div>
+              <div class="actions" *ngIf="canEdit || canDelete">
+                <button
+                  *ngIf="canEdit"
+                  (click)="onEditClick(entry)"
+                  class="btn-link"
+                  title="Edit Metadata"
+                  [disabled]="entry.status === 'processing'"
+                >
+                  Edit
+                </button>
+                <button
+                  *ngIf="canDelete"
+                  (click)="onDeleteClick(entry)"
+                  class="btn-link btn-link-danger"
+                  title="Delete Entry"
+                  [disabled]="entry.status === 'processing' || entry.status === 'queued'"
+                >
+                  Delete
+                </button>
+              </div>
             </ng-container>
 
             <ng-container *ngSwitchCase="'id'">
@@ -92,7 +174,7 @@
             </ng-container>
 
             <ng-container *ngSwitchCase="'timestamp'">
-              {{ entry.timestamp | date:'yyyy.MM.dd HH:mm' }}
+              {{ entry.timestamp | date: 'yyyy.MM.dd HH:mm' }}
             </ng-container>
 
             <ng-container *ngSwitchCase="'filename'">
@@ -124,22 +206,32 @@
             <ng-container *ngSwitchCase="'channels'">
               {{ entry.media_fields?.channels }}
             </ng-container>
-            
+
             <ng-container *ngSwitchCase="'duration'">
               <ng-container *ngIf="entry.media_fields?.duration !== undefined">
-                {{ entry.media_fields?.duration | number:'1.1-2' }}s
+                {{ entry.media_fields?.duration | number: '1.1-2' }}s
               </ng-container>
             </ng-container>
 
             <ng-container *ngSwitchDefault>
-              <ng-container *ngIf="entry.custom_fields && entry.custom_fields[col] !== undefined && entry.custom_fields[col] !== null">
-                <ng-container *ngIf="isCoordinate(entry.custom_fields[col]); else defaultCustomValue">
-                  <a [href]="getOpenStreetMapUrl(entry.custom_fields[col])"
-                     target="_blank"
-                     rel="noopener noreferrer"
-                     class="coordinate-table-link"
-                     (click)="$event.stopPropagation()"
-                     title="View in OpenStreetMap">
+              <ng-container
+                *ngIf="
+                  entry.custom_fields &&
+                  entry.custom_fields[col] !== undefined &&
+                  entry.custom_fields[col] !== null
+                "
+              >
+                <ng-container
+                  *ngIf="isCoordinate(entry.custom_fields[col]); else defaultCustomValue"
+                >
+                  <a
+                    [href]="getOpenStreetMapUrl(entry.custom_fields[col])"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    class="coordinate-table-link"
+                    (click)="$event.stopPropagation()"
+                    title="View in OpenStreetMap"
+                  >
                     📍 {{ formatCoordinate(entry.custom_fields[col]) }}
                   </a>
                 </ng-container>
@@ -148,7 +240,6 @@
                 </ng-template>
               </ng-container>
             </ng-container>
-
           </ng-container>
         </td>
       </tr>

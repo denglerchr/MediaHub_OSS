@@ -1,98 +1,171 @@
-<div class="image-list-container page-container" 
-     *ngIf="currentUser$ | async as user"
-     appFileDragDrop
-     (filesDropped)="onFilesDropped($event)">
+<div
+  class="image-list-container page-container"
+  *ngIf="currentUser$ | async as user"
+  appFileDragDrop
+  (filesDropped)="onFilesDropped($event)"
+>
   <ng-container *ngIf="dbId; else noDbSelected">
-
     <div class="sticky-header">
-      <div style="display: flex; align-items: center; gap: 0.75rem; min-width: 0;">
+      <div style="display: flex; align-items: center; gap: 0.75rem; min-width: 0">
         <a routerLink="/dashboard" class="back-btn" title="Back to Overview">
-          <svg xmlns="http://www.w3.org/2000/svg" width="1.5em" height="1.5em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <svg
+            xmlns="http://www.w3.org/2000/svg"
+            width="1.5em"
+            height="1.5em"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          >
             <line x1="19" y1="12" x2="5" y2="12"></line>
             <polyline points="12 19 5 12 12 5"></polyline>
           </svg>
         </a>
-        <h2 class="shortened-title" title="{{ currentDb?.name }}">{{ currentDb?.name || 'Loading...' }}</h2>
+        <h2 class="shortened-title" title="{{ currentDb?.name }}">
+          {{ currentDb?.name || 'Loading...' }}
+        </h2>
       </div>
-      
-      <div style="display: flex; align-items: center; gap: 0.75rem;">
-        <!-- Filter Button -->
-        <button 
-          class="btn btn-outline" 
-          style="padding: 0.5rem 0.75rem;" 
-          (click)="entryFilter.toggleCollapse()" 
-          title="Toggle Filters">
-          <span class="badge" style="background-color: var(--button-primary-bg); color: var(--text-primary); border-radius: 0.25rem; padding: 0.1rem 0.35rem; margin-right: 0.35rem; font-size: 0.75rem; font-weight: bold;" *ngIf="entryFilter.activeFiltersCount > 0">{{ entryFilter.activeFiltersCount }}</span>
+
+      <div style="display: flex; align-items: center; gap: 0.75rem">
+        <!-- Filter Button (FE-015: filtering queries entries → requires can_view) -->
+        <button
+          *ngIf="canView"
+          class="btn btn-outline"
+          style="padding: 0.5rem 0.75rem"
+          (click)="toggleFilters()"
+          title="Toggle Filters"
+        >
+          <span
+            class="badge"
+            style="
+              background-color: var(--button-primary-bg);
+              color: var(--text-primary);
+              border-radius: 0.25rem;
+              padding: 0.1rem 0.35rem;
+              margin-right: 0.35rem;
+              font-size: 0.75rem;
+              font-weight: bold;
+            "
+            *ngIf="(entryFilter?.activeFiltersCount ?? 0) > 0"
+            >{{ entryFilter?.activeFiltersCount }}</span
+          >
           Filter
         </button>
 
         <div class="view-mode-toggle">
-          <button 
-            *ngIf="currentDb?.content_type !== 'file'"
+          <button
+            *ngIf="canView && currentDb?.content_type !== 'file'"
             class="toggle-btn"
-            style="margin-right: 12px;" 
+            style="margin-right: 12px"
             (click)="openFullscreenSettingsModal()"
-            title="Fullscreen Presentation">
-            <svg xmlns="http://www.w3.org/2000/svg" width="1.25em" height="1.25em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            title="Fullscreen Presentation"
+          >
+            <svg
+              xmlns="http://www.w3.org/2000/svg"
+              width="1.25em"
+              height="1.25em"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            >
               <polygon points="5 3 19 12 5 21 5 3"></polygon>
             </svg>
           </button>
-    
-          <button 
+
+          <button
             class="toggle-btn"
             [class.active]="viewMode === 'grid'"
             (click)="setViewMode('grid')"
-            title="Grid View">
-            <svg xmlns="http://www.w3.org/2000/svg" width="1.25em" height="1.25em" viewBox="0 0 20 20" fill="currentColor"><path d="M5 3a2 2 0 00-2 2v2a2 2 0 002 2h2a2 2 0 002-2V5a2 2 0 00-2-2H5zM5 11a2 2 0 00-2 2v2a2 2 0 002 2h2a2 2 0 002-2v-2a2 2 0 00-2-2H5zM11 5a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2V5zM11 11a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2v-2z" /></svg>
+            title="Grid View"
+          >
+            <svg
+              xmlns="http://www.w3.org/2000/svg"
+              width="1.25em"
+              height="1.25em"
+              viewBox="0 0 20 20"
+              fill="currentColor"
+            >
+              <path
+                d="M5 3a2 2 0 00-2 2v2a2 2 0 002 2h2a2 2 0 002-2V5a2 2 0 00-2-2H5zM5 11a2 2 0 00-2 2v2a2 2 0 002 2h2a2 2 0 002-2v-2a2 2 0 00-2-2H5zM11 5a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2V5zM11 11a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2v-2z"
+              />
+            </svg>
           </button>
-          
+
           <button
             class="toggle-btn"
             [class.active]="viewMode === 'list'"
             (click)="setViewMode('list')"
-            title="List View">
-            <svg xmlns="http://www.w3.org/2000/svg" width="1.25em" height="1.25em" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M3 5a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zM3 10a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zM3 15a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1z" clip-rule="evenodd" /></svg>
+            title="List View"
+          >
+            <svg
+              xmlns="http://www.w3.org/2000/svg"
+              width="1.25em"
+              height="1.25em"
+              viewBox="0 0 20 20"
+              fill="currentColor"
+            >
+              <path
+                fill-rule="evenodd"
+                d="M3 5a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zM3 10a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zM3 15a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1z"
+                clip-rule="evenodd"
+              />
+            </svg>
           </button>
         </div>
       </div>
     </div>
-  
-    <app-entry-filter #entryFilter
+
+    <app-entry-filter
+      *ngIf="canView"
       [availableFilters]="availableFilters"
       [isLoading]="isLoading"
-      (filterApplied)="onFilterApplied($event)">
+      (filterApplied)="onFilterApplied($event)"
+    >
     </app-entry-filter>
-  
+
     <div class="content-area scroll-content">
       <div *ngIf="isLoading" class="state-message">
         <p>Loading entries...</p>
       </div>
 
-      <ng-container *ngIf="!isLoading">
-        <ng-container *ngIf="entriesToShow.length > 0; else emptyState">
+      <!-- FE-015: the entries list requires can_view; upload-only users get an
+           explanation instead of a failed search. -->
+      <div *ngIf="!isLoading && !canView" class="state-message">
+        <p>You do not have permission to view entries in this database.</p>
+        <p *ngIf="canCreate">You can still add new entries with the upload button.</p>
+      </div>
 
+      <ng-container *ngIf="!isLoading && canView">
+        <ng-container *ngIf="entriesToShow.length > 0; else emptyState">
           <app-entry-list-view
             *ngIf="viewMode === 'list'"
             [entries]="entriesToShow"
             [tableColumns]="tableColumns"
             [user]="currentUser"
-            [dbId]="dbId!" 
+            [dbId]="dbId!"
             [selectedIds]="selectedEntryIds"
             (entryClicked)="openDetailModal($event)"
             (editClicked)="openEditModal($event)"
             (deleteClicked)="openDeleteConfirm($event)"
-            (toggleSelection)="toggleSelection($event)">
+            (toggleSelection)="toggleSelection($event)"
+          >
           </app-entry-list-view>
 
           <app-entry-grid
             *ngIf="viewMode === 'grid'"
             [entries]="entriesToShow"
-            [dbId]="dbId!" 
+            [dbId]="dbId!"
             [selectedIds]="selectedEntryIds"
             (entryClicked)="openDetailModal($event)"
-            (toggleSelection)="toggleSelection($event)">
+            (toggleSelection)="toggleSelection($event)"
+          >
           </app-entry-grid>
-          
+
           <div class="pagination-controls" *ngIf="currentPage > 1 || hasNextPage">
             <button (click)="prevPage()" *ngIf="currentPage > 1" class="btn btn-secondary">
               &larr; Previous
@@ -102,11 +175,15 @@
               Next &rarr;
             </button>
           </div>
-
         </ng-container>
 
         <ng-template #emptyState>
-          <div class="state-message">
+          <!-- FE-012: distinguish "the search failed" from "no results". -->
+          <div class="state-message" *ngIf="loadError">
+            <p>Could not load entries. Please check your connection and try again.</p>
+            <button type="button" class="btn btn-primary" (click)="retryLoad()">Retry</button>
+          </div>
+          <div class="state-message" *ngIf="!loadError">
             <p>No entries found that match the current filters.</p>
           </div>
         </ng-template>
@@ -117,42 +194,84 @@
       <div class="selection-actions" *ngIf="selectedEntryIds.size > 0">
         <span class="selection-count">{{ selectedEntryIds.size }} selected</span>
         <button class="btn btn-secondary btn-sm" (click)="clearSelection()">Cancel</button>
-        
-        <button 
+
+        <button
           *ngIf="canDelete"
-          class="btn btn-danger btn-icon" 
+          class="btn btn-danger btn-icon"
           (click)="onBulkDelete()"
           [disabled]="isBulkProcessing"
-          title="Delete Selected">
-          <svg xmlns="http://www.w3.org/2000/svg" width="1.25em" height="1.25em" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M9 2a1 1 0 00-.894.553L7.382 4H4a1 1 0 000 2v10a2 2 0 002 2h8a2 2 0 002-2V6a1 1 0 100-2h-3.382l-.724-1.447A1 1 0 0011 2H9zM7 8a1 1 0 012 0v6a1 1 0 11-2 0V8zm5-1a1 1 0 00-1 1v6a1 1 0 102 0V8a1 1 0 00-1-1z" clip-rule="evenodd" /></svg>
+          title="Delete Selected"
+        >
+          <svg
+            xmlns="http://www.w3.org/2000/svg"
+            width="1.25em"
+            height="1.25em"
+            viewBox="0 0 20 20"
+            fill="currentColor"
+          >
+            <path
+              fill-rule="evenodd"
+              d="M9 2a1 1 0 00-.894.553L7.382 4H4a1 1 0 000 2v10a2 2 0 002 2h8a2 2 0 002-2V6a1 1 0 100-2h-3.382l-.724-1.447A1 1 0 0011 2H9zM7 8a1 1 0 012 0v6a1 1 0 11-2 0V8zm5-1a1 1 0 00-1 1v6a1 1 0 102 0V8a1 1 0 00-1-1z"
+              clip-rule="evenodd"
+            />
+          </svg>
         </button>
 
-        <button 
+        <button
           class="btn btn-primary btn-icon"
           (click)="onBulkDownload()"
           [disabled]="isBulkProcessing"
-          title="Download Selected">
-          <svg xmlns="http://www.w3.org/2000/svg" width="1.25em" height="1.25em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
+          title="Download Selected"
+        >
+          <svg
+            xmlns="http://www.w3.org/2000/svg"
+            width="1.25em"
+            height="1.25em"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          >
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+            <polyline points="7 10 12 15 17 10"></polyline>
+            <line x1="12" y1="15" x2="12" y2="3"></line>
+          </svg>
         </button>
       </div>
 
-      <input 
-        type="file" 
-        #fabFileInput 
-        multiple 
-        class="sr-only" 
-        [accept]="fileAcceptString" 
-        (change)="onFabFileSelected($event)">
+      <input
+        type="file"
+        #fabFileInput
+        multiple
+        class="sr-only"
+        [accept]="fileAcceptString"
+        (change)="onFabFileSelected($event)"
+      />
 
       <button
         *ngIf="canCreate"
         class="btn btn-primary upload-fab"
         (click)="openUploadModal(fabFileInput)"
-        title="Upload New Entry">
-        <svg xmlns="http://www.w3.org/2000/svg" width="1.5em" height="1.5em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+        title="Upload New Entry"
+      >
+        <svg
+          xmlns="http://www.w3.org/2000/svg"
+          width="1.5em"
+          height="1.5em"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="2"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+        >
+          <line x1="12" y1="5" x2="12" y2="19"></line>
+          <line x1="5" y1="12" x2="19" y2="12"></line>
+        </svg>
       </button>
     </div>
-
   </ng-container>
 
   <ng-template #noDbSelected>
@@ -162,11 +281,12 @@
   </ng-template>
 
   <ng-container *ngIf="showFullscreenPlayer">
-    <app-fullscreen-player 
-      [settings]="fullscreenSettings"
-      [dbId]="dbId!" 
+    <app-fullscreen-player
+      [settings]="fullscreenSettings!"
+      [dbId]="dbId!"
       [contentType]="currentDb!.content_type"
-      (exit)="closeFullscreenPlayer()">
+      (exit)="closeFullscreenPlayer()"
+    >
     </app-fullscreen-player>
   </ng-container>
 </div>

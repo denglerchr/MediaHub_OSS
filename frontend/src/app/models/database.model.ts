@@ -18,17 +18,19 @@ export interface Housekeeping {
 export interface Stats {
   entry_count: number;
   total_disk_space_bytes: number;
+  /** FE-040: the queue depth the API returns (databasehandler/models.go). */
+  queued_count: number;
 }
 
 export interface DatabaseConfig {
   create_preview?: boolean;
-  auto_conversion?: string; 
+  auto_conversion?: string;
 }
 
 export interface Database {
   id: string; // NEW: Added the ULID property
   name: string;
-  content_type: ContentType; 
+  content_type: ContentType;
   n_max_queued: number;
   config: DatabaseConfig;
   housekeeping: Housekeeping;

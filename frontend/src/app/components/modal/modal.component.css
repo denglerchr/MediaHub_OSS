@@ -51,7 +51,7 @@
   cursor: pointer;
   transition: color 0.2s;
   /* Give it a slight physical presence for the focus ring */
-  border-radius: 0.25rem; 
+  border-radius: 0.25rem;
 }
 
 .close-button:hover {
@@ -70,6 +70,12 @@
   color: var(--text-secondary);
 }
 
+/* FE-040: `.modal-sm` is bound by modal.component.html for size="sm" but was never
+   defined (only `.modal-lg` existed) — make the binding live. */
+.modal-content.modal-sm {
+  max-width: 400px;
+}
+
 @media (min-width: 640px) {
   .modal-content.modal-lg {
     max-width: 800px;
@@ -80,4 +86,9 @@
   .modal-content.modal-lg {
     max-width: 900px;
   }
+}
+/* FE-044: the dialog itself receives programmatic focus (initial focus + focus
+   trap) - suppress its focus ring; keyboard focus stays on the inner controls. */
+.modal-content:focus {
+  outline: none;
 }

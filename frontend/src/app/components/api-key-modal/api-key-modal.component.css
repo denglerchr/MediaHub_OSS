@@ -51,7 +51,7 @@
 }
 
 .token-text {
-  font-family: SFMono-Regular, Consolas, "Liberation Mono", Menlo, monospace;
+  font-family: SFMono-Regular, Consolas, 'Liberation Mono', Menlo, monospace;
   font-size: 1rem;
   color: var(--text-primary);
   word-break: break-all;
@@ -134,7 +134,7 @@
   transform: translateX(-50%);
   opacity: 0;
   transition: opacity 0.3s;
-  box-shadow: 0 4px 6px -1px rgba(0,0,0,0.5);
+  box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.5);
   font-size: 0.75rem;
   font-weight: normal;
   line-height: 1.4;

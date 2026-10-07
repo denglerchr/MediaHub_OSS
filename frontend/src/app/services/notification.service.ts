@@ -1,12 +1,14 @@
 // frontend/src/app/services/notification.service.ts
 
 import { Injectable } from '@angular/core';
-import { BehaviorSubject, Observable } from 'rxjs';
+import { BehaviorSubject, Observable, Subject } from 'rxjs';
 
 /**
  * Defines the structure for a notification message.
+ * FE-038: `id` keys the display queue in NotificationHostComponent.
  */
 export interface Notification {
+  id: number;
   message: string;
   type: 'success' | 'error' | 'info';
 }
@@ -26,23 +28,23 @@ export class NotificationService {
   private globalErrorSubject = new BehaviorSubject<string | null>(null);
 
   /**
-   * BehaviorSubject for temporary "toast" notifications.
-   * e.g., "Image uploaded successfully."
+   * FE-038: a plain Subject of id-keyed toasts. The old single-slot
+   * BehaviorSubject replayed the last toast to every new subscriber and silently
+   * replaced an unexpired toast — the host now queues them (see
+   * NotificationHostComponent).
    */
-  private toastNotificationSubject = new BehaviorSubject<Notification | null>(
-    null
-  );
+  private toastNotificationSubject = new Subject<Notification>();
+  private nextToastId = 1;
 
   /**
    * Observable for components to listen for global errors.
    */
-  public globalError$: Observable<string | null> =
-    this.globalErrorSubject.asObservable();
+  public globalError$: Observable<string | null> = this.globalErrorSubject.asObservable();
 
   /**
    * Observable for components to listen for toast notifications.
    */
-  public toastNotification$: Observable<Notification | null> =
+  public toastNotification$: Observable<Notification> =
     this.toastNotificationSubject.asObservable();
 
   constructor() {}
@@ -67,7 +69,7 @@ export class NotificationService {
    * @param message The success message to display.
    */
   showSuccess(message: string): void {
-    this.toastNotificationSubject.next({ message, type: 'success' });
+    this.enqueueToast(message, 'success');
   }
 
   /**
@@ -75,7 +77,7 @@ export class NotificationService {
    * @param message The error message to display.
    */
   showError(message: string): void {
-    this.toastNotificationSubject.next({ message, type: 'error' });
+    this.enqueueToast(message, 'error');
   }
 
   /**
@@ -83,6 +85,10 @@ export class NotificationService {
    * @param message The info message to display.
    */
   showInfo(message: string): void {
-    this.toastNotificationSubject.next({ message, type: 'info' });
+    this.enqueueToast(message, 'info');
+  }
+
+  private enqueueToast(message: string, type: Notification['type']): void {
+    this.toastNotificationSubject.next({ id: this.nextToastId++, message, type });
   }
 }

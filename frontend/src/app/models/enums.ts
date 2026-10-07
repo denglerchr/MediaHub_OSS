@@ -4,7 +4,7 @@ export enum ContentType {
   Image = 'image',
   Audio = 'audio',
   Video = 'video',
-  File = 'file'
+  File = 'file',
 }
 
 export enum EntryStatus {
@@ -12,5 +12,5 @@ export enum EntryStatus {
   Queued = 'queued',
   Ready = 'ready',
   Error = 'error',
-  Deleted = `deleted`
+  Deleted = `deleted`,
 }

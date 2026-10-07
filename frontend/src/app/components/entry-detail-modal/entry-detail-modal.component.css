@@ -3,25 +3,25 @@
 .detail-container {
   display: flex;
   flex-direction: column;
-  gap: 1.5rem; 
+  gap: 1.5rem;
 }
 
 .entry-preview {
   width: 100%;
-  max-height: 50vh; 
+  max-height: 50vh;
   min-height: 200px;
   display: flex;
   justify-content: center;
   align-items: center;
-  background-color: var(--app-bg); 
-  border-radius: 0.375rem; 
-  border: 1px solid var(--border-color); 
-  overflow: hidden; 
+  background-color: var(--app-bg);
+  border-radius: 0.375rem;
+  border: 1px solid var(--border-color);
+  overflow: hidden;
 }
 
 .preview-image {
   max-width: 100%;
-  max-height: 50vh; 
+  max-height: 50vh;
   object-fit: contain;
 }
 
@@ -129,8 +129,13 @@
 }
 
 /* Helpers for boolean text */
-.text-green { color: var(--text-success); font-weight: 600; }
-.text-muted { color: var(--text-muted); }
+.text-green {
+  color: var(--text-success);
+  font-weight: 600;
+}
+.text-muted {
+  color: var(--text-muted);
+}
 
 /* Coordinate link to OpenStreetMap */
 .coordinate-link {
@@ -160,7 +165,8 @@
   gap: 0.75rem 1rem;
 }
 
-.action-group-left, .action-group-right {
+.action-group-left,
+.action-group-right {
   display: flex;
   flex-wrap: wrap;
   align-items: center;

@@ -1,15 +1,9 @@
 // frontend/src/app/directives/file-drag-drop.directive.ts
-import {
-  Directive,
-  HostBinding,
-  HostListener,
-  Output,
-  EventEmitter
-} from '@angular/core';
+import { Directive, HostBinding, HostListener, Output, EventEmitter } from '@angular/core';
 
 @Directive({
   selector: '[appFileDragDrop]',
-  standalone: true
+  standalone: true,
 })
 export class FileDragDropDirective {
   @Output() fileDropped = new EventEmitter<File>();

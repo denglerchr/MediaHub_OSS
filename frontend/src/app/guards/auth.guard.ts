@@ -1,5 +1,11 @@
 import { Injectable } from '@angular/core';
-import { CanActivate, UrlTree, Router, ActivatedRouteSnapshot, RouterStateSnapshot } from '@angular/router';
+import {
+  CanActivate,
+  UrlTree,
+  Router,
+  ActivatedRouteSnapshot,
+  RouterStateSnapshot,
+} from '@angular/router';
 import { Observable, of } from 'rxjs';
 import { map, take, switchMap } from 'rxjs/operators';
 import { AuthService } from '../services/auth.service';
@@ -12,12 +18,12 @@ export class AuthGuard implements CanActivate {
   constructor(
     private authService: AuthService,
     private router: Router,
-    private appInfoService: AppInfoService
+    private appInfoService: AppInfoService,
   ) {}
 
   canActivate(
     route: ActivatedRouteSnapshot,
-    state: RouterStateSnapshot
+    state: RouterStateSnapshot,
   ): Observable<boolean | UrlTree> | boolean | UrlTree {
     // 1. Check for active user session first
     return this.authService.ensureCurrentUser().pipe(
@@ -56,9 +62,9 @@ export class AuthGuard implements CanActivate {
             }
 
             return this.router.createUrlTree(['/login']);
-          })
+          }),
         );
-      })
+      }),
     );
   }
 }

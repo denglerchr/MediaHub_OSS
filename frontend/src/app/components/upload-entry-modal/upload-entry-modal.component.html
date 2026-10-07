@@ -1,39 +1,62 @@
-<app-modal [modalId]="'uploadEntryModal'" [modalTitle]="isMultipleUpload ? ('Upload ' + selectedFiles.length + ' Entries to ' + (currentDatabase?.name || '')) : ('Upload Entry to ' + (currentDatabase?.name || ''))">
-  
-  <div *ngIf="currentDatabase && uploadForm"
-       appFileDragDrop
-       (filesDropped)="$event.length > 1 ? handleMultipleFiles($event) : handleFile($event[0])">
-       
+<app-modal
+  [modalId]="'uploadEntryModal'"
+  [modalTitle]="
+    isMultipleUpload
+      ? 'Upload ' + selectedFiles.length + ' Entries to ' + (currentDatabase?.name || '')
+      : 'Upload Entry to ' + (currentDatabase?.name || '')
+  "
+>
+  <div
+    *ngIf="currentDatabase && uploadForm"
+    appFileDragDrop
+    (filesDropped)="$event.length > 1 ? handleMultipleFiles($event) : handleFile($event[0])"
+  >
     <form [formGroup]="uploadForm" (ngSubmit)="onSubmit()">
-
       <!-- Info Alert for Multiple Uploads -->
       <div class="info-alert" *ngIf="isMultipleUpload">
         <span class="info-icon">ℹ️</span>
         <div class="info-content">
-          <p>These files will share the same custom metadata values specified below. You can edit individual files after upload if required.</p>
-          <p><strong>Note:</strong> Timestamps and GPS coordinates will be extracted from each file individually, or fall back to form defaults if not found.</p>
+          <p>
+            These files will share the same custom metadata values specified below. You can edit
+            individual files after upload if required.
+          </p>
+          <p>
+            <strong>Note:</strong> Timestamps and GPS coordinates will be extracted from each file
+            individually, or fall back to form defaults if not found.
+          </p>
         </div>
       </div>
 
       <!-- Single File Input -->
       <div class="form-group" *ngIf="!isMultipleUpload">
         <label for="file" class="form-label">File</label>
-        
+
         <div class="form-file-input">
-          <input 
-            id="file" 
-            type="file" 
+          <input
+            id="file"
+            type="file"
             class="sr-only"
-            (change)="onFileSelected($event)" 
+            (change)="onFileSelected($event)"
             [accept]="fileAcceptString"
-            #fileInput>
-          
+            #fileInput
+          />
+
           <label for="file" class="file-label">{{ selectedFileName || 'No file chosen' }}</label>
-          
-          <button type="button" class="file-browse-btn" (click)="fileInput.click()" [disabled]="isLoading">Browse...</button>
+
+          <button
+            type="button"
+            class="file-browse-btn"
+            (click)="fileInput.click()"
+            [disabled]="isLoading"
+          >
+            Browse...
+          </button>
         </div>
-        
-        <div *ngIf="uploadForm.get('file')?.invalid && uploadForm.get('file')?.touched" class="form-error">
+
+        <div
+          *ngIf="uploadForm.get('file')?.invalid && uploadForm.get('file')?.touched"
+          class="form-error"
+        >
           A file is required.
         </div>
       </div>
@@ -42,15 +65,21 @@
       <div class="form-group" *ngIf="isMultipleUpload">
         <div class="multiple-files-header">
           <label class="form-label">Files to Upload</label>
-          <input 
-            id="multiFileInput" 
-            type="file" 
+          <input
+            id="multiFileInput"
+            type="file"
             multiple
             class="sr-only"
-            (change)="onMultipleFilesSelected($event)" 
+            (change)="onMultipleFilesSelected($event)"
             [accept]="fileAcceptString"
-            #multiFileInput>
-          <button type="button" class="btn btn-outline btn-sm" (click)="multiFileInput.click()" [disabled]="isLoading">
+            #multiFileInput
+          />
+          <button
+            type="button"
+            class="btn btn-outline btn-sm"
+            (click)="multiFileInput.click()"
+            [disabled]="isLoading"
+          >
             Select different files...
           </button>
         </div>
@@ -70,21 +99,28 @@
       <!-- Timestamp input (only for single file upload) -->
       <div class="form-group" *ngIf="!isMultipleUpload">
         <label for="timestamp" class="form-label">Timestamp</label>
-        <input id="timestamp" type="datetime-local" formControlName="timestamp" class="form-control">
+        <input
+          id="timestamp"
+          type="datetime-local"
+          formControlName="timestamp"
+          class="form-control"
+          step="1"
+        />
       </div>
 
       <div *ngIf="currentDatabase.custom_fields.length > 0" class="custom-fields-section">
         <h4>Custom Metadata</h4>
         <div class="form-grid">
-          
-          <div *ngFor="let field of currentDatabase.custom_fields; trackBy: trackByFieldId" class="form-group">
+          <div
+            *ngFor="let field of currentDatabase.custom_fields; trackBy: trackByFieldId"
+            class="form-group"
+          >
             <ng-container [ngSwitch]="field.type">
-
               <ng-container *ngSwitchCase="'BOOLEAN'">
                 <label [for]="field.name" class="form-label">{{ field.name }} (BOOLEAN)</label>
                 <div class="bool-field-container">
                   <label class="toggle-switch">
-                    <input type="checkbox" [id]="field.name" [formControlName]="field.name">
+                    <input type="checkbox" [id]="field.name" [formControlName]="field.name" />
                     <span class="toggle-slider"></span>
                   </label>
                   <span class="bool-field-value">
@@ -95,77 +131,109 @@
 
               <ng-container *ngSwitchCase="'COORDINATE'">
                 <label class="form-label">{{ field.name }} (COORDINATE)</label>
-                <div [formGroupName]="field.name" class="coordinate-input-group" style="display: flex; gap: 0.5rem;">
-                  <input type="number"
-                         step="any"
-                         min="-90"
-                         max="90"
-                         formControlName="latitude"
-                         placeholder="Latitude (-90 to 90)"
-                         class="form-control"
-                         style="flex: 1;">
-                  <input type="number"
-                         step="any"
-                         min="-180"
-                         max="180"
-                         formControlName="longitude"
-                         placeholder="Longitude (-180 to 180)"
-                         class="form-control"
-                         style="flex: 1;">
+                <div
+                  [formGroupName]="field.name"
+                  class="coordinate-input-group"
+                  style="display: flex; gap: 0.5rem"
+                >
+                  <input
+                    type="number"
+                    step="any"
+                    min="-90"
+                    max="90"
+                    formControlName="latitude"
+                    placeholder="Latitude (-90 to 90)"
+                    class="form-control"
+                    style="flex: 1"
+                  />
+                  <input
+                    type="number"
+                    step="any"
+                    min="-180"
+                    max="180"
+                    formControlName="longitude"
+                    placeholder="Longitude (-180 to 180)"
+                    class="form-control"
+                    style="flex: 1"
+                  />
                 </div>
               </ng-container>
 
               <ng-container *ngSwitchDefault>
-                <label [for]="field.name" class="form-label">{{ field.name }} ({{ field.type }})</label>
-                
+                <label [for]="field.name" class="form-label"
+                  >{{ field.name }} ({{ field.type }})</label
+                >
+
                 <ng-container [ngSwitch]="field.type">
-                  <input *ngSwitchCase="'INTEGER'"
-                         [id]="field.name"
-                         type="number"
-                         step="1"
-                         [formControlName]="field.name"
-                         class="form-control">
-                  
-                  <input *ngSwitchCase="'REAL'"
-                         [id]="field.name"
-                         type="number"
-                         step="any"
-                         [formControlName]="field.name"
-                         class="form-control">
-                  
-                  <input *ngSwitchDefault
-                         [id]="field.name"
-                         type="text"
-                         [formControlName]="field.name"
-                         class="form-control">
+                  <input
+                    *ngSwitchCase="'INTEGER'"
+                    [id]="field.name"
+                    type="number"
+                    step="1"
+                    [formControlName]="field.name"
+                    class="form-control"
+                  />
+
+                  <input
+                    *ngSwitchCase="'REAL'"
+                    [id]="field.name"
+                    type="number"
+                    step="any"
+                    [formControlName]="field.name"
+                    class="form-control"
+                  />
+
+                  <input
+                    *ngSwitchDefault
+                    [id]="field.name"
+                    type="text"
+                    [formControlName]="field.name"
+                    class="form-control"
+                  />
                 </ng-container>
               </ng-container>
-
             </ng-container>
           </div>
-
         </div>
       </div>
 
       <!-- Upload Progress Indicator -->
       <div class="upload-progress-container" *ngIf="isLoading">
         <div class="progress-status">
-          <span *ngIf="isMultipleUpload">Uploading file {{ uploadProgressIndex }} of {{ totalUploads }}: <strong>{{ currentUploadingFileName }}</strong></span>
-          <span *ngIf="!isMultipleUpload">Uploading file: <strong>{{ selectedFileName }}</strong></span>
+          <span *ngIf="isMultipleUpload"
+            >Uploading file {{ uploadProgressIndex }} of {{ totalUploads }}:
+            <strong>{{ currentUploadingFileName }}</strong></span
+          >
+          <span *ngIf="!isMultipleUpload"
+            >Uploading file: <strong>{{ selectedFileName }}</strong></span
+          >
           <span class="progress-percent">{{ uploadProgressPercent }}%</span>
         </div>
         <div class="progress-bar-track">
-          <div class="progress-bar-fill" [style.width.%]="isMultipleUpload ? uploadProgressPercent : 100"></div>
+          <!-- FE-032: per-byte progress for single uploads too (was a static 100%). -->
+          <div class="progress-bar-fill" [style.width.%]="uploadProgressPercent"></div>
         </div>
       </div>
 
       <div class="modal-actions">
-        <button type="button" class="btn btn-secondary" (click)="closeModal()" [disabled]="isLoading">Cancel</button>
+        <button
+          type="button"
+          class="btn btn-secondary"
+          (click)="closeModal()"
+          [disabled]="isLoading"
+        >
+          Cancel
+        </button>
         <button type="submit" class="btn btn-primary" [disabled]="uploadForm.invalid || isLoading">
-          {{ isLoading ? (isMultipleUpload ? ('Uploading (' + uploadProgressIndex + '/' + totalUploads + ')...') : 'Uploading...') : 'Upload' }}
+          {{
+            isLoading
+              ? isMultipleUpload
+                ? 'Uploading (' + uploadProgressIndex + '/' + totalUploads + ')...'
+                : 'Uploading...'
+              : 'Upload'
+          }}
         </button>
       </div>
-
     </form>
   </div>
 

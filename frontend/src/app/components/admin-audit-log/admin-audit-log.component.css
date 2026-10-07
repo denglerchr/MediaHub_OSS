@@ -10,15 +10,8 @@
 }
 
 /* --- Headers & General States --- */
-.header {
-  margin-bottom: 1.5rem;
-}
-
-.header h2 {
-  margin: 0;
-}
-
-.loading-state, .empty-state {
+.loading-state,
+.empty-state {
   padding: 2rem;
   color: var(--text-muted);
   font-style: italic;
@@ -39,11 +32,12 @@
   border-radius: 0.5rem;
   border: 1px solid var(--border-color);
   margin-bottom: 1.5rem;
-  transition: max-height 0.35s cubic-bezier(0.4, 0, 0.2, 1), 
-              opacity 0.25s ease-in-out, 
-              margin-bottom 0.35s cubic-bezier(0.4, 0, 0.2, 1),
-              padding 0.35s cubic-bezier(0.4, 0, 0.2, 1),
-              border-color 0.25s ease-in-out;
+  transition:
+    max-height 0.35s cubic-bezier(0.4, 0, 0.2, 1),
+    opacity 0.25s ease-in-out,
+    margin-bottom 0.35s cubic-bezier(0.4, 0, 0.2, 1),
+    padding 0.35s cubic-bezier(0.4, 0, 0.2, 1),
+    border-color 0.25s ease-in-out;
   max-height: 500px;
   opacity: 1;
   overflow: hidden;
@@ -100,7 +94,9 @@
 }
 
 @keyframes spin {
-  100% { transform: rotate(360deg); }
+  100% {
+    transform: rotate(360deg);
+  }
 }
 
 /* --- Table Specific Styles --- */

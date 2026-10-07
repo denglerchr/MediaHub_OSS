@@ -1,12 +1,18 @@
 // frontend/src/app/services/auth.service.ts
 
 import { Injectable } from '@angular/core';
-import { HttpClient, HttpHeaders, HttpErrorResponse } from '@angular/common/http';
+import { HttpClient, HttpHeaders, HttpErrorResponse, HttpContext } from '@angular/common/http';
 import { BehaviorSubject, Observable, of, throwError } from 'rxjs';
-import { catchError, map, switchMap, tap, finalize } from 'rxjs/operators';
-import { User, TokenResponse, ApiKey } from '../models';
+import { catchError, map, switchMap, tap, finalize, shareReplay } from 'rxjs/operators';
+import { User, TokenResponse, ApiKey, UserPayload, ApiKeyPayload } from '../models';
+import { NotificationService } from './notification.service';
 import { Router } from '@angular/router';
-import { generateRandomState, generateCodeVerifier, generateCodeChallenge } from '../utils/pkce.utils';
+import {
+  generateRandomState,
+  generateCodeVerifier,
+  generateCodeChallenge,
+} from '../utils/pkce.utils';
+import { SKIP_AUTH_REFRESH } from '../interceptors/http-context.tokens';
 
 /**
  * Manages user authentication using JWT (JSON Web Tokens).
@@ -20,13 +26,42 @@ export class AuthService {
   private readonly ACCESS_TOKEN_KEY = 'access_token';
   private readonly REFRESH_TOKEN_KEY = 'refresh_token';
 
+  // FE-008: the access token lives in memory only (never persisted), the refresh
+  // token lives in sessionStorage (per-tab, wiped when the tab closes).
+  private accessToken: string | null = null;
+
+  // FE-009: single-flight refresh shared by every 401 handler in this tab.
+  private refreshInFlight$: Observable<TokenResponse> | null = null;
+
   private currentUserSubject = new BehaviorSubject<User | null>(null);
   public currentUser$ = this.currentUserSubject.asObservable();
 
-  // Helper to check if we have a user loaded
-  public isAuthenticated$ = this.currentUser$.pipe(map((user) => !!user));
+  constructor(
+    private http: HttpClient,
+    private router: Router,
+    // FE-046: shared error reporting (see handleError below).
+    private notificationService: NotificationService,
+  ) {
+    this.migrateLegacyStoredTokens();
+  }
 
-  constructor(private http: HttpClient, private router: Router) { }
+  /**
+   * FE-008: tokens used to be kept in localStorage. Move a legacy refresh token into
+   * sessionStorage so existing sessions survive the upgrade, and scrub the old keys so
+   * the token no longer sits in persistent storage shared across tabs and restarts.
+   */
+  private migrateLegacyStoredTokens(): void {
+    try {
+      const legacyRefreshToken = localStorage.getItem(this.REFRESH_TOKEN_KEY);
+      if (legacyRefreshToken && !sessionStorage.getItem(this.REFRESH_TOKEN_KEY)) {
+        sessionStorage.setItem(this.REFRESH_TOKEN_KEY, legacyRefreshToken);
+      }
+    } catch {
+      // Storage can be unavailable (private mode); nothing to migrate then.
+    }
+    localStorage.removeItem(this.ACCESS_TOKEN_KEY);
+    localStorage.removeItem(this.REFRESH_TOKEN_KEY);
+  }
 
   /**
    * Logs the user in by exchanging credentials for JWT tokens,
@@ -46,14 +81,17 @@ export class AuthService {
       }),
       // 3. Once we have tokens, fetch the user profile (Interceptor will inject Bearer token)
       switchMap(() => this.fetchCurrentUser()),
-      map(user => {
+      map((user) => {
         if (!user) throw new Error('Failed to fetch user details after login');
         return user;
       }),
       catchError((err: HttpErrorResponse) => {
-        this.logout(false); // Clean up if anything fails
+        // FE-018: clean up the partial session *without navigating* — a failed local
+        // login must not drop the ?local=1 escape hatch from the URL.
+        this.clearTokens();
+        this.currentUserSubject.next(null);
         return throwError(() => err);
-      })
+      }),
     );
   }
 
@@ -82,7 +120,7 @@ export class AuthService {
         this.clearTokens();
         this.currentUserSubject.next(null);
         return throwError(() => err);
-      })
+      }),
     );
   }
 
@@ -114,7 +152,7 @@ export class AuthService {
 
     const clientId = encodeURIComponent(oidcConfig.oidc_client_id);
     const redirectUri = encodeURIComponent(
-      oidcConfig.oidc_redirect_url || `${window.location.origin}/auth/callback`
+      oidcConfig.oidc_redirect_url || `${window.location.origin}/auth/callback`,
     );
 
     const queryParams = [
@@ -130,85 +168,228 @@ export class AuthService {
     window.location.href = `${authEndpoint}?${queryParams}`;
   }
 
-
   /**
    * Logs the user out.
    * Attempts to revoke the refresh token on the server, then clears local state.
    * @param notifyServer Whether to call the API to revoke the token (default: true)
    */
   logout(notifyServer: boolean = true): void {
-    const refreshToken = this.getRefreshToken();
-
-    if (notifyServer && refreshToken) {
-      this.http.post(`${this.apiUrl}/logout`, { refresh_token: refreshToken })
-        .pipe(finalize(() => this.clearSessionAndRedirect()))
-        .subscribe({
-          next: () => console.log('Logout successful on server'),
-          error: (err) => console.warn('Logout failed on server (token might be expired)', err)
-        });
+    if (notifyServer && this.getRefreshToken()) {
+      // FE-007: POST /api/logout sits behind AuthMiddleware (router.go:33), so an
+      // expired/absent access token 401s the request *before* the Logout handler
+      // ever deletes the refresh token. Establish a valid access token first
+      // (silent refresh — the common case after idle), then revoke with the
+      // refresh token stored *after* that refresh: rotation (FE-009) means the
+      // body must never be captured before the refresh settles.
+      this.prepareAccessTokenForLogout()
+        .pipe(
+          switchMap(() => {
+            const refreshToken = this.getRefreshToken();
+            if (!refreshToken) {
+              // The silent refresh already proved the session dead (401) and cleared
+              // the tokens — there is nothing left to revoke.
+              return of(null);
+            }
+            // Mark the request so the interceptor never refreshes + retries it (which
+            // would send a stale token in the body and leave the freshly issued one
+            // valid server-side).
+            return this.http.post(
+              `${this.apiUrl}/logout`,
+              { refresh_token: refreshToken },
+              { context: new HttpContext().set(SKIP_AUTH_REFRESH, true) },
+            );
+          }),
+          catchError((err) => {
+            console.warn('Logout failed on server (token might be expired)', err);
+            return of(null);
+          }),
+          // Local cleanup must run no matter how the server-side revocation went.
+          finalize(() => this.clearSessionAndRedirect()),
+        )
+        .subscribe();
     } else {
       this.clearSessionAndRedirect();
     }
   }
 
+  /**
+   * FE-007/N4: establishes a valid access token before the revocation request and
+   * lets any in-flight refresh (FE-009 single-flight) settle first so the logout
+   * body carries the post-rotation refresh token. Never errors — the local cleanup
+   * in `logout()` runs regardless of the outcome.
+   */
+  private prepareAccessTokenForLogout(): Observable<void> {
+    const inFlight = this.refreshInFlight$;
+    const settled: Observable<void> = inFlight
+      ? inFlight.pipe(
+          map(() => undefined),
+          catchError(() => of(undefined)),
+        )
+      : of(undefined);
+    return settled.pipe(switchMap(() => this.ensureAccessToken()));
+  }
+
   private clearSessionAndRedirect(): void {
     this.clearTokens();
     this.currentUserSubject.next(null);
-    this.router.navigate(['/login']);
+    // FE-018: keep the ?local=1 escape hatch alive when bouncing to the login page.
+    const currentParams = this.router.routerState.snapshot.root.queryParams || {};
+    const queryParams =
+      currentParams['local'] !== undefined ? { local: currentParams['local'] } : {};
+    this.router.navigate(['/login'], { queryParams });
   }
 
   /**
    * Refreshes the access token using the refresh token.
    * This is typically called by the JwtInterceptor.
+   *
+   * FE-009: concurrent callers share one in-flight refresh (single-flight), and a
+   * 401 is retried once with the currently stored token before the session is
+   * declared dead — rotation elsewhere (e.g. a duplicated tab) invalidates the token
+   * we attempted with while a fresh one may already be stored.
    */
   refreshToken(): Observable<TokenResponse> {
-    const refreshToken = this.getRefreshToken();
-    if (!refreshToken) {
+    if (this.refreshInFlight$) {
+      return this.refreshInFlight$;
+    }
+
+    const tokenAtAttempt = this.getRefreshToken();
+    if (!tokenAtAttempt) {
       return throwError(() => new Error('No refresh token available'));
     }
 
-    return this.http.post<TokenResponse>(`${this.apiUrl}/token/refresh`, {
-      refresh_token: refreshToken
-    }).pipe(
-      tap((tokens) => {
-        this.storeTokens(tokens);
-      })
+    this.refreshInFlight$ = this.requestTokenRefresh(tokenAtAttempt).pipe(
+      catchError((err: HttpErrorResponse) => {
+        const latestToken = this.getRefreshToken();
+        if (
+          err instanceof HttpErrorResponse &&
+          err.status === 401 &&
+          latestToken &&
+          latestToken !== tokenAtAttempt
+        ) {
+          return this.requestTokenRefresh(latestToken);
+        }
+        return throwError(() => err);
+      }),
+      finalize(() => {
+        this.refreshInFlight$ = null;
+      }),
+      shareReplay(1),
     );
+
+    return this.refreshInFlight$;
+  }
+
+  private requestTokenRefresh(refreshToken: string): Observable<TokenResponse> {
+    return this.http
+      .post<TokenResponse>(`${this.apiUrl}/token/refresh`, {
+        refresh_token: refreshToken,
+      })
+      .pipe(
+        tap((tokens) => {
+          this.storeTokens(tokens);
+        }),
+      );
   }
 
   /**
    * Fetches the current user's data using the stored access token.
    */
   public fetchCurrentUser(): Observable<User | null> {
-    if (!this.getAccessToken()) {
-      return of(null);
-    }
+    return this.ensureAccessToken().pipe(
+      switchMap(() => {
+        if (!this.getAccessToken()) {
+          return of(null);
+        }
 
-    return this.http.get<User>(`${this.apiUrl}/me`).pipe(
-      tap((user) => {
-        this.currentUserSubject.next(user);
+        return this.http.get<User>(`${this.apiUrl}/me`).pipe(
+          tap((user) => {
+            this.currentUserSubject.next(user);
+          }),
+          catchError((err: HttpErrorResponse) => {
+            // FE-010: only an actual 401 invalidates the session. Transient failures
+            // (status 0, 5xx) must keep the session alive and just report "no user".
+            if (err?.status === 401) {
+              this.clearSessionAndRedirect();
+            }
+            return of(null);
+          }),
+        );
       }),
-      catchError(() => {
-        // If fetching user fails (e.g., 401 even after refresh attempts), log out locally
-        this.clearSessionAndRedirect();
-        return of(null);
-      })
     );
+  }
+
+  /**
+   * FE-008: the access token is kept in memory only, so a reload leaves us without one
+   * while the refresh token survives in sessionStorage. Silently refresh before
+   * concluding the session is gone. A transient refresh failure keeps the refresh
+   * token; only a 401 drops it.
+   */
+  private ensureAccessToken(): Observable<void> {
+    if ((this.getAccessToken() && !this.isAccessTokenExpired()) || !this.getRefreshToken()) {
+      return of(undefined);
+    }
+    return this.forceAccessTokenRefresh();
+  }
+
+  /**
+   * FE-011: unconditional silent access-token refresh. Media elements fail with
+   * 401 Range responses that never reach the interceptor, so a media-URL
+   * regeneration after such a failure must not trust the stored token — nothing
+   * has refreshed it in the meantime. Never errors: a failed refresh keeps the
+   * current token in place (only a 401 drops the session) so the caller can still
+   * regenerate and compare its URL.
+   */
+  public forceAccessTokenRefresh(): Observable<void> {
+    return this.refreshToken().pipe(
+      map(() => undefined),
+      catchError((err: HttpErrorResponse) => {
+        if (err?.status === 401) {
+          this.clearTokens();
+          this.currentUserSubject.next(null);
+        }
+        return of(undefined);
+      }),
+    );
+  }
+
+  /**
+   * FE-007: the access token is a JWT with an `exp` claim (tokenhandler/utils.go).
+   * A token that is present but expired is useless for authenticated requests
+   * (AuthMiddleware rejects it), so `ensureAccessToken()` treats it like a missing
+   * one and silently refreshes. Tokens that are not JWTs or carry no readable
+   * `exp` are assumed valid (fail-open, same as before this check existed).
+   */
+  private isAccessTokenExpired(): boolean {
+    const token = this.accessToken;
+    if (!token) {
+      return true;
+    }
+    const parts = token.split('.');
+    if (parts.length !== 3) {
+      return false;
+    }
+    try {
+      const payload = JSON.parse(atob(parts[1].replace(/-/g, '+').replace(/_/g, '/')));
+      if (typeof payload.exp !== 'number') {
+        return false;
+      }
+      // Small skew so the token is refreshed before the server starts rejecting it.
+      return payload.exp * 1000 <= Date.now() + 5000;
+    } catch {
+      return false;
+    }
   }
 
   /**
    * Ensures that the current user profile is loaded.
    * If already present in memory, returns it immediately.
-   * If token exists, fetches the user from /me.
-   * Otherwise returns null.
+   * Otherwise attempts to restore the session (silent refresh on reload) and fetch /me.
    */
   public ensureCurrentUser(): Observable<User | null> {
     const user = this.getCurrentUser();
     if (user) {
       return of(user);
-    }
-    if (!this.getAccessToken()) {
-      return of(null);
     }
     return this.fetchCurrentUser();
   }
@@ -216,21 +397,22 @@ export class AuthService {
   // --- Token Management Helpers ---
 
   private storeTokens(tokens: TokenResponse): void {
-    localStorage.setItem(this.ACCESS_TOKEN_KEY, tokens.access_token);
-    localStorage.setItem(this.REFRESH_TOKEN_KEY, tokens.refresh_token);
+    // FE-008: access token in memory only, refresh token in per-tab sessionStorage.
+    this.accessToken = tokens.access_token;
+    sessionStorage.setItem(this.REFRESH_TOKEN_KEY, tokens.refresh_token);
   }
 
   private clearTokens(): void {
-    localStorage.removeItem(this.ACCESS_TOKEN_KEY);
-    localStorage.removeItem(this.REFRESH_TOKEN_KEY);
+    this.accessToken = null;
+    sessionStorage.removeItem(this.REFRESH_TOKEN_KEY);
   }
 
   public getAccessToken(): string | null {
-    return localStorage.getItem(this.ACCESS_TOKEN_KEY);
+    return this.accessToken;
   }
 
   public getRefreshToken(): string | null {
-    return localStorage.getItem(this.REFRESH_TOKEN_KEY);
+    return sessionStorage.getItem(this.REFRESH_TOKEN_KEY);
   }
 
   public getCurrentUser(): User | null {
@@ -245,7 +427,10 @@ export class AuthService {
    * @param databaseId The ULID of the database to check access for.
    * @param permission The specific permission to check (e.g., 'can_view', 'can_create').
    */
-  public hasDatabasePermission(databaseId: string, permission: keyof import('../models').Permission): boolean {
+  public hasDatabasePermission(
+    databaseId: string,
+    permission: keyof import('../models').Permission,
+  ): boolean {
     const user = this.getCurrentUser();
     if (!user) return false;
 
@@ -253,7 +438,7 @@ export class AuthService {
     if (user.is_admin) return true;
 
     // Find the specific permission record for this database using the ULID
-    const dbPerms = user.permissions?.find(p => p.database_id === databaseId);
+    const dbPerms = user.permissions?.find((p) => p.database_id === databaseId);
 
     if (!dbPerms) return false;
 
@@ -261,13 +446,46 @@ export class AuthService {
     return !!dbPerms[permission];
   }
 
-  changeOwnPassword(oldPassword: string, newPassword: string): Observable<any> {
+  changeOwnPassword(oldPassword: string, newPassword: string): Observable<unknown> {
     const payload = {
       old_password: oldPassword,
-      new_password: newPassword
+      new_password: newPassword,
     };
+    // FE-046: deliberately *not* routed through handleError — the caller maps the
+    // outcome to password-specific messages (401 → "Incorrect current password.").
     return this.http.patch(`${this.apiUrl}/me`, payload);
   }
+
+  /**
+   * FE-046: shared error handler (mirrors DatabaseService/AuditService) — surfaces
+   * the server's actual reason (e.g. the 409 "cannot remove the last admin") instead
+   * of letting callers swallow it into console.error. Exactly one toast per failure.
+   */
+  public handleError(error: HttpErrorResponse): Observable<never> {
+    let errorMessage = 'An unknown error occurred.';
+    if (error.error && typeof error.error.error === 'string') {
+      errorMessage = error.error.error;
+    } else if (error.status === 0) {
+      errorMessage = 'Network error: Server is unreachable.';
+    } else if (error.status === 401) {
+      errorMessage = 'Unauthorized: Please log in again.';
+    } else if (error.status === 403) {
+      errorMessage = 'Forbidden: You lack permission for this operation.';
+    } else if (error.status === 404) {
+      errorMessage = 'Not Found: The requested user resource does not exist.';
+    } else if (error.status >= 500) {
+      errorMessage = `Server Error (${error.status}): ${error.statusText || 'Internal Error'}`;
+    } else if (error.message) {
+      errorMessage = error.message;
+    }
+
+    this.notificationService.showError(errorMessage);
+    return throwError(() => new Error(errorMessage));
+  }
+
+  // FE-042: the user/key management payloads are typed (`UserPayload`,
+  // `ApiKeyPayload`); only the *mutating* methods route through handleError so a
+  // failure shows exactly one precise toast (FE-046).
 
   getUsers(accountType?: string): Observable<User[]> {
     let url = `${this.apiUrl}/users`;
@@ -281,16 +499,22 @@ export class AuthService {
     return this.http.get<User>(`${this.apiUrl}/user/${userId}`);
   }
 
-  createUser(userData: any): Observable<User> {
-    return this.http.post<User>(`${this.apiUrl}/user`, userData);
+  createUser(userData: UserPayload): Observable<User> {
+    return this.http
+      .post<User>(`${this.apiUrl}/user`, userData)
+      .pipe(catchError((err: HttpErrorResponse) => this.handleError(err)));
   }
 
-  updateUser(userId: string, updates: any): Observable<User> {
-    return this.http.patch<User>(`${this.apiUrl}/user/${userId}`, updates);
+  updateUser(userId: string, updates: UserPayload): Observable<User> {
+    return this.http
+      .patch<User>(`${this.apiUrl}/user/${userId}`, updates)
+      .pipe(catchError((err: HttpErrorResponse) => this.handleError(err)));
   }
 
   deleteUser(userId: string): Observable<{ message: string }> {
-    return this.http.delete<{ message: string }>(`${this.apiUrl}/user/${userId}`);
+    return this.http
+      .delete<{ message: string }>(`${this.apiUrl}/user/${userId}`)
+      .pipe(catchError((err: HttpErrorResponse) => this.handleError(err)));
   }
 
   // --- API Key Management Methods ---
@@ -303,15 +527,21 @@ export class AuthService {
     return this.http.get<ApiKey[]>(`${this.apiUrl}/user/${userId}/keys`);
   }
 
-  createUserKey(userId: string, data: any): Observable<ApiKey> {
-    return this.http.post<ApiKey>(`${this.apiUrl}/user/${userId}/keys`, data);
+  createUserKey(userId: string, data: ApiKeyPayload): Observable<ApiKey> {
+    return this.http
+      .post<ApiKey>(`${this.apiUrl}/user/${userId}/keys`, data)
+      .pipe(catchError((err: HttpErrorResponse) => this.handleError(err)));
   }
 
-  updateUserKey(userId: string, keyId: string, data: any): Observable<ApiKey> {
-    return this.http.patch<ApiKey>(`${this.apiUrl}/user/${userId}/keys/${keyId}`, data);
+  updateUserKey(userId: string, keyId: string, data: ApiKeyPayload): Observable<ApiKey> {
+    return this.http
+      .patch<ApiKey>(`${this.apiUrl}/user/${userId}/keys/${keyId}`, data)
+      .pipe(catchError((err: HttpErrorResponse) => this.handleError(err)));
   }
 
-  deleteUserKey(userId: string, keyId: string): Observable<any> {
-    return this.http.delete(`${this.apiUrl}/user/${userId}/keys/${keyId}`);
+  deleteUserKey(userId: string, keyId: string): Observable<unknown> {
+    return this.http
+      .delete(`${this.apiUrl}/user/${userId}/keys/${keyId}`)
+      .pipe(catchError((err: HttpErrorResponse) => this.handleError(err)));
   }
 }

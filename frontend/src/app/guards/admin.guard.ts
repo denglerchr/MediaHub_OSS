@@ -10,15 +10,15 @@ import { NotificationService } from '../services/notification.service';
 })
 export class AdminGuard implements CanActivate {
   constructor(
-    private authService: AuthService, 
+    private authService: AuthService,
     private router: Router,
-    private notificationService: NotificationService
+    private notificationService: NotificationService,
   ) {}
 
   canActivate(): Observable<boolean | UrlTree> | boolean | UrlTree {
     return this.authService.ensureCurrentUser().pipe(
       take(1),
-      map(user => {
+      map((user) => {
         if (!user) {
           return this.router.createUrlTree(['/login']);
         }
@@ -27,11 +27,11 @@ export class AdminGuard implements CanActivate {
         if (user.is_admin) {
           return true;
         }
-        
+
         // Show an error before redirecting
         this.notificationService.showError('Access Denied: Administrator privileges are required.');
         return this.router.createUrlTree(['/dashboard']);
-      })
+      }),
     );
   }
 }

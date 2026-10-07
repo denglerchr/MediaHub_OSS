@@ -11,13 +11,13 @@
   flex-direction: column;
 }
 
-.header-section { 
-  margin-bottom: 1.5rem; 
+.header-section {
+  margin-bottom: 1.5rem;
 }
 
-.subtitle { 
-  color: var(--text-muted); 
-  margin-top: -0.5rem; 
+.subtitle {
+  color: var(--text-muted);
+  margin-top: -0.5rem;
 }
 
 /* =========================================
@@ -67,8 +67,12 @@
 /* =========================================
    LAYOUT & HELPERS
 ========================================= */
-.text-small { font-size: 0.85rem; }
-.text-center { text-align: center; }
+.text-small {
+  font-size: 0.85rem;
+}
+.text-center {
+  text-align: center;
+}
 
 .step-view h3 {
   /* color is securely inherited from global styles.css */
@@ -81,7 +85,7 @@
 
 /* Local definition for the success button using standardized green */
 .btn-success {
-  background-color: #48bb78; 
+  background-color: #48bb78;
   color: var(--text-primary);
 }
 .btn-success:hover {
@@ -125,20 +129,20 @@
   gap: 1rem;
 }
 
-.filename { 
-  font-weight: 500; 
+.filename {
+  font-weight: 500;
   color: var(--text-primary);
-  margin: 0 0 0.25rem 0; 
+  margin: 0 0 0.25rem 0;
 }
 
-.filesize { 
-  margin: 0; 
-  font-size: 0.9rem; 
+.filesize {
+  margin: 0;
+  font-size: 0.9rem;
 }
 
-.file-actions { 
-  display: flex; 
-  gap: 0.75rem; 
+.file-actions {
+  display: flex;
+  gap: 0.75rem;
 }
 
 .parsing-state {
@@ -148,9 +152,15 @@
 }
 
 @keyframes pulse {
-  0% { opacity: 0.6; }
-  50% { opacity: 1; }
-  100% { opacity: 0.6; }
+  0% {
+    opacity: 0.6;
+  }
+  50% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0.6;
+  }
 }
 
 /* =========================================
@@ -179,8 +189,8 @@
   margin-bottom: 1rem;
 }
 
-.mapping-row:last-child { 
-  margin-bottom: 0; 
+.mapping-row:last-child {
+  margin-bottom: 0;
 }
 
 .csv-column {
@@ -198,8 +208,8 @@
   font-weight: bold;
 }
 
-.db-column { 
-  flex: 1; 
+.db-column {
+  flex: 1;
 }
 
 /* =========================================
@@ -257,6 +267,6 @@
   gap: 0.75rem;
 }
 
-.center-actions { 
-  justify-content: center; 
+.center-actions {
+  justify-content: center;
 }

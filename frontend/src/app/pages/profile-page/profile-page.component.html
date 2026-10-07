@@ -1,8 +1,18 @@
 <div class="profile-container page-container" *ngIf="user">
   <div class="sticky-header">
-    <div style="display: flex; align-items: center; gap: 0.75rem;">
+    <div style="display: flex; align-items: center; gap: 0.75rem">
       <a routerLink="/dashboard" class="back-btn" title="Back to Overview">
-        <svg xmlns="http://www.w3.org/2000/svg" width="1.5em" height="1.5em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <svg
+          xmlns="http://www.w3.org/2000/svg"
+          width="1.5em"
+          height="1.5em"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="2"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+        >
           <line x1="19" y1="12" x2="5" y2="12"></line>
           <polyline points="12 19 5 12 12 5"></polyline>
         </svg>
@@ -15,7 +25,6 @@
     <div class="split-layout">
       <!-- Left Pane: Settings (Change Password & Permissions) -->
       <div class="settings-pane">
-        
         <!-- Section 1: User Info & Permissions -->
         <div class="card">
           <div class="card-header">
@@ -28,51 +37,63 @@
             </div>
             <div class="info-row">
               <span class="info-label">Role:</span>
-              <span class="info-value badge" [ngClass]="user.is_admin ? 'badge-primary' : 'badge-secondary'">
+              <span
+                class="info-value badge"
+                [ngClass]="user.is_admin ? 'badge-primary' : 'badge-secondary'"
+              >
                 {{ user.is_admin ? 'Global Administrator' : 'Standard User' }}
               </span>
             </div>
             <div class="info-row">
               <span class="info-label">Account Type:</span>
-              <span class="info-value badge" [ngClass]="user.account_type === 'oidc' ? 'badge-primary' : 'badge-secondary'">
-                {{ user.account_type === 'oidc' ? 'Single Sign-On (OIDC)' : (user.account_type === 'service_account' ? 'Service Account' : 'Local User') }}
+              <span
+                class="info-value badge"
+                [ngClass]="user.account_type === 'oidc' ? 'badge-primary' : 'badge-secondary'"
+              >
+                {{
+                  user.account_type === 'oidc'
+                    ? 'Single Sign-On (OIDC)'
+                    : user.account_type === 'service_account'
+                      ? 'Service Account'
+                      : 'Local User'
+                }}
               </span>
             </div>
-            
-            <div class="permissions-details" style="margin-top: 1.5rem;">
+
+            <div class="permissions-details" style="margin-top: 1.5rem">
               <h4>Authorized Databases</h4>
               <p class="description-text" *ngIf="user.is_admin">
                 You are an administrator and automatically have full access to all databases.
               </p>
-              
+
               <div class="table-wrapper" *ngIf="databasePermissionsMapped.length > 0">
                 <table class="table">
                   <thead>
                     <tr>
                       <th>Database</th>
-                      <th style="text-align: center;">View</th>
-                      <th style="text-align: center;">Create</th>
-                      <th style="text-align: center;">Edit</th>
-                      <th style="text-align: center;">Delete</th>
-                      <th style="text-align: center;">Admin</th>
+                      <th style="text-align: center">View</th>
+                      <th style="text-align: center">Create</th>
+                      <th style="text-align: center">Edit</th>
+                      <th style="text-align: center">Delete</th>
+                      <th style="text-align: center">Admin</th>
                     </tr>
                   </thead>
                   <tbody>
-                    <tr *ngFor="let p of databasePermissionsMapped">
-                      <td style="font-weight: 500;">{{ p.name }}</td>
-                      <td style="text-align: center;">
+                    <tr *ngFor="let p of databasePermissionsMapped; trackBy: trackByPermissionName">
+                      <td style="font-weight: 500">{{ p.name }}</td>
+                      <td style="text-align: center">
                         <span class="status-dot" [class.active]="p.view"></span>
                       </td>
-                      <td style="text-align: center;">
+                      <td style="text-align: center">
                         <span class="status-dot" [class.active]="p.create"></span>
                       </td>
-                      <td style="text-align: center;">
+                      <td style="text-align: center">
                         <span class="status-dot" [class.active]="p.edit"></span>
                       </td>
-                      <td style="text-align: center;">
+                      <td style="text-align: center">
                         <span class="status-dot" [class.active]="p.delete"></span>
                       </td>
-                      <td style="text-align: center;">
+                      <td style="text-align: center">
                         <span class="status-dot" [class.active]="p.admin"></span>
                       </td>
                     </tr>
@@ -80,74 +101,124 @@
                 </table>
               </div>
 
-              <div class="empty-state" *ngIf="!user.is_admin && databasePermissionsMapped.length === 0" style="padding: 1rem 0;">
+              <div
+                class="empty-state"
+                *ngIf="!user.is_admin && databasePermissionsMapped.length === 0"
+                style="padding: 1rem 0"
+              >
                 No database access permissions assigned yet.
               </div>
             </div>
           </div>
         </div>
 
-        <!-- Section 2: Change Password (hidden for OIDC users) -->
-        <div class="card" *ngIf="user.account_type !== 'oidc'">
+        <!-- Section 2: Change Password (FE-016: local accounts only — the backend
+             rejects OIDC *and* service accounts, userhandler/users.go:101-104) -->
+        <div class="card" *ngIf="user.account_type === 'local'">
           <div class="card-header">
             <h3>Change Password</h3>
           </div>
           <div class="card-body">
             <form [formGroup]="passwordForm" (ngSubmit)="onSubmitPassword()">
               <div class="form-group">
-                <label class="form-label">Current Password <span class="required-asterisk">*</span></label>
-                <input type="password" formControlName="oldPassword" class="form-control" placeholder="Enter current password">
-                <div *ngIf="passwordForm.get('oldPassword')?.touched && passwordForm.get('oldPassword')?.invalid" class="form-error">
+                <label class="form-label"
+                  >Current Password <span class="required-asterisk">*</span></label
+                >
+                <input
+                  type="password"
+                  formControlName="oldPassword"
+                  class="form-control"
+                  placeholder="Enter current password"
+                />
+                <div
+                  *ngIf="
+                    passwordForm.get('oldPassword')?.touched &&
+                    passwordForm.get('oldPassword')?.invalid
+                  "
+                  class="form-error"
+                >
                   Current password is required.
                 </div>
               </div>
 
               <div class="form-group">
-                <label class="form-label">New Password <span class="required-asterisk">*</span></label>
-                <input type="password" formControlName="newPassword" class="form-control" placeholder="Enter at least 8 characters">
-                <div *ngIf="passwordForm.get('newPassword')?.touched && passwordForm.get('newPassword')?.invalid" class="form-error">
+                <label class="form-label"
+                  >New Password <span class="required-asterisk">*</span></label
+                >
+                <input
+                  type="password"
+                  formControlName="newPassword"
+                  class="form-control"
+                  placeholder="Enter at least 8 characters"
+                />
+                <div
+                  *ngIf="
+                    passwordForm.get('newPassword')?.touched &&
+                    passwordForm.get('newPassword')?.invalid
+                  "
+                  class="form-error"
+                >
                   Password must be at least 8 characters.
                 </div>
               </div>
 
               <div class="form-group">
-                <label class="form-label">Confirm New Password <span class="required-asterisk">*</span></label>
-                <input type="password" formControlName="confirmPassword" class="form-control" placeholder="Confirm new password">
-                <div *ngIf="passwordForm.get('confirmPassword')?.touched && (passwordForm.get('confirmPassword')?.invalid || passwordForm.hasError('mismatch'))" class="form-error">
-                  <span *ngIf="passwordForm.get('confirmPassword')?.errors?.['required']">Confirmation is required.</span>
+                <label class="form-label"
+                  >Confirm New Password <span class="required-asterisk">*</span></label
+                >
+                <input
+                  type="password"
+                  formControlName="confirmPassword"
+                  class="form-control"
+                  placeholder="Confirm new password"
+                />
+                <div
+                  *ngIf="
+                    passwordForm.get('confirmPassword')?.touched &&
+                    (passwordForm.get('confirmPassword')?.invalid ||
+                      passwordForm.hasError('mismatch'))
+                  "
+                  class="form-error"
+                >
+                  <span *ngIf="passwordForm.get('confirmPassword')?.errors?.['required']"
+                    >Confirmation is required.</span
+                  >
                   <span *ngIf="passwordForm.hasError('mismatch')">Passwords do not match.</span>
                 </div>
               </div>
 
-              <div class="form-actions" style="margin-top: 1rem; padding: 0;">
-                <button type="submit" class="btn btn-primary" [disabled]="passwordForm.invalid || isPasswordLoading">
+              <div class="form-actions" style="margin-top: 1rem; padding: 0">
+                <button
+                  type="submit"
+                  class="btn btn-primary"
+                  [disabled]="passwordForm.invalid || isPasswordLoading"
+                >
                   {{ isPasswordLoading ? 'Updating...' : 'Update Password' }}
                 </button>
               </div>
             </form>
           </div>
         </div>
-
       </div>
 
       <!-- Right Pane: Personal API Keys Manager -->
       <div class="keys-pane">
         <div class="card">
-          <div class="card-header" style="display: flex; justify-content: space-between; align-items: center;">
+          <div
+            class="card-header"
+            style="display: flex; justify-content: space-between; align-items: center"
+          >
             <h3>Personal API Keys</h3>
-            <button class="btn btn-primary" (click)="openCreateKeyModal()">
-              Create API Key
-            </button>
+            <button class="btn btn-primary" (click)="openCreateKeyModal()">Create API Key</button>
           </div>
-          
+
           <div class="card-body">
             <p class="description-text">
-              API Keys allow you to access the database APIs. They inherit your permissions but can be restricted with specific scopes.
+              API Keys allow you to access the database APIs. They inherit your permissions but can
+              be restricted with specific scopes.
             </p>
 
-            <div *ngIf="isKeysLoading" class="loading-state">
-              Loading API keys...
-            </div>
+            <div *ngIf="isKeysLoading" class="loading-state">Loading API keys...</div>
 
             <div *ngIf="!isKeysLoading" class="table-wrapper">
               <table class="table" *ngIf="apiKeys.length > 0">
@@ -157,32 +228,78 @@
                     <th>Hint</th>
                     <th>Expires</th>
                     <th>Last Used</th>
-                    <th style="text-align: right; width: 80px;">Actions</th>
+                    <th style="text-align: right; width: 80px">Actions</th>
                   </tr>
                 </thead>
                 <tbody>
-                  <tr *ngFor="let key of apiKeys">
-                    <td style="font-weight: 600;">{{ key.name }}</td>
+                  <tr *ngFor="let key of apiKeys; trackBy: trackByKeyId">
+                    <td style="font-weight: 600">{{ key.name }}</td>
                     <td>
                       <code class="hint-code">{{ key.key_hint }}</code>
                     </td>
                     <td>
-                      <span *ngIf="key.expires_at">{{ key.expires_at | date:'shortDate' }}</span>
-                      <span *ngIf="!key.expires_at" class="text-muted" style="font-size: 0.8rem;">Never</span>
+                      <span *ngIf="key.expires_at">{{ key.expires_at | date: 'shortDate' }}</span>
+                      <span *ngIf="!key.expires_at" class="text-muted" style="font-size: 0.8rem"
+                        >Never</span
+                      >
                     </td>
                     <td>
-                      <span *ngIf="key.last_used_at">{{ key.last_used_at | date:'short' }}</span>
-                      <span *ngIf="!key.last_used_at" class="text-muted" style="font-size: 0.8rem;">Never</span>
+                      <span *ngIf="key.last_used_at">{{ key.last_used_at | date: 'short' }}</span>
+                      <span *ngIf="!key.last_used_at" class="text-muted" style="font-size: 0.8rem"
+                        >Never</span
+                      >
                     </td>
-                    <td style="text-align: right;">
-                      <div style="display: flex; gap: 0.5rem; justify-content: flex-end;">
-                        <button class="btn-icon" (click)="openEditKeyModal(key)" title="Edit Scopes / Expiry">
+                    <td style="text-align: right">
+                      <div style="display: flex; gap: 0.5rem; justify-content: flex-end">
+                        <button
+                          class="btn-icon"
+                          (click)="openEditKeyModal(key)"
+                          title="Edit Scopes / Expiry"
+                        >
                           <!-- edit icon -->
-                          <svg xmlns="http://www.w3.org/2000/svg" width="1.2em" height="1.2em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path><path d="M18.5 2.5a2.121 2.121 0 1 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path></svg>
+                          <svg
+                            xmlns="http://www.w3.org/2000/svg"
+                            width="1.2em"
+                            height="1.2em"
+                            viewBox="0 0 24 24"
+                            fill="none"
+                            stroke="currentColor"
+                            stroke-width="2"
+                            stroke-linecap="round"
+                            stroke-linejoin="round"
+                          >
+                            <path
+                              d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"
+                            ></path>
+                            <path
+                              d="M18.5 2.5a2.121 2.121 0 1 1 3 3L12 15l-4 1 1-4 9.5-9.5z"
+                            ></path>
+                          </svg>
                         </button>
-                        <button class="btn-icon btn-icon-danger" (click)="openRevokeConfirm(key)" title="Revoke API Key">
+                        <button
+                          class="btn-icon btn-icon-danger"
+                          (click)="openRevokeConfirm(key)"
+                          title="Revoke API Key"
+                        >
                           <!-- trash icon -->
-                          <svg xmlns="http://www.w3.org/2000/svg" width="1.2em" height="1.2em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path><line x1="10" y1="11" x2="10" y2="17"></line><line x1="14" y1="11" x2="14" y2="17"></line></svg>
+                          <svg
+                            xmlns="http://www.w3.org/2000/svg"
+                            width="1.2em"
+                            height="1.2em"
+                            viewBox="0 0 24 24"
+                            fill="none"
+                            stroke="currentColor"
+                            stroke-width="2"
+                            stroke-linecap="round"
+                            stroke-linejoin="round"
+                          >
+                            <polyline points="3 6 5 6 21 6"></polyline>
+                            <path
+                              d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"
+                            ></path>
+                            <line x1="10" y1="11" x2="10" y2="17"></line>
+                            <line x1="14" y1="11" x2="14" y2="17"></line>
+                          </svg>
                         </button>
                       </div>
                     </td>
@@ -190,15 +307,13 @@
                 </tbody>
               </table>
 
-              <div class="empty-state" *ngIf="apiKeys.length === 0" style="padding: 2rem 1.25rem;">
+              <div class="empty-state" *ngIf="apiKeys.length === 0" style="padding: 2rem 1.25rem">
                 No API keys generated yet. Click "Create API Key" to make one.
               </div>
             </div>
-
           </div>
         </div>
       </div>
-
     </div>
   </div>
 </div>

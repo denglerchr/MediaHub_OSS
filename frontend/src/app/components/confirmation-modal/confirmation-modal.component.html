@@ -3,18 +3,17 @@
     <p>{{ modalData.message }}</p>
   </div>
   <div class="modal-actions">
-    
     <button type="button" class="btn btn-secondary" (click)="onCancel()">
       {{ modalData.cancelText }}
     </button>
-    
-    <button 
-      type="button" 
-      class="btn" 
-      [ngClass]="modalData.confirmButtonClass || 'btn-danger'" 
-      (click)="onConfirm()">
+
+    <button
+      type="button"
+      class="btn"
+      [ngClass]="modalData.confirmButtonClass || 'btn-danger'"
+      (click)="onConfirm()"
+    >
       {{ modalData.confirmText }}
     </button>
-    
   </div>
 </app-modal>

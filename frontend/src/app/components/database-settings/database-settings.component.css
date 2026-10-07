@@ -9,14 +9,6 @@
   height: 100%;
 }
 
-.header {
-  margin-bottom: 1.5rem;
-}
-
-.header h2 {
-  margin-bottom: 0; /* Only override the bottom margin, top is handled globally */
-}
-
 .settings-card {
   /* Use CSS variables */
   background: var(--content-bg);
@@ -36,13 +28,12 @@
   color: var(--text-muted);
   margin-top: 2rem;
   margin-bottom: 1rem;
-  font-weight: 600; 
+  font-weight: 600;
 }
 
 .settings-card h3 + .sub-heading {
   margin-top: 0;
 }
-
 
 /* Stats Section */
 .stats-grid {
@@ -65,7 +56,7 @@
 .stat-value {
   color: var(--text-primary);
   /* Use fluid scaling so huge numbers don't break mobile layouts */
-  font-size: var(--text-xl); 
+  font-size: var(--text-xl);
   font-weight: 600;
 }
 
@@ -230,7 +221,9 @@
   cursor: pointer;
   font-size: 1.1rem;
   opacity: 0.75;
-  transition: opacity 0.2s, transform 0.1s;
+  transition:
+    opacity 0.2s,
+    transform 0.1s;
   padding: 0.25rem;
 }
 
@@ -252,11 +245,7 @@
 }
 
 @media (min-width: 1024px) {
-  .header h2 {
-    font-size: 1.35rem;
-  }
   .stat-value {
     font-size: 1.35rem;
   }
 }
-

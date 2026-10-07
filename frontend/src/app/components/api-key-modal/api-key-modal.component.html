@@ -1,12 +1,31 @@
 <app-modal [modalId]="'apiKeyModal'" [modalTitle]="isEditMode ? 'Edit API Key' : 'Create API Key'">
-  
   <!-- 1. One-Time Plaintext Token Reveal View -->
   <div *ngIf="plaintextToken" class="reveal-container">
     <div class="warning-alert">
-      <svg class="alert-icon" xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path><line x1="12" y1="9" x2="12" y2="13"></line><line x1="12" y1="17" x2="12.01" y2="17"></line></svg>
+      <svg
+        class="alert-icon"
+        xmlns="http://www.w3.org/2000/svg"
+        width="24"
+        height="24"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        stroke-width="2"
+        stroke-linecap="round"
+        stroke-linejoin="round"
+      >
+        <path
+          d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"
+        ></path>
+        <line x1="12" y1="9" x2="12" y2="13"></line>
+        <line x1="12" y1="17" x2="12.01" y2="17"></line>
+      </svg>
       <div class="alert-text">
         <strong>Warning: Copy this token now!</strong>
-        <p>This plaintext API key is shown <strong>ONLY ONCE</strong> for security. Once you close this modal, you will never be able to view it again.</p>
+        <p>
+          This plaintext API key is shown <strong>ONLY ONCE</strong> for security. Once you close
+          this modal, you will never be able to view it again.
+        </p>
       </div>
     </div>
 
@@ -20,13 +39,20 @@
 
     <div class="confirmation-section">
       <label class="checkbox-group">
-        <input type="checkbox" [(ngModel)]="isTokenSavedConfirmed" class="form-checkbox">
-        <span class="form-label" style="font-weight: 600;">I have safely copied and stored this API key</span>
+        <input type="checkbox" [(ngModel)]="isTokenSavedConfirmed" class="form-checkbox" />
+        <span class="form-label" style="font-weight: 600"
+          >I have safely copied and stored this API key</span
+        >
       </label>
     </div>
 
     <div class="form-actions">
-      <button type="button" class="btn btn-primary" [disabled]="!isTokenSavedConfirmed" (click)="closeModal()">
+      <button
+        type="button"
+        class="btn btn-primary"
+        [disabled]="!isTokenSavedConfirmed"
+        (click)="closeModal()"
+      >
         I've Saved It, Close
       </button>
     </div>
@@ -34,9 +60,10 @@
 
   <!-- 2. Form Input / Edit View -->
   <form *ngIf="!plaintextToken" [formGroup]="keyForm" (ngSubmit)="onSubmit()" class="space-y-6">
-    
     <div class="form-group">
-      <label for="keyName" class="form-label">Key Name <span class="required-asterisk">*</span></label>
+      <label for="keyName" class="form-label"
+        >Key Name <span class="required-asterisk">*</span></label
+      >
       <input
         type="text"
         id="keyName"
@@ -45,58 +72,79 @@
         placeholder="e.g., backup_service_key"
         [ngClass]="{ 'is-invalid': keyForm.get('name')?.invalid && keyForm.get('name')?.touched }"
       />
-      <div *ngIf="keyForm.get('name')?.invalid && (keyForm.get('name')?.dirty || keyForm.get('name')?.touched)" class="form-error">
+      <div
+        *ngIf="
+          keyForm.get('name')?.invalid &&
+          (keyForm.get('name')?.dirty || keyForm.get('name')?.touched)
+        "
+        class="form-error"
+      >
         <div *ngIf="keyForm.get('name')?.errors?.['required']">A key name is required.</div>
-        <div *ngIf="keyForm.get('name')?.errors?.['maxlength']">Name cannot exceed 64 characters.</div>
+        <div *ngIf="keyForm.get('name')?.errors?.['maxlength']">
+          Name cannot exceed 64 characters.
+        </div>
       </div>
     </div>
 
     <div class="form-group">
       <label for="expiry" class="form-label">Expiration Date (Optional)</label>
-      <input
-        type="datetime-local"
-        id="expiry"
-        formControlName="expires_at"
-        class="form-control"
-      />
-      <span class="description-subtext">Leave empty for a key that never expires. Expiry dates are validated database-side.</span>
+      <input type="datetime-local" id="expiry" formControlName="expires_at" class="form-control" />
+      <span class="description-subtext"
+        >Leave empty for a key that never expires. Expiry dates are validated database-side.</span
+      >
     </div>
 
     <div class="scopes-section">
       <div class="section-header">
         <h4>Key Scopes (Permissions Filter)</h4>
         <div class="info-tooltip">
-          <svg class="info-icon" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg>
+          <svg
+            class="info-icon"
+            xmlns="http://www.w3.org/2000/svg"
+            width="16"
+            height="16"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          >
+            <circle cx="12" cy="12" r="10"></circle>
+            <line x1="12" y1="16" x2="12" y2="12"></line>
+            <line x1="12" y1="8" x2="12.01" y2="8"></line>
+          </svg>
           <span class="tooltip-text">
-            Key scopes act as an intersection filter. The key cannot perform an action if the owner user themselves does not have permission, regardless of the key's scopes.
+            Key scopes act as an intersection filter. The key cannot perform an action if the owner
+            user themselves does not have permission, regardless of the key's scopes.
           </span>
         </div>
       </div>
-      
+
       <div class="scopes-grid">
         <label class="checkbox-group">
-          <input type="checkbox" formControlName="scope_view" class="form-checkbox">
+          <input type="checkbox" formControlName="scope_view" class="form-checkbox" />
           <span class="form-label">View</span>
         </label>
 
         <label class="checkbox-group">
-          <input type="checkbox" formControlName="scope_create" class="form-checkbox">
+          <input type="checkbox" formControlName="scope_create" class="form-checkbox" />
           <span class="form-label">Create</span>
         </label>
 
         <label class="checkbox-group">
-          <input type="checkbox" formControlName="scope_edit" class="form-checkbox">
+          <input type="checkbox" formControlName="scope_edit" class="form-checkbox" />
           <span class="form-label">Edit</span>
         </label>
 
         <label class="checkbox-group">
-          <input type="checkbox" formControlName="scope_delete" class="form-checkbox">
+          <input type="checkbox" formControlName="scope_delete" class="form-checkbox" />
           <span class="form-label">Delete</span>
         </label>
 
         <label class="checkbox-group">
-          <input type="checkbox" formControlName="scope_admin" class="form-checkbox">
-          <span class="form-label" style="color: #f6ad55; font-weight: 600;">Admin</span>
+          <input type="checkbox" formControlName="scope_admin" class="form-checkbox" />
+          <span class="form-label" style="color: #f6ad55; font-weight: 600">Admin</span>
         </label>
       </div>
     </div>

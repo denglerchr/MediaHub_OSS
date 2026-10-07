@@ -1,29 +1,26 @@
 <div class="login-container">
   <div class="login-box">
     <div class="login-header">
-        <img src="assets/logo.svg" alt="App Logo" class="logo-icon">
-        <h1 class="logo-text">MediaHub</h1>
-        
-        <p class="author-credits">
-          <a href="https://www.swcd.lu" target="_blank" rel="noopener noreferrer">by SWCD</a>
-        </p>
-        
-        <p>Welcome back! Please log in to continue.</p>
+      <img src="assets/logo.svg" alt="App Logo" class="logo-icon" />
+      <h1 class="logo-text">MediaHub</h1>
+
+      <p class="author-credits">
+        <a href="https://www.swcd.lu" target="_blank" rel="noopener noreferrer">by SWCD</a>
+      </p>
+
+      <p>Welcome back! Please log in to continue.</p>
     </div>
-    
+
     <div *ngIf="appInfo?.oidc?.enabled" class="mb-4">
-      <button 
-        type="button" 
-        class="btn btn-secondary sso-btn" 
-        (click)="redirectToOIDC()">
-        <img src="assets/icons/sso-icon.svg" alt="" aria-hidden="true" class="sso-icon">
+      <button type="button" class="btn btn-secondary sso-btn" (click)="redirectToOIDC()">
+        <img src="assets/icons/sso-icon.svg" alt="" aria-hidden="true" class="sso-icon" />
         <span>Login via Single Sign-On</span>
       </button>
-      
+
       <div *ngIf="showLoginForm" class="divider">
-        <hr class="divider-line">
+        <hr class="divider-line" />
         <span class="divider-text">OR</span>
-        <hr class="divider-line">
+        <hr class="divider-line" />
       </div>
     </div>
 
@@ -35,11 +32,13 @@
           type="text"
           formControlName="username"
           class="form-control"
-          [class.is-invalid]="loginForm.get('username')?.invalid && loginForm.get('username')?.touched"
+          [class.is-invalid]="
+            loginForm.get('username')?.invalid && loginForm.get('username')?.touched
+          "
           placeholder="Enter your username"
         />
       </div>
-      
+
       <div class="form-group">
         <label for="password" class="form-label">Password</label>
         <input
@@ -47,19 +46,22 @@
           type="password"
           formControlName="password"
           class="form-control"
-          [class.is-invalid]="loginForm.get('password')?.invalid && loginForm.get('password')?.touched"
+          [class.is-invalid]="
+            loginForm.get('password')?.invalid && loginForm.get('password')?.touched
+          "
           placeholder="Enter your password"
         />
       </div>
-      
+
       <div *ngIf="loginError" class="alert alert-danger">
         {{ loginError }}
       </div>
-      
-      <button 
-        type="submit" 
+
+      <button
+        type="submit"
         class="btn btn-primary login-button"
-        [disabled]="loginForm.invalid || isLoading">
+        [disabled]="loginForm.invalid || isLoading"
+      >
         <span *ngIf="!isLoading">Login</span>
         <span *ngIf="isLoading">Logging in...</span>
       </button>
@@ -71,6 +73,5 @@
         {{ loginError }}
       </div>
     </div>
-
   </div>
 </div>

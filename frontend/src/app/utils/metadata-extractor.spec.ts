@@ -1,7 +1,9 @@
 import { extractMetadata } from './metadata-extractor';
 
 describe('MetadataExtractor', () => {
-  function createJpegWithExif(tiffPayloadBuilder: (view: DataView) => { byteLength: number }): File {
+  function createJpegWithExif(
+    tiffPayloadBuilder: (view: DataView) => { byteLength: number },
+  ): File {
     // APP1 Header: SOI (2) + APP1 Marker (2) + Length (2) + "Exif\0\0" (6) = 12 bytes
     const buffer = new ArrayBuffer(1024);
     const view = new DataView(buffer);

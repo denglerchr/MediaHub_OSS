@@ -13,7 +13,7 @@ import { HttpErrorResponse } from '@angular/common/http';
   selector: 'app-login-page',
   templateUrl: './login-page.component.html',
   styleUrls: ['./login-page.component.css'],
-  standalone: false
+  standalone: false,
 })
 export class LoginPageComponent implements OnInit, OnDestroy {
   loginForm: FormGroup;
@@ -21,7 +21,7 @@ export class LoginPageComponent implements OnInit, OnDestroy {
   loginError: string | null = null;
   appInfo: AppInfo | null = null;
   isLocalBypass = false;
-  
+
   private destroy$ = new Subject<void>();
 
   constructor(
@@ -30,7 +30,7 @@ export class LoginPageComponent implements OnInit, OnDestroy {
     private router: Router,
     private route: ActivatedRoute,
     private notificationService: NotificationService,
-    private appInfoService: AppInfoService
+    private appInfoService: AppInfoService,
   ) {
     this.loginForm = this.fb.group({
       username: ['', Validators.required],
@@ -48,7 +48,7 @@ export class LoginPageComponent implements OnInit, OnDestroy {
       return;
     }
 
-    this.route.queryParamMap.pipe(takeUntil(this.destroy$)).subscribe(params => {
+    this.route.queryParamMap.pipe(takeUntil(this.destroy$)).subscribe((params) => {
       const local = params.get('local');
       this.isLocalBypass = local === '1' || local?.toLowerCase() === 'true';
     });
@@ -66,41 +66,44 @@ export class LoginPageComponent implements OnInit, OnDestroy {
     if (errorParam === 'sso_failed') {
       this.loginError = 'Single Sign-On authentication failed. Please try again.';
       console.warn(
-        `[MediaHub SSO] Tip for administrators: Ensure "${window.location.origin}/auth/callback" is included in your Identity Provider's (e.g. Keycloak) Valid Redirect URIs.`
+        `[MediaHub SSO] Tip for administrators: Ensure "${window.location.origin}/auth/callback" is included in your Identity Provider's (e.g. Keycloak) Valid Redirect URIs.`,
       );
     } else if (errorParam === 'sso_state_invalid') {
-      this.loginError = 'Single Sign-On session was invalid or expired (CSRF protection). Please try again.';
+      this.loginError =
+        'Single Sign-On session was invalid or expired (CSRF protection). Please try again.';
     }
 
     // Load AppInfo to check OIDC settings
-    this.appInfoService.loadInfo().pipe(takeUntil(this.destroy$)).subscribe(info => {
-      this.appInfo = info;
-    });
+    this.appInfoService
+      .loadInfo()
+      .pipe(takeUntil(this.destroy$))
+      .subscribe((info) => {
+        this.appInfo = info;
+      });
   }
 
   onSubmit(): void {
     if (this.loginForm.invalid) return;
-    
+
     this.isLoading = true;
     this.loginError = null;
     this.notificationService.clearGlobalError();
-    
+
     const { username, password } = this.loginForm.value;
-    
-    this.authService.basicAuthLogin(username, password).pipe(
-      finalize(() => this.isLoading = false)
-    ).subscribe({
-      next: () => this.router.navigate(['/dashboard']),
-      error: (err: HttpErrorResponse) => {
-        if (err.status === 401) {
-          this.loginError = 'Invalid username or password.';
-        } else if (err.status === 403) {
-          this.loginError = 'Local login is disabled by the server configuration.';
-        } else {
-          this.loginError = 'A server error occurred. Please try again later.';
-        }
-      },
-    });
+
+    this.authService
+      .basicAuthLogin(username, password)
+      .pipe(finalize(() => (this.isLoading = false)))
+      .subscribe({
+        next: () => this.router.navigate(['/dashboard']),
+        error: (err: HttpErrorResponse) => {
+          if (err.status === 401) {
+            this.loginError = 'Invalid username or password.';
+          } else {
+            this.loginError = 'A server error occurred. Please try again later.';
+          }
+        },
+      });
   }
 
   async redirectToOIDC(): Promise<void> {
@@ -110,7 +113,7 @@ export class LoginPageComponent implements OnInit, OnDestroy {
       this.loginError = 'OIDC configuration is missing from the server.';
       return;
     }
-    
+
     try {
       await this.authService.redirectToOidc(oidcConfig);
     } catch (err) {

@@ -1,7 +1,7 @@
 export interface AppInfo {
   service_name: string;
   version: string;
-  uptime: string; 
+  uptime: string;
   conversion_to?: {
     image?: string[];
     audio?: string[];

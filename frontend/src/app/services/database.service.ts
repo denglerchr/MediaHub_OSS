@@ -3,16 +3,17 @@
 import { Injectable } from '@angular/core';
 import { HttpClient, HttpErrorResponse } from '@angular/common/http';
 import { BehaviorSubject, Observable, throwError, of } from 'rxjs';
-import { catchError, tap } from 'rxjs/operators';
-import { Database, HousekeepingReport, DatabaseConfig, CustomField } from '../models';
+import { catchError, map, switchMap, tap } from 'rxjs/operators';
+import { Database, Housekeeping, HousekeepingReport, DatabaseConfig, CustomField } from '../models';
 import { NotificationService } from './notification.service';
 import { Router } from '@angular/router';
 
+// FE-042: typed instead of `housekeeping?: any`.
 export interface DatabaseUpdatePayload {
   name?: string;
   n_max_queued?: number;
   config?: DatabaseConfig;
-  housekeeping?: any;
+  housekeeping?: Housekeeping;
 }
 
 @Injectable({
@@ -31,7 +32,7 @@ export class DatabaseService {
   constructor(
     private http: HttpClient,
     private notificationService: NotificationService,
-    private router: Router
+    private router: Router,
   ) {}
 
   /**
@@ -67,7 +68,7 @@ export class DatabaseService {
       tap((databases) => {
         this.databasesSubject.next(databases);
       }),
-      catchError((err) => this.handleError(err))
+      catchError((err) => this.handleError(err)),
     );
   }
 
@@ -77,6 +78,9 @@ export class DatabaseService {
   public selectDatabase(id: string): Observable<Database | null> {
     const currentList = this.databasesSubject.value;
     const localDb = currentList.find((db) => db.id === id);
+    // FE-036: remember the selection so a failed lookup can roll the optimistic
+    // pre-selection back instead of leaving a stale/partial DB selected.
+    const previousSelection = this.selectedDatabaseSubject.value;
 
     if (localDb) {
       this.selectedDatabaseSubject.next(localDb);
@@ -85,6 +89,7 @@ export class DatabaseService {
     return this.http.get<Database>(`${this.apiUrl}/database/${id}`).pipe(
       tap((db) => {
         this.selectedDatabaseSubject.next(db);
+        // FE-035: never mutate the array held by the BehaviorSubject — map to a new one.
         const updatedList = this.databasesSubject.value.map((d) => (d.id === db.id ? db : d));
         if (!updatedList.some((d) => d.id === db.id)) {
           updatedList.push(db);
@@ -92,9 +97,11 @@ export class DatabaseService {
         this.databasesSubject.next(updatedList);
       }),
       catchError((err) => {
+        // FE-036: roll back the optimistic selection.
+        this.selectedDatabaseSubject.next(previousSelection);
         this.handleError(err);
         return of(null);
-      })
+      }),
     );
   }
 
@@ -103,14 +110,21 @@ export class DatabaseService {
    */
   public createDatabase(dbData: Partial<Database>): Observable<Database> {
     return this.http.post<Database>(`${this.apiUrl}/database`, dbData).pipe(
-      tap(newDb => {
+      // FE-037: the list refresh is composed into the chain instead of a
+      // fire-and-forget nested subscription; a refresh hiccup must not fail the
+      // creation for the caller.
+      switchMap((newDb) =>
+        this.loadDatabases().pipe(
+          catchError(() => of([] as Database[])),
+          map(() => newDb),
+        ),
+      ),
+      tap((newDb) => {
         this.notificationService.showSuccess(`Database '${newDb.name}' created successfully.`);
-        this.loadDatabases().subscribe({ error: (err) => console.error(err) });
-        
         // Navigate using the newly generated ULID instead of the name
-        this.router.navigate(['/dashboard/db', (newDb as any).id]); 
+        this.router.navigate(['/dashboard/db', newDb.id]);
       }),
-      catchError((err) => this.handleError(err))
+      catchError((err) => this.handleError(err)),
     );
   }
 
@@ -119,22 +133,22 @@ export class DatabaseService {
    */
   public updateDatabase(id: string, updates: DatabaseUpdatePayload): Observable<Database> {
     return this.http.put<Database>(`${this.apiUrl}/database/${id}`, updates).pipe(
-      tap(updatedDb => {
+      tap((updatedDb) => {
         // Update the currently selected DB if it matches the ID
-        if ((this.selectedDatabaseSubject.value as any)?.id === id) {
-            this.selectedDatabaseSubject.next(updatedDb);
+        if (this.selectedDatabaseSubject.value?.id === id) {
+          this.selectedDatabaseSubject.next(updatedDb);
         }
-        
-        // Update the specific database in our local array list
+
+        // FE-035: build a new array instead of mutating the BehaviorSubject's value.
         const currentDbs = this.databasesSubject.value;
-        const index = currentDbs.findIndex((db: any) => db.id === id);
-        if (index > -1) {
-            currentDbs[index] = updatedDb;
-            this.databasesSubject.next([...currentDbs]);
+        if (currentDbs.some((db) => db.id === id)) {
+          this.databasesSubject.next(currentDbs.map((db) => (db.id === id ? updatedDb : db)));
         }
-        this.notificationService.showSuccess(`Database '${updatedDb.name}' settings updated successfully.`);
+        this.notificationService.showSuccess(
+          `Database '${updatedDb.name}' settings updated successfully.`,
+        );
       }),
-      catchError((err) => this.handleError(err))
+      catchError((err) => this.handleError(err)),
     );
   }
 
@@ -143,17 +157,23 @@ export class DatabaseService {
    */
   public deleteDatabase(id: string): Observable<{ message: string }> {
     return this.http.delete<{ message: string }>(`${this.apiUrl}/database/${id}`).pipe(
+      // FE-037: composed list refresh (see createDatabase).
+      switchMap((res) =>
+        this.loadDatabases().pipe(
+          catchError(() => of([] as Database[])),
+          map(() => res),
+        ),
+      ),
       tap((res) => {
         // Utilizing the backend's explicit message string for the notification
         this.notificationService.showSuccess(res.message);
-        
-        if ((this.selectedDatabaseSubject.value as any)?.id === id) {
-            this.selectedDatabaseSubject.next(null);
+
+        if (this.selectedDatabaseSubject.value?.id === id) {
+          this.selectedDatabaseSubject.next(null);
         }
-        this.loadDatabases().subscribe({ error: (err) => console.error(err) });
         this.router.navigate(['/dashboard']);
       }),
-      catchError((err) => this.handleError(err))
+      catchError((err) => this.handleError(err)),
     );
   }
 
@@ -161,15 +181,24 @@ export class DatabaseService {
    * Triggers the housekeeping background worker using the ULID.
    */
   public triggerHousekeeping(id: string): Observable<HousekeepingReport> {
-    return this.http.post<HousekeepingReport>(`${this.apiUrl}/database/${id}/housekeeping`, null).pipe(
-      tap(report => {
-        this.notificationService.showSuccess(report.message || `Housekeeping complete.`);
-        if ((this.selectedDatabaseSubject.value as any)?.id === id) {
-            this.selectDatabase(id).subscribe({ error: (err) => console.error(err) });
-        }
-      }),
-      catchError((err) => this.handleError(err))
-    );
+    return this.http
+      .post<HousekeepingReport>(`${this.apiUrl}/database/${id}/housekeeping`, null)
+      .pipe(
+        // FE-037: composed re-selection of the affected database (was a nested
+        // `selectDatabase(id).subscribe(...)` inside `tap`).
+        switchMap((report) =>
+          this.selectedDatabaseSubject.value?.id === id
+            ? this.selectDatabase(id).pipe(
+                catchError(() => of(null)),
+                map(() => report),
+              )
+            : of(report),
+        ),
+        tap((report) => {
+          this.notificationService.showSuccess(report.message || `Housekeeping complete.`);
+        }),
+        catchError((err) => this.handleError(err)),
+      );
   }
 
   /**
@@ -177,41 +206,71 @@ export class DatabaseService {
    */
   public addCustomField(dbId: string, field: CustomField): Observable<CustomField> {
     return this.http.post<CustomField>(`${this.apiUrl}/database/${dbId}/field`, field).pipe(
-      tap(newField => {
+      // FE-037: composed refresh of the database (was a nested subscription).
+      switchMap((newField) =>
+        this.selectDatabase(dbId).pipe(
+          catchError(() => of(null)),
+          map(() => newField),
+        ),
+      ),
+      tap((newField) => {
         this.notificationService.showSuccess(`Custom field '${newField.name}' added successfully.`);
-        this.selectDatabase(dbId).subscribe({ error: (err) => console.error(err) });
       }),
-      catchError((err) => this.handleError(err))
+      catchError((err) => this.handleError(err)),
     );
   }
 
   /**
    * Updates an existing custom field.
    */
-  public updateCustomField(dbId: string, fieldId: number, name?: string, isIndexed?: boolean): Observable<CustomField> {
-    const payload: any = {};
+  public updateCustomField(
+    dbId: string,
+    fieldId: number,
+    name?: string,
+    isIndexed?: boolean,
+  ): Observable<CustomField> {
+    // FE-042: typed payload instead of `any`.
+    const payload: { name?: string; is_indexed?: boolean } = {};
     if (name !== undefined) payload.name = name;
     if (isIndexed !== undefined) payload.is_indexed = isIndexed;
 
-    return this.http.patch<CustomField>(`${this.apiUrl}/database/${dbId}/field/${fieldId}`, payload).pipe(
-      tap(updatedField => {
-        this.notificationService.showSuccess(`Custom field '${updatedField.name}' updated successfully.`);
-        this.selectDatabase(dbId).subscribe({ error: (err) => console.error(err) });
-      }),
-      catchError((err) => this.handleError(err))
-    );
+    return this.http
+      .patch<CustomField>(`${this.apiUrl}/database/${dbId}/field/${fieldId}`, payload)
+      .pipe(
+        // FE-037: composed refresh of the database (was a nested subscription).
+        switchMap((updatedField) =>
+          this.selectDatabase(dbId).pipe(
+            catchError(() => of(null)),
+            map(() => updatedField),
+          ),
+        ),
+        tap((updatedField) => {
+          this.notificationService.showSuccess(
+            `Custom field '${updatedField.name}' updated successfully.`,
+          );
+        }),
+        catchError((err) => this.handleError(err)),
+      );
   }
 
   /**
    * Deletes a custom field.
    */
   public deleteCustomField(dbId: string, fieldId: number): Observable<{ message: string }> {
-    return this.http.delete<{ message: string }>(`${this.apiUrl}/database/${dbId}/field/${fieldId}`).pipe(
-      tap(res => {
-        this.notificationService.showSuccess(res.message || `Custom field deleted successfully.`);
-        this.selectDatabase(dbId).subscribe({ error: (err) => console.error(err) });
-      }),
-      catchError((err) => this.handleError(err))
-    );
+    return this.http
+      .delete<{ message: string }>(`${this.apiUrl}/database/${dbId}/field/${fieldId}`)
+      .pipe(
+        // FE-037: composed refresh of the database (was a nested subscription).
+        switchMap((res) =>
+          this.selectDatabase(dbId).pipe(
+            catchError(() => of(null)),
+            map(() => res),
+          ),
+        ),
+        tap((res) => {
+          this.notificationService.showSuccess(res.message || `Custom field deleted successfully.`);
+        }),
+        catchError((err) => this.handleError(err)),
+      );
   }
 }

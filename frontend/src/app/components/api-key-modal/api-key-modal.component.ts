@@ -13,7 +13,7 @@ import { NotificationService } from '../../services/notification.service';
   selector: 'app-api-key-modal',
   templateUrl: './api-key-modal.component.html',
   styleUrls: ['./api-key-modal.component.css'],
-  standalone: false
+  standalone: false,
 })
 export class ApiKeyModalComponent implements OnInit, OnDestroy {
   public static readonly MODAL_ID = 'apiKeyModal';
@@ -30,12 +30,14 @@ export class ApiKeyModalComponent implements OnInit, OnDestroy {
   public tokenCopied = false;
 
   private destroy$ = new Subject<void>();
+  // FE-043: pending "copied" reset timer (cleared on destroy).
+  private tokenCopiedTimer?: ReturnType<typeof setTimeout>;
 
   constructor(
     private fb: FormBuilder,
     private authService: AuthService,
     private modalService: ModalService,
-    private notificationService: NotificationService
+    private notificationService: NotificationService,
   ) {
     this.keyForm = this.fb.group({
       name: ['', [Validators.required, Validators.maxLength(64)]],
@@ -44,18 +46,31 @@ export class ApiKeyModalComponent implements OnInit, OnDestroy {
       scope_create: [false],
       scope_edit: [false],
       scope_delete: [false],
-      scope_admin: [false]
+      scope_admin: [false],
     });
   }
 
   ngOnInit(): void {
-    this.modalService.getModalEvents(ApiKeyModalComponent.MODAL_ID)
+    this.modalService
+      .getModalEvents(ApiKeyModalComponent.MODAL_ID)
       .pipe(takeUntil(this.destroy$))
       .subscribe((event: ModalEvent) => {
         if (event.action === 'open') {
           this.setupForm(event.data);
         }
       });
+
+    // FE-019: block *every* dismissal path (ESC / X / overlay included) while the
+    // once-only plaintext token is revealed and not yet acknowledged.
+    this.modalService.registerCloseGuard(ApiKeyModalComponent.MODAL_ID, () => this.canDismiss());
+  }
+
+  private canDismiss(): boolean {
+    if (this.plaintextToken && !this.isTokenSavedConfirmed) {
+      this.notificationService.showError('Please confirm you have saved your API key first.');
+      return false;
+    }
+    return true;
   }
 
   private setupForm(data: any): void {
@@ -66,9 +81,9 @@ export class ApiKeyModalComponent implements OnInit, OnDestroy {
       scope_create: false,
       scope_edit: false,
       scope_delete: false,
-      scope_admin: false
+      scope_admin: false,
     });
-    
+
     this.userId = data?.userId || null;
     this.isEditMode = !!data?.apiKey;
     this.keyIdToEdit = data?.apiKey?.id || null;
@@ -93,22 +108,31 @@ export class ApiKeyModalComponent implements OnInit, OnDestroy {
         scope_create: key.scope_create,
         scope_edit: key.scope_edit,
         scope_delete: key.scope_delete,
-        scope_admin: key.scope_admin
+        scope_admin: key.scope_admin,
       });
     }
   }
 
   public copyToClipboard(): void {
     if (!this.plaintextToken) return;
-    
-    navigator.clipboard.writeText(this.plaintextToken).then(() => {
-      this.tokenCopied = true;
-      this.notificationService.showSuccess('Plaintext token copied to clipboard!');
-      setTimeout(() => this.tokenCopied = false, 3000);
-    }).catch(err => {
-      console.error('Failed to copy token to clipboard:', err);
-      this.notificationService.showError('Could not copy automatically. Please select and copy manually.');
-    });
+
+    navigator.clipboard
+      .writeText(this.plaintextToken)
+      .then(() => {
+        this.tokenCopied = true;
+        this.notificationService.showSuccess('Plaintext token copied to clipboard!');
+        // FE-043: the reset timer is tracked and cleared on destroy.
+        if (this.tokenCopiedTimer) {
+          clearTimeout(this.tokenCopiedTimer);
+        }
+        this.tokenCopiedTimer = setTimeout(() => (this.tokenCopied = false), 3000);
+      })
+      .catch((err) => {
+        console.error('Failed to copy token to clipboard:', err);
+        this.notificationService.showError(
+          'Could not copy automatically. Please select and copy manually.',
+        );
+      });
   }
 
   public onSubmit(): void {
@@ -119,7 +143,7 @@ export class ApiKeyModalComponent implements OnInit, OnDestroy {
 
     this.isLoading = true;
     const formVal = this.keyForm.value;
-    
+
     // Process expires_at to ms timestamp if set
     let expiresAtMs: number | null = null;
     if (formVal.expires_at) {
@@ -133,25 +157,26 @@ export class ApiKeyModalComponent implements OnInit, OnDestroy {
       scope_create: !!formVal.scope_create,
       scope_edit: !!formVal.scope_edit,
       scope_delete: !!formVal.scope_delete,
-      scope_admin: !!formVal.scope_admin
+      scope_admin: !!formVal.scope_admin,
     };
 
     if (this.isEditMode && this.keyIdToEdit) {
-      this.authService.updateUserKey(this.userId, this.keyIdToEdit, payload)
-        .pipe(finalize(() => this.isLoading = false))
+      this.authService
+        .updateUserKey(this.userId, this.keyIdToEdit, payload)
+        .pipe(finalize(() => (this.isLoading = false)))
         .subscribe({
           next: () => {
             this.notificationService.showSuccess('API key updated successfully!');
-            this.modalService.close(true);
+            this.modalService.close(ApiKeyModalComponent.MODAL_ID, true);
           },
-          error: (err) => {
-            console.error('Failed to update API key', err);
-            this.notificationService.showError('Could not update API key.');
-          }
+          error: () => {
+            // FE-046: the shared AuthService.handleError already surfaced the reason.
+          },
         });
     } else {
-      this.authService.createUserKey(this.userId, payload)
-        .pipe(finalize(() => this.isLoading = false))
+      this.authService
+        .createUserKey(this.userId, payload)
+        .pipe(finalize(() => (this.isLoading = false)))
         .subscribe({
           next: (resKey) => {
             this.notificationService.showSuccess('API key created successfully!');
@@ -159,34 +184,36 @@ export class ApiKeyModalComponent implements OnInit, OnDestroy {
             this.plaintextToken = resKey.token || null;
             if (!this.plaintextToken) {
               // fallback if backend didn't return a plaintext token
-              this.modalService.close(true);
+              this.modalService.close(ApiKeyModalComponent.MODAL_ID, true);
             } else {
               // Notify parent immediately that key has been created to refresh key lists in the background
-              this.modalService.emitResult(true);
+              this.modalService.emitResult(ApiKeyModalComponent.MODAL_ID, true);
             }
           },
-          error: (err) => {
-            console.error('Failed to create API key', err);
-            this.notificationService.showError('Could not create API key.');
-          }
+          error: () => {
+            // FE-046: the shared AuthService.handleError already surfaced the reason.
+          },
         });
     }
   }
 
   public closeModal(): void {
-    // If we've generated a key, ensure they confirmed copying it before letting them exit
-    if (this.plaintextToken && !this.isTokenSavedConfirmed) {
-      this.notificationService.showError('Please confirm you have saved your API key first.');
-      return;
-    }
-    this.modalService.close(true);
+    // If we've generated a key, ensure they confirmed copying it before letting them
+    // exit — the close guard registered in ngOnInit enforces this for every
+    // dismissal path (ESC / X / overlay included).
+    this.modalService.close(ApiKeyModalComponent.MODAL_ID, true);
   }
 
   public cancelModal(): void {
-    this.modalService.close(false);
+    this.modalService.close(ApiKeyModalComponent.MODAL_ID, false);
   }
 
   ngOnDestroy(): void {
+    this.modalService.unregisterCloseGuard(ApiKeyModalComponent.MODAL_ID);
+    // FE-043: no timer may outlive the component.
+    if (this.tokenCopiedTimer) {
+      clearTimeout(this.tokenCopiedTimer);
+    }
     this.destroy$.next();
     this.destroy$.complete();
   }

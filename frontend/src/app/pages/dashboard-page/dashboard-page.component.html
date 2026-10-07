@@ -1,21 +1,19 @@
-<div 
-  class="dashboard-layout" 
-  [ngClass]="{ 
+<div
+  class="dashboard-layout"
+  [ngClass]="{
     'sidebar-collapsed': isSidebarCollapsed,
-    'no-sidebar': !showSidebar
-  }">
-
+    'no-sidebar': !showSidebar,
+  }"
+>
   <aside class="dashboard-sidebar" *ngIf="showSidebar">
     <!-- 
       Pass the collapsed state down to the sidebar component.
       Listen for the toggle event coming back up.
     -->
-    <app-sidebar 
-      [isCollapsed]="isSidebarCollapsed"
-      (toggleSidebar)="toggleSidebar()">
+    <app-sidebar [isCollapsed]="isSidebarCollapsed" (toggleSidebar)="toggleSidebar()">
     </app-sidebar>
   </aside>
-  
+
   <main class="dashboard-content">
     <router-outlet></router-outlet>
   </main>

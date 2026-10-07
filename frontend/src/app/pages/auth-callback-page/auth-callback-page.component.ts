@@ -15,7 +15,7 @@ export class AuthCallbackPageComponent implements OnInit {
     private route: ActivatedRoute,
     private router: Router,
     private authService: AuthService,
-    private appInfoService: AppInfoService
+    private appInfoService: AppInfoService,
   ) {}
 
   ngOnInit(): void {
@@ -28,7 +28,7 @@ export class AuthCallbackPageComponent implements OnInit {
     if (error) {
       console.error('OIDC provider returned error:', error, errorDescription);
       console.warn(
-        `[MediaHub SSO] Tip for administrators: Ensure "${window.location.origin}/auth/callback" is registered as a Valid Redirect URI in your Identity Provider (e.g. Keycloak).`
+        `[MediaHub SSO] Tip for administrators: Ensure "${window.location.origin}/auth/callback" is registered as a Valid Redirect URI in your Identity Provider (e.g. Keycloak).`,
       );
       this.router.navigate(['/login'], {
         queryParams: { error: 'sso_failed' },
@@ -73,7 +73,7 @@ export class AuthCallbackPageComponent implements OnInit {
             error: (err) => {
               console.error('OIDC token exchange failed:', err);
               console.warn(
-                `[MediaHub SSO] Tip for administrators: Ensure "${redirectUri}" matches the configured Redirect URI in your Identity Provider (e.g. Keycloak) and the token endpoint is reachable.`
+                `[MediaHub SSO] Tip for administrators: Ensure "${redirectUri}" matches the configured Redirect URI in your Identity Provider (e.g. Keycloak) and the token endpoint is reachable.`,
               );
               this.router.navigate(['/login'], {
                 queryParams: { error: 'sso_failed' },

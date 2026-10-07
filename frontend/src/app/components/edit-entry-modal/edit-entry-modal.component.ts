@@ -26,36 +26,36 @@ export class EditEntryModalComponent implements OnInit, OnDestroy {
     private fb: FormBuilder,
     private databaseService: DatabaseService,
     private entryService: EntryService,
-    private modalService: ModalService
+    private modalService: ModalService,
   ) {
     this.editForm = this.fb.group({
       timestamp: ['', Validators.required],
       filename: [''],
-      custom_fields: this.fb.group({})
-    }); 
+      custom_fields: this.fb.group({}),
+    });
   }
 
   ngOnInit(): void {
     this.databaseService.selectedDatabase$
       .pipe(
         takeUntil(this.destroy$),
-        filter((db): db is Database => !!db)
+        filter((db): db is Database => !!db),
       )
-      .subscribe(db => {
+      .subscribe((db) => {
         this.currentDatabase = db;
         this.initializeForm(db);
-        
+
         if (this.currentEntry) {
-            this.patchForm(this.currentEntry);
+          this.patchForm(this.currentEntry);
         }
       });
 
     this.entryService.selectedEntry$
       .pipe(
         takeUntil(this.destroy$),
-        filter((entry): entry is Entry => !!entry && !!this.currentDatabase)
+        filter((entry): entry is Entry => !!entry && !!this.currentDatabase),
       )
-      .subscribe(entry => {
+      .subscribe((entry) => {
         this.currentEntry = entry;
         this.patchForm(entry);
       });
@@ -63,8 +63,10 @@ export class EditEntryModalComponent implements OnInit, OnDestroy {
 
   private getLocalISOString(date: Date): string {
     const offset = date.getTimezoneOffset();
-    const shiftedDate = new Date(date.getTime() - (offset * 60 * 1000));
-    return shiftedDate.toISOString().slice(0, 16);
+    const shiftedDate = new Date(date.getTime() - offset * 60 * 1000);
+    // FE-005: keep second precision — slicing at 16 truncated every saved timestamp
+    // to whole minutes and destroyed the capture-time seconds on unrelated edits.
+    return shiftedDate.toISOString().slice(0, 19);
   }
 
   /**
@@ -74,14 +76,14 @@ export class EditEntryModalComponent implements OnInit, OnDestroy {
     const customGroup = this.fb.group({});
 
     // Add custom fields
-    db.custom_fields.forEach(field => {
+    db.custom_fields.forEach((field) => {
       if (field.type === 'COORDINATE') {
         customGroup.addControl(
           field.name,
           this.fb.group({
             latitude: [null, [Validators.min(-90), Validators.max(90)]],
-            longitude: [null, [Validators.min(-180), Validators.max(180)]]
-          })
+            longitude: [null, [Validators.min(-180), Validators.max(180)]],
+          }),
         );
       } else {
         const defaultValue = field.type === 'BOOLEAN' ? false : '';
@@ -93,42 +95,37 @@ export class EditEntryModalComponent implements OnInit, OnDestroy {
   }
 
   /**
-   * Populates the nested form with data from the selected entry.
+   * Populates the form with data from the selected entry.
+   *
+   * FE-003: use reset() with a value covering every schema field. patchValue() only
+   * overwrites the keys it receives, so fields unset on this entry kept the values of
+   * the previously edited entry and onSubmit() then wrote those stale values into it.
    */
   private patchForm(entry: Entry): void {
     if (!this.editForm || !this.currentDatabase) return;
 
     const localDateTime = this.getLocalISOString(new Date(entry.timestamp));
 
-    const patchData: any = {
-      timestamp: localDateTime,
-      filename: entry.filename ?? '',
-      custom_fields: {}
-    };
-
-    // Safely map custom fields if they exist
-    this.currentDatabase.custom_fields.forEach(field => {
-       if (entry.custom_fields && entry.custom_fields[field.name] !== undefined) {
-         let val = entry.custom_fields[field.name];
-         if (field.type === 'BOOLEAN') {
-           val = (val === 1 || val === true);
-         } else if (field.type === 'COORDINATE') {
-           if (val && typeof val === 'object') {
-             val = {
-               latitude: val.latitude !== undefined ? val.latitude : null,
-               longitude: val.longitude !== undefined ? val.longitude : null
-             };
-           } else {
-             val = { latitude: null, longitude: null };
-           }
-         }
-         patchData.custom_fields[field.name] = val;
-       } else if (field.type === 'COORDINATE') {
-         patchData.custom_fields[field.name] = { latitude: null, longitude: null };
-       }
+    const customFields: Record<string, unknown> = {};
+    this.currentDatabase.custom_fields.forEach((field) => {
+      const raw = entry.custom_fields ? entry.custom_fields[field.name] : undefined;
+      if (field.type === 'COORDINATE') {
+        customFields[field.name] =
+          raw && typeof raw === 'object'
+            ? { latitude: raw.latitude ?? null, longitude: raw.longitude ?? null }
+            : { latitude: null, longitude: null };
+      } else if (field.type === 'BOOLEAN') {
+        customFields[field.name] = raw === 1 || raw === true;
+      } else {
+        customFields[field.name] = raw ?? (field.type === 'TEXT' ? '' : null);
+      }
     });
 
-    this.editForm.patchValue(patchData);
+    this.editForm.reset({
+      timestamp: localDateTime,
+      filename: entry.filename ?? '',
+      custom_fields: customFields,
+    });
   }
 
   onSubmit(): void {
@@ -137,13 +134,20 @@ export class EditEntryModalComponent implements OnInit, OnDestroy {
     }
 
     this.isLoading = true;
-    const formValue = this.editForm.value;
+    const formValue = this.editForm.getRawValue();
 
-    const sanitizeCoord = (val: any) => {
-      if (!val) return null;
-      const lat = val.latitude;
-      const lng = val.longitude;
-      if (lat !== null && lat !== '' && lat !== undefined && lng !== null && lng !== '' && lng !== undefined) {
+    // FE-042: typed coordinate sanitizer (was `(val: any)`).
+    const sanitizeCoord = (val: unknown): { latitude: number; longitude: number } | null => {
+      if (!val || typeof val !== 'object') return null;
+      const { latitude: lat, longitude: lng } = val as { latitude?: unknown; longitude?: unknown };
+      if (
+        lat !== null &&
+        lat !== '' &&
+        lat !== undefined &&
+        lng !== null &&
+        lng !== '' &&
+        lng !== undefined
+      ) {
         const numLat = Number(lat);
         const numLng = Number(lng);
         if (!isNaN(numLat) && !isNaN(numLng)) {
@@ -153,37 +157,56 @@ export class EditEntryModalComponent implements OnInit, OnDestroy {
       return null;
     };
 
-    // Build the clean update payload without media_fields
-    const updates: any = {
-        filename: formValue.filename,
-        timestamp: new Date(formValue.timestamp).getTime(),
-        custom_fields: { ...formValue.custom_fields }
+    // Build the clean update payload without media_fields.
+    // FE-005: the backend leaves `timestamp` untouched when it is absent from the
+    // PATCH (internal/httpserver/entryhandler/entries.go PatchEntry), so only send it
+    // when the user actually changed it — an unrelated edit must not truncate the
+    // stored capture time (the datetime-local input cannot carry full precision).
+    // FE-042: typed update payload instead of `any`.
+    const customFields: Record<string, unknown> = {};
+    const updates: Partial<Entry> & { custom_fields: Record<string, unknown> } = {
+      filename: formValue.filename,
+      custom_fields: customFields,
     };
+    if (this.editForm.get('timestamp')?.dirty) {
+      updates.timestamp = new Date(formValue.timestamp).getTime();
+    }
 
     // Ensure correct data types for the backend
-    this.currentDatabase.custom_fields.forEach(field => {
-      const val = updates.custom_fields[field.name];
+    this.currentDatabase.custom_fields.forEach((field) => {
+      const val = formValue.custom_fields[field.name];
       if (field.type === 'BOOLEAN') {
-        updates.custom_fields[field.name] = !!val;
-      } else if ((field.type === 'INTEGER' || field.type === 'REAL') && val !== '' && val !== null) {
-        updates.custom_fields[field.name] = Number(val);
+        customFields[field.name] = !!val;
+      } else if (field.type === 'INTEGER' || field.type === 'REAL') {
+        // FE-004: omit blank numeric fields. Sending "" makes the backend reject the
+        // whole request (validateCustomFields requires a number) and broke every edit.
+        if (val === '' || val === null || val === undefined) {
+          return;
+        }
+        const num = Number(val);
+        if (Number.isFinite(num)) {
+          customFields[field.name] = num;
+        }
       } else if (field.type === 'COORDINATE') {
-        updates.custom_fields[field.name] = sanitizeCoord(val);
+        customFields[field.name] = sanitizeCoord(val);
+      } else {
+        customFields[field.name] = val ?? '';
       }
     });
 
-    this.entryService.updateEntry(this.currentDatabase.id, this.currentEntry.id, updates)
+    this.entryService
+      .updateEntry(this.currentDatabase.id, this.currentEntry.id, updates)
       .pipe(
         takeUntil(this.destroy$),
-        finalize(() => this.isLoading = false)
+        finalize(() => (this.isLoading = false)),
       )
       .subscribe(() => {
-        this.modalService.close(true); 
+        this.modalService.close(EditEntryModalComponent.MODAL_ID, true);
       });
   }
 
   closeModal(): void {
-    this.modalService.close(false); 
+    this.modalService.close(EditEntryModalComponent.MODAL_ID, false);
   }
 
   trackByFieldId(index: number, field: any): number | string {

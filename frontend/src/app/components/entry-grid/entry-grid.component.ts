@@ -11,11 +11,11 @@ import {
   SimpleChanges,
   ChangeDetectorRef,
   ElementRef,
-  NgZone
+  NgZone,
 } from '@angular/core';
-import { Entry } from '../../models'; 
+import { Entry } from '../../models';
 import { EntryService } from '../../services/entry.service';
-import { CommonModule } from '@angular/common'; 
+import { CommonModule } from '@angular/common';
 import { SecureImageDirective } from '../../directives/secure-image.directive';
 import { fromEvent, Subject, Subscription } from 'rxjs';
 import { debounceTime, takeUntil } from 'rxjs/operators';
@@ -23,6 +23,10 @@ import { debounceTime, takeUntil } from 'rxjs/operators';
 export interface DateGroup {
   dateStr: string;
   entries: Entry[];
+  // FE-027: precomputed layout metrics. The template used to call
+  // isLargeGroup() / getGroupAspectRatio() per group per CD cycle.
+  aspectRatio: number;
+  isLarge: boolean;
 }
 
 @Component({
@@ -30,26 +34,22 @@ export interface DateGroup {
   templateUrl: './entry-grid.component.html',
   styleUrls: ['./entry-grid.component.css'],
   standalone: true,
-  imports: [
-    CommonModule, 
-    SecureImageDirective
-  ], 
-  changeDetection: ChangeDetectionStrategy.OnPush
+  imports: [CommonModule, SecureImageDirective],
+  changeDetection: ChangeDetectionStrategy.OnPush,
 })
 export class EntryGridComponent implements OnInit, OnChanges, AfterViewInit, OnDestroy {
   @Input() entries: Entry[] = [];
   @Input() dbId: string | null = null; // UPDATED: Changed from dbName to dbId
-  
+
   // --- SELECTION INPUTS ---
   @Input() selectedIds = new Set<number>();
-  
+
   @Output() entryClicked = new EventEmitter<Entry>();
-  @Output() toggleSelection = new EventEmitter<{ entry: Entry, event: MouseEvent }>();
+  @Output() toggleSelection = new EventEmitter<{ entry: Entry; event: MouseEvent }>();
 
   public failedImageIds = new Set<number>();
   public dateGroups: DateGroup[] = [];
   public aspectRatios = new Map<number, number>();
-  private groupAspectRatios = new Map<DateGroup, number>();
   private _maxRowAspectRatio = 8;
 
   private resizeObserver: ResizeObserver | null = null;
@@ -60,11 +60,15 @@ export class EntryGridComponent implements OnInit, OnChanges, AfterViewInit, OnD
     private entryService: EntryService,
     private cdr: ChangeDetectorRef,
     private el: ElementRef,
-    private ngZone: NgZone
+    private ngZone: NgZone,
   ) {}
 
   ngOnInit(): void {
     this.updateContainerWidth();
+    // FE-027: ngOnChanges (which computes the group metrics) runs before the real
+    // container width is known — recompute with the actual wrap threshold so the
+    // first paint already renders large/small groups correctly (no resize needed).
+    this.recalculateGroupAspectRatios();
   }
 
   ngAfterViewInit(): void {
@@ -76,10 +80,7 @@ export class EntryGridComponent implements OnInit, OnChanges, AfterViewInit, OnD
         this.resizeObserver.observe(this.el.nativeElement);
       } else if (typeof window !== 'undefined') {
         this.resizeSub = fromEvent(window, 'resize')
-          .pipe(
-            debounceTime(50),
-            takeUntil(this.destroy$)
-          )
+          .pipe(debounceTime(50), takeUntil(this.destroy$))
           .subscribe(() => {
             this.handleResize();
           });
@@ -87,6 +88,9 @@ export class EntryGridComponent implements OnInit, OnChanges, AfterViewInit, OnD
     });
 
     this.updateContainerWidth();
+    // FE-027: the element is in the DOM now — the real width (and therefore the
+    // real wrap threshold) may differ from the ngOnInit guess.
+    this.recalculateGroupAspectRatios();
     this.cdr.markForCheck();
   }
 
@@ -95,6 +99,20 @@ export class EntryGridComponent implements OnInit, OnChanges, AfterViewInit, OnD
     if (changes['dbId'] || changes['entries']) {
       if (changes['dbId']) {
         this.failedImageIds.clear();
+      } else if (changes['entries']) {
+        // FE-031: prune the caches to the ids still on screen — aspectRatios and
+        // failedImageIds used to grow without bound across list updates.
+        const visibleIds = new Set(this.entries.map((e) => e.id));
+        for (const id of Array.from(this.aspectRatios.keys())) {
+          if (!visibleIds.has(id)) {
+            this.aspectRatios.delete(id);
+          }
+        }
+        for (const id of Array.from(this.failedImageIds)) {
+          if (!visibleIds.has(id)) {
+            this.failedImageIds.delete(id);
+          }
+        }
       }
       this.groupEntries();
       this.recalculateGroupAspectRatios();
@@ -104,13 +122,25 @@ export class EntryGridComponent implements OnInit, OnChanges, AfterViewInit, OnD
   private groupEntries(): void {
     if (!this.entries || this.entries.length === 0) {
       this.dateGroups = [];
-      this.groupAspectRatios.clear();
       return;
     }
 
     const groupsMap = new Map<string, Entry[]>();
     const weekdays = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
-    const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    const months = [
+      'Jan',
+      'Feb',
+      'Mar',
+      'Apr',
+      'May',
+      'Jun',
+      'Jul',
+      'Aug',
+      'Sep',
+      'Oct',
+      'Nov',
+      'Dec',
+    ];
 
     for (const entry of this.entries) {
       const date = new Date(entry.timestamp);
@@ -129,18 +159,24 @@ export class EntryGridComponent implements OnInit, OnChanges, AfterViewInit, OnD
 
     this.dateGroups = Array.from(groupsMap.entries()).map(([dateStr, entries]) => ({
       dateStr,
-      entries
+      entries,
+      // FE-027: filled in by recalculateGroupAspectRatios() below.
+      aspectRatio: 1.0,
+      isLarge: false,
     }));
   }
 
+  // FE-027: precompute the per-group layout metrics (sum of entry aspect ratios and
+  // whether the group wraps). Recomputed when entries change, when an image reports
+  // its real ratio and when the container is resized.
   private recalculateGroupAspectRatios(): void {
-    this.groupAspectRatios.clear();
     for (const group of this.dateGroups) {
       let sum = 0;
       for (const entry of group.entries) {
         sum += this.getAspectRatio(entry);
       }
-      this.groupAspectRatios.set(group, sum > 0 ? sum : 1.0);
+      group.aspectRatio = sum > 0 ? sum : 1.0;
+      group.isLarge = group.aspectRatio > this._maxRowAspectRatio;
     }
   }
 
@@ -161,7 +197,7 @@ export class EntryGridComponent implements OnInit, OnChanges, AfterViewInit, OnD
   }
 
   public onCheckboxClick(entry: Entry, event: MouseEvent): void {
-    event.stopPropagation(); 
+    event.stopPropagation();
     this.toggleSelection.emit({ entry, event });
   }
 
@@ -182,7 +218,7 @@ export class EntryGridComponent implements OnInit, OnChanges, AfterViewInit, OnD
   }
 
   public getEntryTitle(entry: Entry): string {
-    return entry.filename || `ID: ${entry.id}`; 
+    return entry.filename || `ID: ${entry.id}`;
   }
 
   public getAspectRatio(entry: Entry): number {
@@ -215,22 +251,10 @@ export class EntryGridComponent implements OnInit, OnChanges, AfterViewInit, OnD
     }
   }
 
-  public getGroupAspectRatio(group: DateGroup): number {
-    if (this.groupAspectRatios.has(group)) {
-      return this.groupAspectRatios.get(group)!;
-    }
-    if (!group || !group.entries) return 1.0;
-    let sum = 0;
-    for (const entry of group.entries) {
-      sum += this.getAspectRatio(entry);
-    }
-    const val = sum > 0 ? sum : 1.0;
-    this.groupAspectRatios.set(group, val);
-    return val;
-  }
-
   private handleResize(): void {
     this.updateContainerWidth();
+    // FE-027: the wrap threshold changed with the width — refresh the group metrics.
+    this.recalculateGroupAspectRatios();
     this.ngZone.run(() => {
       this.cdr.markForCheck();
     });
@@ -246,21 +270,14 @@ export class EntryGridComponent implements OnInit, OnChanges, AfterViewInit, OnD
       width = this.el.nativeElement.getBoundingClientRect().width;
     }
     if (width <= 0) {
-      const isSidebarShown = window.location.pathname === '/dashboard' || window.location.pathname === '/';
+      const isSidebarShown =
+        window.location.pathname === '/dashboard' || window.location.pathname === '/';
       const sidebarWidth = isSidebarShown ? 260 : 0;
       const padding = 48;
       width = window.innerWidth - sidebarWidth - padding;
     }
     const tileHeight = window.innerWidth <= 768 ? 100 : 150;
     this._maxRowAspectRatio = width > 0 ? width / tileHeight : 8;
-  }
-
-  public get maxRowAspectRatio(): number {
-    return this._maxRowAspectRatio;
-  }
-
-  public isLargeGroup(group: DateGroup): boolean {
-    return this.getGroupAspectRatio(group) > this._maxRowAspectRatio;
   }
 
   ngOnDestroy(): void {

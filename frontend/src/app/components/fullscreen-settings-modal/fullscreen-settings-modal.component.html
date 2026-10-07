@@ -1,38 +1,62 @@
 <app-modal [modalId]="'fullscreenSettingsModal'" [modalTitle]="'Presentation Settings'">
   <form [formGroup]="settingsForm" (ngSubmit)="onSubmit()">
-    
     <div class="form-section">
       <div class="form-grid">
-        
         <div class="form-group">
           <label for="delaySeconds" class="form-label">Delay (Seconds)</label>
-          <input id="delaySeconds" type="number" formControlName="delaySeconds" class="form-control" min="1">
-          <small class="text-muted block mt-1">Time to wait before switching entries. For video/audio, this delay starts after playback finishes.</small>
-          <div *ngIf="settingsForm.get('delaySeconds')?.invalid && settingsForm.get('delaySeconds')?.touched" class="form-error">
+          <input
+            id="delaySeconds"
+            type="number"
+            formControlName="delaySeconds"
+            class="form-control"
+            min="1"
+          />
+          <small class="text-muted block mt-1"
+            >Time to wait before switching entries. For video/audio, this delay starts after
+            playback finishes.</small
+          >
+          <div
+            *ngIf="
+              settingsForm.get('delaySeconds')?.invalid && settingsForm.get('delaySeconds')?.touched
+            "
+            class="form-error"
+          >
             Delay must be at least 1 second.
           </div>
         </div>
 
         <div class="form-group">
           <label for="entryLimit" class="form-label">Recent Entries Limit (N)</label>
-          <input id="entryLimit" type="number" formControlName="entryLimit" class="form-control" min="1">
-          <small class="text-muted block mt-1">How many of the most recent entries to include in the loop (N=1 waits for new files).</small>
-          <div *ngIf="settingsForm.get('entryLimit')?.invalid && settingsForm.get('entryLimit')?.touched" class="form-error">
+          <input
+            id="entryLimit"
+            type="number"
+            formControlName="entryLimit"
+            class="form-control"
+            min="1"
+          />
+          <small class="text-muted block mt-1"
+            >How many of the most recent entries to include in the loop (N=1 waits for new
+            files).</small
+          >
+          <div
+            *ngIf="
+              settingsForm.get('entryLimit')?.invalid && settingsForm.get('entryLimit')?.touched
+            "
+            class="form-error"
+          >
             Limit must be at least 1.
           </div>
         </div>
-
       </div>
     </div>
 
     <div class="form-section pt-4">
       <div class="form-grid">
-        
         <div class="form-group">
           <label for="shuffleToggle" class="form-label">Shuffle Playback</label>
           <div class="bool-field-container">
             <label class="toggle-switch">
-              <input type="checkbox" id="shuffleToggle" formControlName="shuffle">
+              <input type="checkbox" id="shuffleToggle" formControlName="shuffle" />
               <span class="toggle-slider"></span>
             </label>
             <span class="bool-field-value">
@@ -46,7 +70,7 @@
           <label for="repeatToggle" class="form-label">Repeat Playback</label>
           <div class="bool-field-container">
             <label class="toggle-switch">
-              <input type="checkbox" id="repeatToggle" formControlName="repeat">
+              <input type="checkbox" id="repeatToggle" formControlName="repeat" />
               <span class="toggle-slider"></span>
             </label>
             <span class="bool-field-value">
@@ -55,7 +79,6 @@
           </div>
           <small class="text-muted">Loop the presentation continuously.</small>
         </div>
-
       </div>
     </div>
 
@@ -63,6 +86,5 @@
       <button type="button" class="btn btn-secondary" (click)="closeModal()">Cancel</button>
       <button type="submit" class="btn btn-primary" [disabled]="settingsForm.invalid">Start</button>
     </div>
-
   </form>
 </app-modal>

@@ -1,20 +1,30 @@
 <app-modal [modalId]="'createDatabaseModal'" [modalTitle]="'Create New Database'">
   <form [formGroup]="createDbForm" (ngSubmit)="onSubmit()">
-    
     <div class="form-section">
       <h4>Basic Information</h4>
       <div class="form-grid">
-        <div class="form-group" style="grid-column: 1 / -1;">
+        <div class="form-group" style="grid-column: 1 / -1">
           <label for="name" class="form-label">Database Name</label>
-          <input id="name" type="text" formControlName="name" class="form-control" placeholder="e.g. My Vacation Photos">
-          
-          <div *ngIf="createDbForm.get('name')?.invalid && createDbForm.get('name')?.touched" class="form-error">
+          <input
+            id="name"
+            type="text"
+            formControlName="name"
+            class="form-control"
+            placeholder="e.g. My Vacation Photos"
+          />
+
+          <div
+            *ngIf="createDbForm.get('name')?.invalid && createDbForm.get('name')?.touched"
+            class="form-error"
+          >
             <span *ngIf="createDbForm.get('name')?.hasError('required')">Name is required.</span>
-            <span *ngIf="createDbForm.get('name')?.hasError('maxlength')">Name cannot exceed 100 characters.</span>
+            <span *ngIf="createDbForm.get('name')?.hasError('maxlength')"
+              >Name cannot exceed 100 characters.</span
+            >
           </div>
         </div>
-        
-        <div class="form-group" style="grid-column: 1 / -1;">
+
+        <div class="form-group" style="grid-column: 1 / -1">
           <label for="content_type" class="form-label">Content Type</label>
           <select id="content_type" formControlName="content_type" class="form-control">
             <option value="image">Image</option>
@@ -24,27 +34,48 @@
           </select>
         </div>
 
-        <div class="form-group" style="grid-column: 1 / -1;">
+        <div class="form-group" style="grid-column: 1 / -1">
           <label for="n_max_queued" class="form-label">Max Queued Conversions</label>
-          <input id="n_max_queued" type="number" formControlName="n_max_queued" class="form-control" min="0">
-          <small class="text-muted">Maximum number of entries that can be queued for processing at once. Set to 0 to disable queuing.</small>
-          
-          <div *ngIf="createDbForm.get('n_max_queued')?.invalid && createDbForm.get('n_max_queued')?.touched" class="form-error">
-            <span *ngIf="createDbForm.get('n_max_queued')?.hasError('required')">Max queued conversions is required.</span>
-            <span *ngIf="createDbForm.get('n_max_queued')?.hasError('min')">Max queued conversions cannot be negative.</span>
+          <input
+            id="n_max_queued"
+            type="number"
+            formControlName="n_max_queued"
+            class="form-control"
+            min="0"
+          />
+          <small class="text-muted"
+            >Maximum number of entries that can be queued for processing at once. Set to 0 to
+            disable queuing.</small
+          >
+
+          <div
+            *ngIf="
+              createDbForm.get('n_max_queued')?.invalid && createDbForm.get('n_max_queued')?.touched
+            "
+            class="form-error"
+          >
+            <span *ngIf="createDbForm.get('n_max_queued')?.hasError('required')"
+              >Max queued conversions is required.</span
+            >
+            <span *ngIf="createDbForm.get('n_max_queued')?.hasError('min')"
+              >Max queued conversions cannot be negative.</span
+            >
           </div>
         </div>
       </div>
     </div>
 
     <div class="form-section" [ngSwitch]="createDbForm.get('content_type')?.value">
-      
       <ng-container *ngSwitchCase="'image'">
         <h4>Image Configuration</h4>
         <div class="form-grid">
           <div class="form-group">
             <label for="auto_conversion_image" class="form-label">Auto-Conversion</label>
-            <select id="auto_conversion_image" formControlName="auto_conversion" class="form-control">
+            <select
+              id="auto_conversion_image"
+              formControlName="auto_conversion"
+              class="form-control"
+            >
               <option value="">None</option>
               <option value="image/jpeg">JPEG</option>
               <option value="image/webp">WebP</option>
@@ -57,7 +88,11 @@
             <label for="create_previews_image" class="form-label">Generate Previews</label>
             <div class="bool-field-container">
               <label class="toggle-switch">
-                <input type="checkbox" id="create_previews_image" formControlName="create_preview">
+                <input
+                  type="checkbox"
+                  id="create_previews_image"
+                  formControlName="create_preview"
+                />
                 <span class="toggle-slider"></span>
               </label>
               <span class="bool-field-value">
@@ -74,19 +109,27 @@
         <div class="form-grid">
           <div class="form-group">
             <label for="auto_conversion_audio" class="form-label">Auto-Conversion</label>
-            <select id="auto_conversion_audio" formControlName="auto_conversion" class="form-control">
+            <select
+              id="auto_conversion_audio"
+              formControlName="auto_conversion"
+              class="form-control"
+            >
               <option value="">None</option>
               <option value="audio/flac">FLAC</option>
               <option value="audio/opus">Opus</option>
             </select>
             <small class="text-muted">Converts uploads to the selected format.</small>
           </div>
-          
+
           <div class="form-group">
             <label for="create_previews_audio" class="form-label">Generate Previews</label>
             <div class="bool-field-container">
               <label class="toggle-switch">
-                <input type="checkbox" id="create_previews_audio" formControlName="create_preview">
+                <input
+                  type="checkbox"
+                  id="create_previews_audio"
+                  formControlName="create_preview"
+                />
                 <span class="toggle-slider"></span>
               </label>
               <span class="bool-field-value">
@@ -103,19 +146,30 @@
         <div class="form-grid">
           <div class="form-group">
             <label for="auto_conversion_video" class="form-label">Auto-Conversion</label>
-            <select id="auto_conversion_video" formControlName="auto_conversion" class="form-control">
+            <select
+              id="auto_conversion_video"
+              formControlName="auto_conversion"
+              class="form-control"
+            >
               <option value="">None</option>
               <option value="video/mp4">MP4 (H.264 codec)</option>
               <option value="video/webm">WebM (AV1 codec)</option>
             </select>
-            <small class="text-muted">Converts uploads to the selected format. Transcoding video files can take significant time.</small>
+            <small class="text-muted"
+              >Converts uploads to the selected format. Transcoding video files can take significant
+              time.</small
+            >
           </div>
-          
+
           <div class="form-group">
             <label for="create_previews_video" class="form-label">Generate Previews</label>
             <div class="bool-field-container">
               <label class="toggle-switch">
-                <input type="checkbox" id="create_previews_video" formControlName="create_preview">
+                <input
+                  type="checkbox"
+                  id="create_previews_video"
+                  formControlName="create_preview"
+                />
                 <span class="toggle-slider"></span>
               </label>
               <span class="bool-field-value">
@@ -129,19 +183,20 @@
 
       <ng-container *ngSwitchCase="'file'">
         <h4>File Configuration</h4>
-        <p class="text-muted">No specific configuration is available for 'Generic File' databases.</p>
+        <p class="text-muted">
+          No specific configuration is available for 'Generic File' databases.
+        </p>
       </ng-container>
     </div>
-    
+
     <div class="form-section" formGroupName="housekeeping">
       <h4>Housekeeping Rules</h4>
       <div class="form-grid-three">
-        
         <div class="form-group">
           <label class="form-label">Run Interval</label>
-          <div style="display: flex; gap: 0.5rem;">
-            <input type="number" formControlName="interval_value" class="form-control" min="0">
-            <select formControlName="interval_unit" class="form-control" style="width: 100px;">
+          <div style="display: flex; gap: 0.5rem">
+            <input type="number" formControlName="interval_value" class="form-control" min="0" />
+            <select formControlName="interval_unit" class="form-control" style="width: 100px">
               <option value="m">Minutes</option>
               <option value="h">Hours</option>
               <option value="d">Days</option>
@@ -149,36 +204,35 @@
           </div>
           <small class="text-muted">Set to 0 to disable automated runs.</small>
         </div>
-        
+
         <div class="form-group">
           <label class="form-label form-label-helper">
             <span>Max Disk Space</span>
             <span class="helper-icon" title="Set to 0 to disable disk space check.">?</span>
           </label>
-          <div style="display: flex; gap: 0.5rem;">
-            <input type="number" formControlName="disk_space_value" class="form-control" min="0">
-            <select formControlName="disk_space_unit" class="form-control" style="width: 100px;">
+          <div style="display: flex; gap: 0.5rem">
+            <input type="number" formControlName="disk_space_value" class="form-control" min="0" />
+            <select formControlName="disk_space_unit" class="form-control" style="width: 100px">
               <option value="M">MB</option>
               <option value="G">GB</option>
               <option value="T">TB</option>
             </select>
           </div>
         </div>
-        
+
         <div class="form-group">
           <label class="form-label form-label-helper">
             <span>Max Entry Age</span>
             <span class="helper-icon" title="Set to 0 to disable age check.">?</span>
           </label>
-          <div style="display: flex; gap: 0.5rem;">
-            <input type="number" formControlName="max_age_value" class="form-control" min="0">
-            <select formControlName="max_age_unit" class="form-control" style="width: 100px;">
+          <div style="display: flex; gap: 0.5rem">
+            <input type="number" formControlName="max_age_value" class="form-control" min="0" />
+            <select formControlName="max_age_unit" class="form-control" style="width: 100px">
               <option value="h">Hours</option>
               <option value="d">Days</option>
             </select>
           </div>
         </div>
-
       </div>
     </div>
 
@@ -188,8 +242,30 @@
         <button type="button" class="btn-link" (click)="addCustomField()">+ Add Field</button>
       </div>
       <div formArrayName="custom_fields">
-        <div *ngFor="let field of customFields.controls; let i = index; trackBy: trackByIndex" [formGroupName]="i" class="custom-field-row">
-          <input type="text" formControlName="name" placeholder="Field Name" class="form-control">
+        <div
+          *ngFor="let field of customFields.controls; let i = index; trackBy: trackByIndex"
+          [formGroupName]="i"
+          class="custom-field-row"
+        >
+          <input type="text" formControlName="name" placeholder="Field Name" class="form-control" />
+          <!-- FE-053: specific validation text (the invalid name used to silently
+               disable Create with no explanation) -->
+          <div
+            *ngIf="
+              field.get('name')?.invalid && (field.get('name')?.touched || field.get('name')?.dirty)
+            "
+            class="form-error"
+            style="flex-basis: 100%"
+          >
+            <span *ngIf="field.get('name')?.errors?.['required']">Field name is required.</span>
+            <span *ngIf="field.get('name')?.errors?.['pattern']"
+              >Field name must start with a letter or underscore and contain only letters, digits or
+              underscores.</span
+            >
+            <span *ngIf="field.get('name')?.errors?.['reserved']"
+              >This name is reserved (standard/media field) — please choose another.</span
+            >
+          </div>
           <select formControlName="type" class="form-control">
             <option value="TEXT">Text</option>
             <option value="INTEGER">Integer</option>
@@ -197,11 +273,28 @@
             <option value="BOOLEAN">Boolean</option>
             <option value="COORDINATE">Coordinate</option>
           </select>
-          <label class="checkbox-container" style="display: flex; align-items: center; gap: 0.5rem; white-space: nowrap; cursor: pointer; color: var(--text-secondary);">
-            <input type="checkbox" formControlName="is_indexed">
+          <label
+            class="checkbox-container"
+            style="
+              display: flex;
+              align-items: center;
+              gap: 0.5rem;
+              white-space: nowrap;
+              cursor: pointer;
+              color: var(--text-secondary);
+            "
+          >
+            <input type="checkbox" formControlName="is_indexed" />
             <span>Indexed</span>
           </label>
-          <button type="button" class="btn-remove" (click)="removeCustomField(i)" title="Remove Field">🗑️</button>
+          <button
+            type="button"
+            class="btn-remove"
+            (click)="removeCustomField(i)"
+            title="Remove Field"
+          >
+            🗑️
+          </button>
         </div>
       </div>
     </div>

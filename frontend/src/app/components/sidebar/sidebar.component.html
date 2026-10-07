@@ -1,93 +1,161 @@
-<div class="sidebar-container" 
-     [class.collapsed]="isCollapsed"
-     *ngIf="currentUser$ | async as user">
-  
+<div class="sidebar-container" [class.collapsed]="isCollapsed" *ngIf="currentUser$ | async as user">
   <header class="sidebar-header">
     <div class="logo-area">
       <div class="logo-container">
-        <img src="assets/logo.svg" alt="App Logo" class="logo-icon">
+        <img src="assets/logo.svg" alt="App Logo" class="logo-icon" />
         <h1 class="logo-text" *ngIf="!isCollapsed">MediaHub</h1>
       </div>
-      <div class="app-version" *ngIf="!isCollapsed && (appInfo$ | async) as info">
-          <a 
-            href="https://www.swcd.lu" 
-            target="_blank" 
-            rel="noopener noreferrer" 
-            style="color: inherit; text-decoration: none;"
-          >by SWCD</a> | {{ info.version }}
-        </div>
+      <!-- FE-029: single appInfo subscription (was `appInfo$ | async` per use site) -->
+      <div class="app-version" *ngIf="!isCollapsed && appInfo as info">
+        <a
+          href="https://www.swcd.lu"
+          target="_blank"
+          rel="noopener noreferrer"
+          style="color: inherit; text-decoration: none"
+          >by SWCD</a
+        >
+        | {{ info.version }}
+      </div>
     </div>
   </header>
 
   <div class="databases-section" *ngIf="user.is_admin">
-    <nav class="nav-links" style="margin-top: 0; padding: 0 0.5rem;">
-      <a routerLink="/dashboard/admin/users" 
-         routerLinkActive="active" 
-         class="nav-link"
-         [title]="isCollapsed ? 'Admin Panel' : ''">
-        <img src="assets/icons/users-icon.svg" class="nav-link-icon" alt="admin-icon" />
+    <nav class="nav-links" style="margin-top: 0; padding: 0 0.5rem">
+      <a
+        routerLink="/dashboard/admin/users"
+        routerLinkActive="active"
+        class="nav-link"
+        [title]="isCollapsed ? 'Admin Panel' : ''"
+      >
+        <img src="assets/icons/users-icon.svg" class="nav-link-icon" alt="User management" />
         <span *ngIf="!isCollapsed">Admin Panel</span>
       </a>
 
-      <a routerLink="/dashboard/admin/keys" 
-         routerLinkActive="active" 
-         class="nav-link"
-         [title]="isCollapsed ? 'Global API Keys' : ''">
-        <img src="assets/icons/key-icon.svg" class="nav-link-icon" alt="keys-icon" />
+      <a
+        routerLink="/dashboard/admin/keys"
+        routerLinkActive="active"
+        class="nav-link"
+        [title]="isCollapsed ? 'Global API Keys' : ''"
+      >
+        <img src="assets/icons/key-icon.svg" class="nav-link-icon" alt="API keys" />
         <span *ngIf="!isCollapsed">Global Keys</span>
       </a>
-      
-      <a *ngIf="(appInfo$ | async)?.features?.audit_logs"
-         routerLink="/dashboard/admin/audit" 
-         routerLinkActive="active" 
-         class="nav-link"
-         [title]="isCollapsed ? 'Audit Logs' : ''">
-        <img src="assets/icons/logs-icon.svg" class="nav-link-icon" alt="audit-icon" />
+
+      <a
+        *ngIf="appInfo?.features?.audit_logs"
+        routerLink="/dashboard/admin/audit"
+        routerLinkActive="active"
+        class="nav-link"
+        [title]="isCollapsed ? 'Audit Logs' : ''"
+      >
+        <img src="assets/icons/logs-icon.svg" class="nav-link-icon" alt="Audit log" />
         <span *ngIf="!isCollapsed">Audit Logs</span>
       </a>
     </nav>
   </div>
 
   <footer class="sidebar-footer">
-    
-    <div class="user-info cursor-pointer" *ngIf="!isCollapsed" [routerLink]="['/dashboard/profile']" title="View Profile & Settings">
+    <div
+      class="user-info cursor-pointer"
+      *ngIf="!isCollapsed"
+      [routerLink]="['/dashboard/profile']"
+      title="View Profile & Settings"
+    >
       <div class="user-avatar">{{ user.username.charAt(0).toUpperCase() }}</div>
       <div class="user-details">
-        <div class="username" title="{{user.username}}">{{ user.username }}</div>
+        <div class="username" title="{{ user.username }}">{{ user.username }}</div>
         <div class="user-role">{{ user.is_admin ? 'Administrator' : 'User' }}</div>
       </div>
     </div>
 
     <nav class="nav-links" *ngIf="!isCollapsed">
-        <a href="swagger/index.html" target="_blank" class="nav-link">
-            <img src="assets/icons/api2-icon.svg" class="nav-link-icon" alt="api-icon" />
-            API Docs
-        </a>
+      <a href="swagger/index.html" target="_blank" class="nav-link">
+        <img src="assets/icons/api2-icon.svg" class="nav-link-icon" alt="API documentation" />
+        API Docs
+      </a>
     </nav>
-    
-    <button 
-      (click)="toggleTheme()" 
-      class="theme-toggle-button" 
-      [title]="isCollapsed ? ((isLightTheme$ | async) ? 'Switch to Dark Mode' : 'Switch to Light Mode') : ''">
-      <svg *ngIf="isLightTheme$ | async" xmlns="http://www.w3.org/2000/svg" width="1.25rem" height="1.25rem" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="theme-toggle-icon">
+
+    <button
+      (click)="toggleTheme()"
+      class="theme-toggle-button"
+      [title]="isCollapsed ? (isLightTheme ? 'Switch to Dark Mode' : 'Switch to Light Mode') : ''"
+    >
+      <svg
+        *ngIf="isLightTheme"
+        xmlns="http://www.w3.org/2000/svg"
+        width="1.25rem"
+        height="1.25rem"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        stroke-width="2"
+        stroke-linecap="round"
+        stroke-linejoin="round"
+        class="theme-toggle-icon"
+      >
         <path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"></path>
       </svg>
-      <svg *ngIf="!(isLightTheme$ | async)" xmlns="http://www.w3.org/2000/svg" width="1.25rem" height="1.25rem" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="theme-toggle-icon">
+      <svg
+        *ngIf="!isLightTheme"
+        xmlns="http://www.w3.org/2000/svg"
+        width="1.25rem"
+        height="1.25rem"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        stroke-width="2"
+        stroke-linecap="round"
+        stroke-linejoin="round"
+        class="theme-toggle-icon"
+      >
         <circle cx="12" cy="12" r="4"></circle>
-        <path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"></path>
+        <path
+          d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"
+        ></path>
       </svg>
-      <span *ngIf="!isCollapsed">{{ (isLightTheme$ | async) ? 'Dark Mode' : 'Light Mode' }}</span>
+      <span *ngIf="!isCollapsed">{{ isLightTheme ? 'Dark Mode' : 'Light Mode' }}</span>
     </button>
 
     <button (click)="logout()" class="logout-button" [title]="isCollapsed ? 'Logout' : ''">
-      <img src="assets/icons/logout-icon.svg" alt="Logout" class="logout-icon">
+      <img src="assets/icons/logout-icon.svg" alt="Logout" class="logout-icon" />
       <span *ngIf="!isCollapsed">Logout</span>
     </button>
-    
-    <button (click)="onToggleSidebar()" class="sidebar-toggle-btn" [title]="isCollapsed ? 'Expand Sidebar' : 'Collapse Sidebar'">
-      <svg *ngIf="!isCollapsed" xmlns="http://www.w3.org/2000/svg" width="1.5em" height="1.5em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect><line x1="9" y1="3" x2="9" y2="21"></line></svg>
-      <svg *ngIf="isCollapsed" xmlns="http://www.w3.org/2000/svg" width="1.5em" height="1.5em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect><line x1="15" y1="3" x2="15" y2="21"></line></svg>
-    </button>
 
+    <button
+      (click)="onToggleSidebar()"
+      class="sidebar-toggle-btn"
+      [title]="isCollapsed ? 'Expand Sidebar' : 'Collapse Sidebar'"
+    >
+      <svg
+        *ngIf="!isCollapsed"
+        xmlns="http://www.w3.org/2000/svg"
+        width="1.5em"
+        height="1.5em"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        stroke-width="2"
+        stroke-linecap="round"
+        stroke-linejoin="round"
+      >
+        <rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect>
+        <line x1="9" y1="3" x2="9" y2="21"></line>
+      </svg>
+      <svg
+        *ngIf="isCollapsed"
+        xmlns="http://www.w3.org/2000/svg"
+        width="1.5em"
+        height="1.5em"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        stroke-width="2"
+        stroke-linecap="round"
+        stroke-linejoin="round"
+      >
+        <rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect>
+        <line x1="15" y1="3" x2="15" y2="21"></line>
+      </svg>
+    </button>
   </footer>
 </div>

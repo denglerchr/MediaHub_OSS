@@ -1,8 +1,23 @@
 /* frontend/src/styles.css */
-@import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&display=swap');
+/* FE-056: self-hosted Plus Jakarta Sans (via @fontsource) instead of the
+   render-blocking Google Fonts @import. The app is embedded into the Go binary
+   (cmd/mediahub/main.go go:embed) and must work offline/air-gapped — the CDN
+   import silently fell back to the system font there and leaked a third-party
+   request on every load. Only the subsets (latin, latin-ext) and weights
+   (400–700) the UI actually uses are bundled; other scripts fall back to the
+   system stack in --font-family-sans. */
+@import '@fontsource/plus-jakarta-sans/latin-400.css';
+@import '@fontsource/plus-jakarta-sans/latin-ext-400.css';
+@import '@fontsource/plus-jakarta-sans/latin-500.css';
+@import '@fontsource/plus-jakarta-sans/latin-ext-500.css';
+@import '@fontsource/plus-jakarta-sans/latin-600.css';
+@import '@fontsource/plus-jakarta-sans/latin-ext-600.css';
+@import '@fontsource/plus-jakarta-sans/latin-700.css';
+@import '@fontsource/plus-jakarta-sans/latin-ext-700.css';
 
 /* Modern standard for Firefox & Chromium Scrollbars */
-html, * {
+html,
+* {
   scrollbar-width: thin;
   scrollbar-color: var(--border-color-light) var(--app-bg);
 }
@@ -21,7 +36,7 @@ html {
   --item-bg-hover: #4a5568;
   --item-bg-active: #4299e1;
 
-  --content-bg: #1f2937; 
+  --content-bg: #1f2937;
 
   --text-primary: #edf2f7;
   --text-secondary: #e2e8f0;
@@ -54,12 +69,14 @@ html {
   --segmented-text: var(--text-secondary);
   --segmented-hover-bg: var(--item-bg-hover);
 
-  --font-family-sans: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --font-family-sans:
+    'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial,
+    sans-serif;
 
   /* =========================================
      FLUID TYPOGRAPHY SCALE
      ========================================= */
-  --text-base: clamp(0.875rem, 0.2vw + 0.8rem, 1rem); 
+  --text-base: clamp(0.875rem, 0.2vw + 0.8rem, 1rem);
   --text-md: clamp(0.95rem, 0.5vw + 0.85rem, 1.15rem);
   --text-lg: clamp(1.05rem, 1vw + 0.9rem, 1.35rem);
   --text-xl: clamp(1.15rem, 1.5vw + 0.95rem, 1.5rem);
@@ -69,15 +86,17 @@ html {
      GLOBAL Z-INDEX SCALE
      ========================================= */
   --z-base: 1;
-  --z-floating: 50;      /* FABs, selection actions */
+  --z-floating: 50; /* FABs, selection actions */
   --z-sidebar: 100;
   --z-dropdown: 200;
-  --z-modal-bg: 300;     
-  --z-modal: 400;        
-  --z-drag-overlay: 500; 
+  --z-modal-bg: 300;
+  --z-modal: 400;
+  --z-drag-overlay: 500;
 }
 
-*, *::before, *::after {
+*,
+*::before,
+*::after {
   box-sizing: border-box;
 }
 
@@ -89,7 +108,7 @@ body {
   color: var(--text-secondary);
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
-  
+
   /* Apply base fluid sizing globally */
   font-size: var(--text-base);
 }
@@ -99,7 +118,7 @@ body {
    ========================================= */
 ::-webkit-scrollbar {
   width: 8px;
-  height: 8px; 
+  height: 8px;
 }
 ::-webkit-scrollbar-track {
   background: var(--app-bg);
@@ -115,15 +134,30 @@ body {
 /* =========================================
    TYPOGRAPHY
    ========================================= */
-h1 { font-size: var(--text-2xl); }
-h2 { font-size: var(--text-xl); }
-h3 { font-size: var(--text-lg); }
-h4, h5, h6 { font-size: var(--text-md); }
+h1 {
+  font-size: var(--text-2xl);
+}
+h2 {
+  font-size: var(--text-xl);
+}
+h3 {
+  font-size: var(--text-lg);
+}
+h4,
+h5,
+h6 {
+  font-size: var(--text-md);
+}
 
-h1, h2, h3, h4, h5, h6 {
+h1,
+h2,
+h3,
+h4,
+h5,
+h6 {
   color: var(--text-primary);
   margin-top: 0;
-  line-height: 1.2; 
+  line-height: 1.2;
 }
 
 a {
@@ -139,13 +173,25 @@ a:hover {
 /* =========================================
    UTILITY CLASSES
    ========================================= */
-.cursor-pointer { cursor: pointer; }
-.flex-grow { flex-grow: 1; }
-.flex-shrink-0 { flex-shrink: 0; }
+.cursor-pointer {
+  cursor: pointer;
+}
+.flex-grow {
+  flex-grow: 1;
+}
+.flex-shrink-0 {
+  flex-shrink: 0;
+}
 
-.text-danger { color: var(--text-danger) !important; }
-.text-warning { color: var(--text-warning) !important; }
-.text-success { color: var(--text-success) !important; }
+.text-danger {
+  color: var(--text-danger) !important;
+}
+.text-warning {
+  color: var(--text-warning) !important;
+}
+.text-success {
+  color: var(--text-success) !important;
+}
 
 .required-asterisk {
   color: var(--text-danger);
@@ -153,9 +199,9 @@ a:hover {
 }
 
 .truncate {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap; 
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* Screen Reader Only - Accessible hiding */
@@ -184,7 +230,10 @@ a:hover {
   font-size: 0.875rem;
   border: 1px solid transparent;
   cursor: pointer;
-  transition: background-color 0.2s, border-color 0.2s, color 0.2s;
+  transition:
+    background-color 0.2s,
+    border-color 0.2s,
+    color 0.2s;
   user-select: none;
 }
 
@@ -267,7 +316,7 @@ a:hover {
 .form-label-helper {
   display: inline-flex;
   align-items: center;
-  gap: 0.5rem; 
+  gap: 0.5rem;
 }
 
 .helper-icon {
@@ -294,7 +343,9 @@ a:hover {
   background-color: var(--input-bg);
   border: 1px solid var(--input-border);
   border-radius: 0.375rem;
-  transition: border-color 0.2s, box-shadow 0.2s;
+  transition:
+    border-color 0.2s,
+    box-shadow 0.2s;
 }
 
 /* Fallback for older browsers / mouse click focus */
@@ -372,7 +423,7 @@ a:hover {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  cursor: pointer; 
+  cursor: pointer;
 }
 
 .form-file-input .file-browse-btn {
@@ -397,7 +448,9 @@ a:hover {
   background-color: var(--content-bg);
   border: 1px solid var(--border-color);
   border-radius: 0.5rem;
-  box-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.1), 0 1px 2px 0 rgba(0, 0, 0, 0.06);
+  box-shadow:
+    0 1px 3px 0 rgba(0, 0, 0, 0.1),
+    0 1px 2px 0 rgba(0, 0, 0, 0.06);
 }
 
 .table {
@@ -428,7 +481,7 @@ a:hover {
   font-size: 0.875rem;
   color: var(--text-secondary);
   border-bottom: 1px solid var(--border-color);
-  vertical-align: middle; 
+  vertical-align: middle;
 }
 
 .table tbody tr:last-child td {
@@ -449,9 +502,9 @@ a:hover {
 .toggle-switch {
   position: relative;
   display: inline-block;
-  width: 50px; 
-  height: 28px; 
-  flex-shrink: 0; 
+  width: 50px;
+  height: 28px;
+  flex-shrink: 0;
 }
 
 /* The slider (the track) */
@@ -464,31 +517,31 @@ a:hover {
   bottom: 0;
   background-color: var(--input-bg);
   border: 1px solid var(--input-border);
-  border-radius: 28px; 
-  transition: .3s;
+  border-radius: 28px;
+  transition: 0.3s;
 }
 
 /* The knob */
 .toggle-slider:before {
   position: absolute;
-  content: "";
-  height: 20px; 
-  width: 20px; 
-  left: 3px; 
-  bottom: 3px; 
-  background-color: var(--text-muted); 
+  content: '';
+  height: 20px;
+  width: 20px;
+  left: 3px;
+  bottom: 3px;
+  background-color: var(--text-muted);
   border-radius: 50%;
-  transition: .3s;
+  transition: 0.3s;
 }
 
 input:checked + .toggle-slider {
-  background-color: var(--button-primary-bg); 
+  background-color: var(--button-primary-bg);
   border-color: var(--button-primary-bg);
 }
 
 input:checked + .toggle-slider:before {
-  transform: translateX(22px); 
-  background-color: var(--text-primary); 
+  transform: translateX(22px);
+  background-color: var(--text-primary);
 }
 
 input:focus-visible + .toggle-slider {
@@ -499,15 +552,15 @@ input:focus-visible + .toggle-slider {
 .bool-field-container {
   display: flex;
   align-items: center;
-  gap: 1rem; 
-  min-height: 2.25rem; 
+  gap: 1rem;
+  min-height: 2.25rem;
 }
 
 .bool-field-value {
   font-size: 0.9rem;
   color: var(--text-primary);
   font-weight: 500;
-  user-select: none; 
+  user-select: none;
 }
 
 /* =========================================
@@ -518,23 +571,23 @@ input:focus-visible + .toggle-slider {
 }
 
 .file-drag-over::after {
-  content: "Drop file to upload";
+  content: 'Drop file to upload';
   position: absolute;
   top: 0;
   left: 0;
   width: 100%;
   height: 100%;
-  background-color: rgba(66, 153, 225, 0.9); 
+  background-color: rgba(66, 153, 225, 0.9);
   color: white;
   display: flex;
   justify-content: center;
   align-items: center;
   font-size: 1.5rem;
   font-weight: bold;
-  z-index: var(--z-drag-overlay); 
+  z-index: var(--z-drag-overlay);
   border: 4px dashed white;
   border-radius: 0.5rem;
-  pointer-events: none; 
+  pointer-events: none;
 }
 
 /* =========================================
@@ -573,9 +626,15 @@ input:focus-visible + .toggle-slider {
   line-height: 1.4;
 }
 
-.block { display: block; }
-.mt-1 { margin-top: 0.25rem; }
-.pt-4 { padding-top: 1rem; }
+.block {
+  display: block;
+}
+.mt-1 {
+  margin-top: 0.25rem;
+}
+.pt-4 {
+  padding-top: 1rem;
+}
 
 /* =========================================
    STICKY / PINNED HEADER & SCROLL CONTAINER
@@ -617,7 +676,10 @@ input:focus-visible + .toggle-slider {
   align-items: center;
   justify-content: center;
   color: var(--text-muted);
-  transition: color 0.2s, transform 0.2s, background-color 0.2s;
+  transition:
+    color 0.2s,
+    transform 0.2s,
+    background-color 0.2s;
   cursor: pointer;
   padding: 0.375rem;
   border-radius: 0.375rem;
@@ -650,7 +712,8 @@ input:focus-visible + .toggle-slider {
 }
 
 /* Light theme overrides */
-html.light-theme, body.light-theme {
+html.light-theme,
+body.light-theme {
   --app-bg: #f3f4f6;
   --sidebar-bg: #ffffff;
   --header-bg: #ffffff;
@@ -722,8 +785,12 @@ body.light-theme .back-btn:hover {
 }
 
 @keyframes spin {
-  0% { transform: rotate(0deg); }
-  100% { transform: rotate(360deg); }
+  0% {
+    transform: rotate(0deg);
+  }
+  100% {
+    transform: rotate(360deg);
+  }
 }
 
 /* =========================================
@@ -769,4 +836,37 @@ body.light-theme .alert-warning {
 body.light-theme .alert-success {
   background-color: rgba(39, 103, 73, 0.08);
   border: 1px solid rgba(39, 103, 73, 0.2);
-}
+}
+
+/* --- FE-040: shared badge / icon-button styles (hoisted verbatim from
+       admin-user-list, admin-global-keys and profile-page, which each carried an
+       identical copy). Components with *different* variants override locally. --- */
+.badge {
+  display: inline-block;
+  padding: 0.25rem 0.5rem;
+  font-size: 0.75rem;
+  font-weight: 700;
+  border-radius: 9999px;
+  text-transform: uppercase;
+}
+
+.btn-icon {
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  border-radius: 0.375rem;
+  cursor: pointer;
+  display: inline-flex;
+  padding: 0.35rem;
+  transition: all 0.2s ease;
+}
+
+.btn-icon:hover {
+  background-color: var(--item-bg-hover);
+  color: var(--text-primary);
+}
+
+.btn-icon-danger:hover {
+  background-color: rgba(229, 62, 98, 0.15);
+  color: var(--text-danger);
+}

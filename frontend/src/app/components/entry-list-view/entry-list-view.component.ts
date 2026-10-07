@@ -1,5 +1,13 @@
-import { Component, Input, Output, EventEmitter, ChangeDetectionStrategy, OnChanges, SimpleChanges } from '@angular/core';
-import { Entry, User } from '../../models'; 
+import {
+  Component,
+  Input,
+  Output,
+  EventEmitter,
+  ChangeDetectionStrategy,
+  OnChanges,
+  SimpleChanges,
+} from '@angular/core';
+import { Entry, User } from '../../models';
 import { EntryService } from '../../services/entry.service';
 import { CommonModule, DatePipe, DecimalPipe } from '@angular/common';
 import { SecureImageDirective } from '../../directives/secure-image.directive';
@@ -10,14 +18,8 @@ import { FormatBytesPipe } from '../../pipes/format-bytes.pipe';
   templateUrl: './entry-list-view.component.html',
   styleUrls: ['./entry-list-view.component.css'],
   standalone: true,
-  imports: [
-    CommonModule, 
-    DatePipe,
-    DecimalPipe,
-    SecureImageDirective,
-    FormatBytesPipe
-  ], 
-  changeDetection: ChangeDetectionStrategy.OnPush
+  imports: [CommonModule, DatePipe, DecimalPipe, SecureImageDirective, FormatBytesPipe],
+  changeDetection: ChangeDetectionStrategy.OnPush,
 })
 export class EntryListViewComponent implements OnChanges {
   @Input() entries: Entry[] = [];
@@ -29,17 +31,15 @@ export class EntryListViewComponent implements OnChanges {
   @Output() entryClicked = new EventEmitter<Entry>();
   @Output() editClicked = new EventEmitter<Entry>();
   @Output() deleteClicked = new EventEmitter<Entry>();
-  @Output() toggleSelection = new EventEmitter<{ entry: Entry, event: MouseEvent }>();
+  @Output() toggleSelection = new EventEmitter<{ entry: Entry; event: MouseEvent }>();
 
   public failedImageIds = new Set<number>();
-  
+
   // Scoped permission flags
   public canEdit = false;
   public canDelete = false;
 
-  constructor(
-    private entryService: EntryService
-  ) {}
+  constructor(private entryService: EntryService) {}
 
   ngOnChanges(changes: SimpleChanges): void {
     // UPDATED: Check for dbId changes
@@ -54,7 +54,8 @@ export class EntryListViewComponent implements OnChanges {
 
   // Resolves permissions specifically for the currently displayed database
   private updatePermissions(): void {
-    if (!this.user || !this.dbId) { // UPDATED
+    if (!this.user || !this.dbId) {
+      // UPDATED
       this.canEdit = false;
       this.canDelete = false;
       return;
@@ -65,7 +66,7 @@ export class EntryListViewComponent implements OnChanges {
       this.canDelete = true;
     } else {
       // UPDATED: Match the permission's database_id against our component's dbId input
-      const dbPerm = this.user.permissions?.find(p => p.database_id === this.dbId);
+      const dbPerm = this.user.permissions?.find((p) => p.database_id === this.dbId);
       this.canEdit = dbPerm?.can_edit || false;
       this.canDelete = dbPerm?.can_delete || false;
     }
@@ -90,7 +91,7 @@ export class EntryListViewComponent implements OnChanges {
 
   public onCheckboxClick(entry: Entry, event: MouseEvent): void {
     event.stopPropagation();
-    
+
     if (event.target instanceof HTMLElement) {
       event.target.blur();
     }

@@ -10,7 +10,7 @@
   background-color: var(--button-danger-bg);
   color: var(--text-primary);
   /* Use a safe high z-index, falling back to 600 if the variable isn't defined */
-  z-index: var(--z-toast, 600); 
+  z-index: var(--z-toast, 600);
   padding: 1rem;
   box-shadow: 0 2px 5px rgba(0, 0, 0, 0.2);
 }
@@ -69,11 +69,11 @@
 }
 
 .toast-error {
-  background-color: var(--button-danger-bg); 
+  background-color: var(--button-danger-bg);
 }
 
 .toast-info {
-  background-color: var(--button-primary-bg); 
+  background-color: var(--button-primary-bg);
 }
 
 .toast-notification .close-btn {

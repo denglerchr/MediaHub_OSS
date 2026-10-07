@@ -5,7 +5,7 @@ import { ThemeService } from './services/theme.service';
   selector: 'app-root',
   templateUrl: './app.component.html',
   styleUrls: ['./app.component.css'],
-  standalone: false
+  standalone: false,
 })
 export class AppComponent {
   title = 'MediaHub';

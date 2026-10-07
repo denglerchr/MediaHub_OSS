@@ -10,15 +10,23 @@ export interface Permission {
 
 export type AccountType = 'local' | 'service_account' | 'oidc';
 
+/**
+ * FE-042: create/update payload for `POST /api/user` and `PATCH /api/user/{id}`
+ * (userhandler/users.go) — typed instead of `any`.
+ */
+export interface UserPayload {
+  username?: string;
+  password?: string;
+  is_admin?: boolean;
+  account_type?: AccountType;
+  permissions?: Permission[];
+}
+
 // Update the User interface to perfectly match the backend JSON
 export interface User {
   id: string; // ULID
   username: string;
   is_admin: boolean;
   account_type: AccountType;
-  permissions: Permission[]; 
-  
-  // Optional tracking fields (if your backend still returns them)
-  created_at?: string;
-  updated_at?: string;
+  permissions: Permission[];
 }

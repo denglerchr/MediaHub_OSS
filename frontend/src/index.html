@@ -1,13 +1,45 @@
 <!doctype html>
 <html lang="en" class="light-theme">
-<head>
-  <meta charset="utf-8">
-  <title>MediaHub</title>
-  <base href="/">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <link rel="icon" type="image/svg+xml" href="assets/logo.svg">
-</head>
-<body class="light-theme">
-  <app-root></app-root>
-</body>
+  <head>
+    <meta charset="utf-8" />
+    <title>MediaHub</title>
+    <base href="/" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <link rel="icon" type="image/svg+xml" href="assets/logo.svg" />
+    <!-- FE-055: apply the persisted theme (or the OS preference when none is stored)
+       BEFORE the first paint. ThemeService runs only after Angular bootstraps,
+       which flashed light content at dark-theme users on every load. This script
+       mirrors ThemeService.resolveTheme(); the default markup stays light-themed
+       so a no-JS load looks unchanged. -->
+    <script>
+      (function () {
+        try {
+          var saved = localStorage.getItem('theme');
+          // N-D5: mirror ThemeService.resolveTheme() exactly — only 'light'/'dark'
+          // are recognized; any other stored value falls back to the OS preference
+          // (the old script forced light for unrecognized values and flashed after
+          // bootstrap resolved dark).
+          var osDark = !!(
+            window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches
+          );
+          var dark = saved === 'light' || saved === 'dark' ? saved === 'dark' : osDark;
+          if (dark) {
+            document.documentElement.classList.remove('light-theme');
+          }
+        } catch (e) {
+          /* storage unavailable — keep the light default */
+        }
+      })();
+    </script>
+  </head>
+  <body class="light-theme">
+    <!-- FE-055: sync the body class while the body is still being parsed (the head
+       script cannot touch <body>). The state carrier is the html element class. -->
+    <script>
+      if (!document.documentElement.classList.contains('light-theme')) {
+        document.body.classList.remove('light-theme');
+      }
+    </script>
+    <app-root></app-root>
+  </body>
 </html>

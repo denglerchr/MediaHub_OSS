@@ -1,38 +1,81 @@
 <div #playerContainer class="fullscreen-player-wrapper">
-  
   <div *ngIf="isLoading" class="loading-overlay">
     <div class="spinner"></div>
     <p>Loading presentation...</p>
   </div>
 
   <button class="exit-btn" (click)="closePlayer()" title="Exit Presentation (Esc)">
-    <svg xmlns="http://www.w3.org/2000/svg" width="2em" height="2em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      width="2em"
+      height="2em"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      stroke-width="2"
+      stroke-linecap="round"
+      stroke-linejoin="round"
+    >
       <line x1="18" y1="6" x2="6" y2="18"></line>
       <line x1="6" y1="6" x2="18" y2="18"></line>
     </svg>
   </button>
 
   <div *ngIf="!isLoading && currentEntry" class="media-container" [ngSwitch]="contentType">
-    
     <ng-container *ngSwitchCase="'image'">
-      <img *ngIf="mediaUrl" [src]="mediaUrl" class="media-element image-element" alt="Fullscreen Image">
+      <img
+        *ngIf="mediaUrl"
+        [src]="mediaUrl"
+        class="media-element image-element"
+        alt="Fullscreen Image"
+        (error)="onMediaError()"
+      />
     </ng-container>
 
     <ng-container *ngSwitchCase="'video'">
-      <video *ngIf="mediaUrl" #mediaElement [src]="mediaUrl" class="media-element video-element" autoplay controls (ended)="onMediaEnded()"></video>
+      <video
+        *ngIf="mediaUrl"
+        #mediaElement
+        [src]="mediaUrl"
+        class="media-element video-element"
+        autoplay
+        controls
+        (ended)="onMediaEnded()"
+        (error)="onMediaError()"
+      ></video>
     </ng-container>
 
     <ng-container *ngSwitchCase="'audio'">
       <div class="audio-wrapper">
         <div class="audio-visualizer-placeholder">
-          <svg xmlns="http://www.w3.org/2000/svg" width="6em" height="6em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="audio-icon">
+          <svg
+            xmlns="http://www.w3.org/2000/svg"
+            width="6em"
+            height="6em"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            class="audio-icon"
+          >
             <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon>
             <path d="M19.07 4.93a10 10 0 0 1 0 14.14M15.54 8.46a5 5 0 0 1 0 7.07"></path>
           </svg>
           <p class="audio-title">{{ currentEntry.filename || 'Audio Track' }}</p>
         </div>
-        
-        <audio *ngIf="mediaUrl" #mediaElement [src]="mediaUrl" autoplay controls (ended)="onMediaEnded()" class="audio-element"></audio>
+
+        <audio
+          *ngIf="mediaUrl"
+          #mediaElement
+          [src]="mediaUrl"
+          autoplay
+          controls
+          (ended)="onMediaEnded()"
+          (error)="onMediaError()"
+          class="audio-element"
+        ></audio>
       </div>
     </ng-container>
 
@@ -41,7 +84,5 @@
         <p>Unsupported media type for fullscreen presentation.</p>
       </div>
     </ng-container>
-
   </div>
-  
 </div>

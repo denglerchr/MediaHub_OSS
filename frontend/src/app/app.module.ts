@@ -2,7 +2,9 @@
 
 import { NgModule } from '@angular/core';
 import { BrowserModule } from '@angular/platform-browser';
-import { HttpClientModule, HTTP_INTERCEPTORS } from '@angular/common/http';
+// Step 8: HttpClientModule + the HTTP_INTERCEPTORS class token are deprecated on
+// Angular 20 — the JWT interceptor is registered as a functional interceptor.
+import { provideHttpClient, withInterceptors } from '@angular/common/http';
 import { FormsModule, ReactiveFormsModule } from '@angular/forms';
 import { BrowserAnimationsModule } from '@angular/platform-browser/animations';
 
@@ -44,7 +46,7 @@ import { SecureImageDirective } from './directives/secure-image.directive';
 import { FileDragDropDirective } from './directives/file-drag-drop.directive';
 
 // Interceptor
-import { JwtInterceptor } from './interceptors/jwt.interceptor';
+import { jwtInterceptorFn } from './interceptors/jwt.interceptor';
 
 @NgModule({
   declarations: [
@@ -77,7 +79,6 @@ import { JwtInterceptor } from './interceptors/jwt.interceptor';
   imports: [
     BrowserModule,
     AppRoutingModule,
-    HttpClientModule,
     FormsModule,
     ReactiveFormsModule,
     BrowserAnimationsModule,
@@ -88,9 +89,7 @@ import { JwtInterceptor } from './interceptors/jwt.interceptor';
     FileDragDropDirective,
     DatetimeDefaultDirective,
   ],
-  providers: [
-    { provide: HTTP_INTERCEPTORS, useClass: JwtInterceptor, multi: true }
-  ],
+  providers: [provideHttpClient(withInterceptors([jwtInterceptorFn]))],
   bootstrap: [AppComponent],
 })
 export class AppModule {}

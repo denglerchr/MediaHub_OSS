@@ -30,7 +30,17 @@ module.exports = function (config) {
       ]
     },
     reporters: ['progress', 'kjhtml'],
-    browsers: ['FirefoxHeadless'],
+    // N-D9: the FE-056 self-hosted fonts are referenced from the bundled CSS as
+    // "./media/…", which the test context requests as "/base/media/…". Only the
+    // "/media/…" build outputs are served (Angular's test-assets middleware), so
+    // every font weight logged a 404 on each test run. Proxy the context-relative
+    // path onto the served build output to silence them.
+    proxies: {
+      '/base/media/': '/media/'
+    },
+    // CI sets CHROME_BIN (see .github/workflows/ci.yml) and gets ChromeHeadless;
+    // local development falls back to the Firefox headless launcher.
+    browsers: [process.env.CHROME_BIN ? 'ChromeHeadless' : 'FirefoxHeadless'],
     customLaunchers: {
       FirefoxHeadless: {
         base: 'Firefox',

@@ -1,43 +1,104 @@
 <div class="import-page-container page-container" *ngIf="currentDatabase">
-  
-  <div class="sticky-header" style="border-bottom: none; margin-bottom: 0.5rem; background: transparent; padding-bottom: 0;">
-    <div style="display: flex; align-items: center; gap: 0.75rem; min-width: 0;">
-      <a [routerLink]="['/dashboard/db', currentDatabase.id]" class="back-btn" title="Back to Entries">
-        <svg xmlns="http://www.w3.org/2000/svg" width="1.5em" height="1.5em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+  <div
+    class="sticky-header"
+    style="border-bottom: none; margin-bottom: 0.5rem; background: transparent; padding-bottom: 0"
+  >
+    <div style="display: flex; align-items: center; gap: 0.75rem; min-width: 0">
+      <a
+        [routerLink]="['/dashboard/db', currentDatabase.id]"
+        class="back-btn"
+        title="Back to Entries"
+      >
+        <svg
+          xmlns="http://www.w3.org/2000/svg"
+          width="1.5em"
+          height="1.5em"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="2"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+        >
           <line x1="19" y1="12" x2="5" y2="12"></line>
           <polyline points="12 19 5 12 12 5"></polyline>
         </svg>
       </a>
       <div>
-        <h2 class="shortened-title" title="Bulk Import to {{ currentDatabase.name }}" style="margin: 0;">Bulk Import</h2>
-        <p class="subtitle" style="margin: 0; color: var(--text-muted); font-size: 0.875rem;">Importing to: <strong>{{ currentDatabase.name }}</strong></p>
+        <h2
+          class="shortened-title"
+          title="Bulk Import to {{ currentDatabase.name }}"
+          style="margin: 0"
+        >
+          Bulk Import
+        </h2>
+        <p class="subtitle" style="margin: 0; color: var(--text-muted); font-size: 0.875rem">
+          Importing to: <strong>{{ currentDatabase.name }}</strong>
+        </p>
       </div>
     </div>
   </div>
 
   <div class="scroll-content">
     <div class="custom-stepper-header">
-      <div class="step-indicator" [class.active]="currentStep === 1" [class.completed]="currentStep > 1">1. Archive</div>
+      <div
+        class="step-indicator"
+        [class.active]="currentStep === 1"
+        [class.completed]="currentStep > 1"
+      >
+        1. Archive
+      </div>
       <div class="step-line"></div>
-      <div class="step-indicator" [class.active]="currentStep === 2" [class.completed]="currentStep > 2">2. Settings</div>
+      <div
+        class="step-indicator"
+        [class.active]="currentStep === 2"
+        [class.completed]="currentStep > 2"
+      >
+        2. Settings
+      </div>
       <div class="step-line"></div>
-      <div class="step-indicator" [class.active]="currentStep === 3" [class.completed]="currentStep > 3">3. Mapping</div>
+      <div
+        class="step-indicator"
+        [class.active]="currentStep === 3"
+        [class.completed]="currentStep > 3"
+      >
+        3. Mapping
+      </div>
       <div class="step-line"></div>
-      <div class="step-indicator" [class.active]="currentStep === 4" [class.completed]="currentStep > 4">4. Upload</div>
+      <div
+        class="step-indicator"
+        [class.active]="currentStep === 4"
+        [class.completed]="currentStep > 4"
+      >
+        4. Upload
+      </div>
     </div>
 
     <div class="custom-stepper-content">
-
       <div *ngIf="currentStep === 1" class="step-view">
         <h3>Select Archive</h3>
-        <p>Please select a ZIP archive containing your media files and an <code>entries.csv</code> file.</p>
+        <p>
+          Please select a ZIP archive containing your media files and an
+          <code>entries.csv</code> file.
+        </p>
 
-        <div *ngIf="!selectedFile" class="dropzone" appFileDragDrop (fileDropped)="onFileSelected($event)">
+        <div
+          *ngIf="!selectedFile"
+          class="dropzone"
+          appFileDragDrop
+          (fileDropped)="onFileSelected($event)"
+        >
           <div class="dropzone-content">
             <p>Drag and drop your <strong>.zip</strong> file here</p>
             <p class="text-muted">or</p>
             <button class="btn btn-secondary" (click)="fileInput.click()">Browse Files</button>
-            <input type="file" #fileInput hidden accept=".zip" (change)="onFileInputChange($event)">
+            <input
+              type="file"
+              #fileInput
+              hidden
+              accept=".zip"
+              (change)="onFileInputChange($event)"
+            />
           </div>
         </div>
 
@@ -48,7 +109,7 @@
               <p class="filesize text-muted">{{ selectedFile.size | formatBytes }}</p>
             </div>
           </div>
-          
+
           <div *ngIf="isParsingZip" class="parsing-state">
             <span>Parsing archive... please wait.</span>
           </div>
@@ -63,16 +124,17 @@
       <div *ngIf="currentStep === 2" class="step-view">
         <h3>Settings</h3>
         <p>Configure how the importer should handle existing data.</p>
-        
+
         <form [formGroup]="configStepForm" class="form-layout">
-          
           <div class="form-group">
             <label>Import Mode</label>
             <select formControlName="mode" class="form-control">
               <option value="generate_new">Generate New IDs (Treat as fresh uploads)</option>
               <option value="skip">Skip Existing (Incremental restore)</option>
-              </select>
-            <small class="text-muted">Determines how the system handles the IDs listed in your CSV file.</small>
+            </select>
+            <small class="text-muted"
+              >Determines how the system handles the IDs listed in your CSV file.</small
+            >
           </div>
 
           <div class="form-group">
@@ -92,28 +154,35 @@
 
       <div *ngIf="currentStep === 3" class="step-view">
         <h3>Field Mapping</h3>
-        
+
         <form [formGroup]="mappingStepForm">
-          
           <div *ngIf="customCsvHeaders.length === 0" class="no-mapping-needed">
-            <p><strong>Success!</strong> No custom columns were found in your CSV. You can proceed to upload.</p>
+            <p>
+              <strong>Success!</strong> No custom columns were found in your CSV. You can proceed to
+              upload.
+            </p>
           </div>
 
           <div *ngIf="customCsvHeaders.length > 0">
-            <p>We found custom columns in your CSV. Map them to the database's custom fields below:</p>
-            
+            <p>
+              We found custom columns in your CSV. Map them to the database's custom fields below:
+            </p>
+
             <div class="mapping-grid">
               <div class="mapping-row" *ngFor="let csvHeader of customCsvHeaders">
                 <div class="csv-column">
                   <strong>{{ csvHeader }}</strong>
                 </div>
-                
+
                 <div class="arrow-icon">&rarr;</div>
 
                 <div class="db-column">
                   <select [formControlName]="csvHeader" class="form-control">
                     <option value="">-- Do not import --</option>
-                    <option *ngFor="let dbField of currentDatabase.custom_fields" [value]="dbField.name">
+                    <option
+                      *ngFor="let dbField of currentDatabase.custom_fields"
+                      [value]="dbField.name"
+                    >
                       {{ dbField.name }} ({{ dbField.type }})
                     </option>
                   </select>
@@ -130,38 +199,54 @@
       </div>
 
       <div *ngIf="currentStep === 4" class="step-view text-center">
-        
         <div *ngIf="!isUploading && !isUploadComplete">
           <h3>Ready to Import</h3>
-          <p>Your archive is ready. Please ensure your connection is stable before starting the transfer.</p>
+          <p>
+            Your archive is ready. Please ensure your connection is stable before starting the
+            transfer.
+          </p>
           <div class="step-actions center-actions">
-            <button class="btn btn-secondary" (click)="prevStep()" [disabled]="isUploading">Back</button>
+            <button class="btn btn-secondary" (click)="prevStep()" [disabled]="isUploading">
+              Back
+            </button>
             <button class="btn btn-success" (click)="startImport()">Start Import</button>
           </div>
         </div>
 
         <div *ngIf="isUploading" class="uploading-state">
           <h3>Uploading Archive...</h3>
-          
+
           <div class="custom-progress-bar">
             <div class="progress-fill" [style.width.%]="uploadProgress"></div>
           </div>
-          
+
           <p class="progress-text">{{ uploadProgress }}% Complete</p>
           <p class="text-muted text-small">Please do not close this window.</p>
         </div>
 
         <div *ngIf="isUploadComplete" class="success-state">
-          <svg class="success-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <svg
+            class="success-icon"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          >
             <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"></path>
             <polyline points="22 4 12 14.01 9 11.01"></polyline>
           </svg>
 
           <h3>Upload Successful!</h3>
-          <p>The archive has been received securely. The server is now processing the import in the background.</p>
-          <button class="btn btn-primary" (click)="navigateBack()">Return to Database Settings</button>
+          <p>
+            The archive has been received securely. The server is now processing the import in the
+            background.
+          </p>
+          <button class="btn btn-primary" (click)="navigateBack()">
+            Return to Database Settings
+          </button>
         </div>
-
       </div>
     </div>
   </div>

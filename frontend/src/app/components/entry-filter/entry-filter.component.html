@@ -1,116 +1,171 @@
 <div class="filter-wrapper" [class.collapsed]="isCollapsed">
-  
   <div class="filter-body">
     <form [formGroup]="filterForm" (ngSubmit)="applyFilters()">
       <div class="filter-controls">
-        
         <div class="form-group">
           <label for="tstart" class="form-label">Start Date</label>
-          <input id="tstart" type="datetime-local" formControlName="tstart" class="form-control" appDatetimeDefault>
+          <input
+            id="tstart"
+            type="datetime-local"
+            formControlName="tstart"
+            class="form-control"
+            appDatetimeDefault
+          />
         </div>
         <div class="form-group">
           <label for="tend" class="form-label">End Date</label>
-          <input id="tend" type="datetime-local" formControlName="tend" class="form-control" appDatetimeDefault>
+          <!-- FE-048: end-of-range default is 23:59, not 00:00 -->
+          <input
+            id="tend"
+            type="datetime-local"
+            formControlName="tend"
+            class="form-control"
+            appDatetimeDefault="end"
+          />
         </div>
         <div class="form-group limit-group">
           <label for="limitPerPage" class="form-label">Per Page</label>
-          <input id="limitPerPage" type="number" formControlName="limitPerPage" class="form-control">
-          <div *ngIf="filterForm.get('limitPerPage')?.invalid && (filterForm.get('limitPerPage')?.dirty || filterForm.get('limitPerPage')?.touched)" class="form-error">
+          <input
+            id="limitPerPage"
+            type="number"
+            formControlName="limitPerPage"
+            class="form-control"
+          />
+          <div
+            *ngIf="
+              filterForm.get('limitPerPage')?.invalid &&
+              (filterForm.get('limitPerPage')?.dirty || filterForm.get('limitPerPage')?.touched)
+            "
+            class="form-error"
+          >
             Limit required (min 1).
           </div>
         </div>
 
         <div formArrayName="customFilters" class="custom-filters-array">
-          <div *ngFor="let group of customFilters.controls; let i = index" [formGroupName]="i" class="custom-filter-row">
-            
+          <div
+            *ngFor="let group of customFilters.controls; let i = index"
+            [formGroupName]="i"
+            class="custom-filter-row"
+          >
             <select formControlName="field" class="form-control">
               <option value="">-- Select Field --</option>
-              <option *ngFor="let field of availableFilters" [value]="field.name">{{ field.name }}</option>
+              <option *ngFor="let field of availableFilters" [value]="field.name">
+                {{ field.name }}
+              </option>
             </select>
-            
+
             <select formControlName="operator" class="form-control">
-              <ng-container *ngIf="getSelectedFieldType(i) as fieldType">
-                <option *ngFor="let op of getOperatorsForFieldType(fieldType)" [value]="op">
-                  {{ op === 'LIKE' ? 'contains' : (op === 'in_box' ? 'in box' : op) }}
+              <!-- FE-027: precomputed row state instead of getSelectedFieldType(i) per CD cycle -->
+              <ng-container *ngIf="filterRows[i].fieldType">
+                <option *ngFor="let op of filterRows[i].operators" [value]="op">
+                  {{ op === 'LIKE' ? 'contains' : op === 'in_box' ? 'in box' : op }}
                 </option>
               </ng-container>
-              <ng-container *ngIf="!getSelectedFieldType(i)">
+              <ng-container *ngIf="!filterRows[i].fieldType">
                 <option value="=">=</option>
                 <option value="!=">!=</option>
               </ng-container>
             </select>
-            
-            <ng-container [ngSwitch]="getSelectedFieldType(i)">
-              
+
+            <ng-container [ngSwitch]="filterRows[i].fieldType">
               <select *ngSwitchCase="'BOOLEAN'" formControlName="value" class="form-control">
                 <option value="true">True</option>
                 <option value="false">False</option>
               </select>
 
               <div *ngSwitchCase="'COORDINATE'" class="bbox-input-group">
-                <input type="number"
-                       step="any"
-                       min="-90"
-                       max="90"
-                       [value]="getBboxCoord(i, 'min_lat')"
-                       (input)="setBboxCoord(i, 'min_lat', $event)"
-                       placeholder="Min Lat"
-                       class="form-control"
-                       title="Min Latitude (-90 to 90)">
-                <input type="number"
-                       step="any"
-                       min="-90"
-                       max="90"
-                       [value]="getBboxCoord(i, 'max_lat')"
-                       (input)="setBboxCoord(i, 'max_lat', $event)"
-                       placeholder="Max Lat"
-                       class="form-control"
-                       title="Max Latitude (-90 to 90)">
-                <input type="number"
-                       step="any"
-                       min="-180"
-                       max="180"
-                       [value]="getBboxCoord(i, 'min_lng')"
-                       (input)="setBboxCoord(i, 'min_lng', $event)"
-                       placeholder="Min Lng"
-                       class="form-control"
-                       title="Min Longitude (-180 to 180)">
-                <input type="number"
-                       step="any"
-                       min="-180"
-                       max="180"
-                       [value]="getBboxCoord(i, 'max_lng')"
-                       (input)="setBboxCoord(i, 'max_lng', $event)"
-                       placeholder="Max Lng"
-                       class="form-control"
-                       title="Max Longitude (-180 to 180)">
+                <input
+                  type="number"
+                  step="any"
+                  min="-90"
+                  max="90"
+                  [value]="getBboxCoord(i, 'min_lat')"
+                  (input)="setBboxCoord(i, 'min_lat', $event)"
+                  placeholder="Min Lat"
+                  class="form-control"
+                  title="Min Latitude (-90 to 90)"
+                />
+                <input
+                  type="number"
+                  step="any"
+                  min="-90"
+                  max="90"
+                  [value]="getBboxCoord(i, 'max_lat')"
+                  (input)="setBboxCoord(i, 'max_lat', $event)"
+                  placeholder="Max Lat"
+                  class="form-control"
+                  title="Max Latitude (-90 to 90)"
+                />
+                <input
+                  type="number"
+                  step="any"
+                  min="-180"
+                  max="180"
+                  [value]="getBboxCoord(i, 'min_lng')"
+                  (input)="setBboxCoord(i, 'min_lng', $event)"
+                  placeholder="Min Lng"
+                  class="form-control"
+                  title="Min Longitude (-180 to 180)"
+                />
+                <input
+                  type="number"
+                  step="any"
+                  min="-180"
+                  max="180"
+                  [value]="getBboxCoord(i, 'max_lng')"
+                  (input)="setBboxCoord(i, 'max_lng', $event)"
+                  placeholder="Max Lng"
+                  class="form-control"
+                  title="Max Longitude (-180 to 180)"
+                />
               </div>
-              
-              <input *ngSwitchCase="'INTEGER'" 
-                     type="number" 
-                     step="1" 
-                     formControlName="value" 
-                     placeholder="Value" 
-                     class="form-control">
-                     
-              <input *ngSwitchCase="'REAL'" 
-                     type="number" 
-                     step="any" 
-                     formControlName="value" 
-                     placeholder="Value" 
-                     class="form-control">
-                     
-              <input *ngSwitchDefault 
-                     type="text" 
-                     formControlName="value" 
-                     placeholder="Value" 
-                     class="form-control">
-                     
+
+              <input
+                *ngSwitchCase="'INTEGER'"
+                type="number"
+                step="1"
+                formControlName="value"
+                placeholder="Value"
+                class="form-control"
+              />
+
+              <input
+                *ngSwitchCase="'REAL'"
+                type="number"
+                step="any"
+                formControlName="value"
+                placeholder="Value"
+                class="form-control"
+              />
+
+              <input
+                *ngSwitchDefault
+                type="text"
+                formControlName="value"
+                placeholder="Value"
+                class="form-control"
+              />
             </ng-container>
-            
-            <button type="button" class="btn-remove" (click)="removeCustomFilter(i)" title="Remove Filter">
-              <svg xmlns="http://www.w3.org/2000/svg" width="1.2em" height="1.2em" viewBox="0 0 20 20" fill="currentColor">
-                <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM7 9a1 1 0 000 2h6a1 1 0 100-2H7z" clip-rule="evenodd" />
+
+            <button
+              type="button"
+              class="btn-remove"
+              (click)="removeCustomFilter(i)"
+              title="Remove Filter"
+            >
+              <svg
+                xmlns="http://www.w3.org/2000/svg"
+                width="1.2em"
+                height="1.2em"
+                viewBox="0 0 20 20"
+                fill="currentColor"
+              >
+                <path
+                  fill-rule="evenodd"
+                  d="M10 18a8 8 0 100-16 8 8 0 000 16zM7 9a1 1 0 000 2h6a1 1 0 100-2H7z"
+                  clip-rule="evenodd"
+                />
               </svg>
             </button>
           </div>
@@ -118,7 +173,13 @@
 
         <div class="filter-actions">
           <button type="button" class="btn-link" (click)="addCustomFilter()">+ Add Filter</button>
-          <button type="submit" class="btn btn-primary" [disabled]="filterForm.invalid || isLoading">Apply</button>
+          <button
+            type="submit"
+            class="btn btn-primary"
+            [disabled]="filterForm.invalid || isLoading"
+          >
+            Apply
+          </button>
         </div>
       </div>
     </form>

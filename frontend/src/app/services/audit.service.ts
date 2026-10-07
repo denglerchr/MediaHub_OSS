@@ -6,14 +6,14 @@ import { NotificationService } from './notification.service';
 import { AuditLog } from '../models/audit.models';
 
 @Injectable({
-  providedIn: 'root'
+  providedIn: 'root',
 })
 export class AuditService {
   private readonly apiUrl = '/api';
 
   constructor(
     private http: HttpClient,
-    private notificationService: NotificationService
+    private notificationService: NotificationService,
   ) {}
 
   /**
@@ -26,7 +26,7 @@ export class AuditService {
     } else if (error.message) {
       errorMessage = error.message;
     }
-    
+
     // Display the error using your global notification service
     this.notificationService.showError(`Audit Log Error: ${errorMessage}`);
     return throwError(() => new Error(errorMessage));
@@ -46,9 +46,8 @@ export class AuditService {
     offset: number = 0,
     order: 'asc' | 'desc' = 'desc',
     tstart?: number,
-    tend?: number
+    tend?: number,
   ): Observable<AuditLog[]> {
-    
     // Build the HTTP Query Parameters dynamically
     let params = new HttpParams()
       .set('limit', limit.toString())
@@ -64,8 +63,8 @@ export class AuditService {
     }
 
     // Execute the GET request to /api/audit
-    return this.http.get<AuditLog[]>(`${this.apiUrl}/audit`, { params }).pipe(
-      catchError((error: HttpErrorResponse) => this.handleError(error))
-    );
+    return this.http
+      .get<AuditLog[]>(`${this.apiUrl}/audit`, { params })
+      .pipe(catchError((error: HttpErrorResponse) => this.handleError(error)));
   }
 }

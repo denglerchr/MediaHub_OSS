@@ -4,35 +4,53 @@
       <h1>Databases</h1>
       <p class="subtitle">Select a database to view, search, and manage your media and files.</p>
     </div>
-    <button 
-      *ngIf="currentUser?.is_admin" 
-      class="btn btn-primary create-db-btn" 
-      (click)="openCreateDatabaseModal()" 
-      title="Create New Database">
-      <svg xmlns="http://www.w3.org/2000/svg" width="1.25em" height="1.25em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 0.5rem;"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+    <button
+      *ngIf="currentUser?.is_admin"
+      class="btn btn-primary create-db-btn"
+      (click)="openCreateDatabaseModal()"
+      title="Create New Database"
+    >
+      <svg
+        xmlns="http://www.w3.org/2000/svg"
+        width="1.25em"
+        height="1.25em"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        stroke-width="2"
+        stroke-linecap="round"
+        stroke-linejoin="round"
+        style="margin-right: 0.5rem"
+      >
+        <line x1="12" y1="5" x2="12" y2="19"></line>
+        <line x1="5" y1="12" x2="19" y2="12"></line>
+      </svg>
       Create Database
     </button>
   </header>
 
   <div class="db-grid" *ngIf="databases.length > 0; else noDbs">
-    <div 
-      *ngFor="let db of databases" 
-      class="db-card" 
-      (click)="goToDatabase(db.id)" 
-      [attr.aria-label]="db.name + ' Database'">
-      
+    <div
+      *ngFor="let db of databases; trackBy: trackByDbId"
+      class="db-card"
+      (click)="goToDatabase(db.id)"
+      [attr.aria-label]="db.name + ' Database'"
+    >
       <div class="db-card-preview-container">
-        <ng-container *ngIf="dbPreviews[db.id] && !failedPreviews.has(db.id); else fallbackPlaceholder">
-          <img 
-            [secureSrc]="dbPreviews[db.id]" 
-            (imageError)="handleImageError(db.id)" 
-            class="db-card-preview-img" 
-            alt="Latest entry preview"/>
+        <ng-container
+          *ngIf="dbPreviews[db.id] && !failedPreviews.has(db.id); else fallbackPlaceholder"
+        >
+          <img
+            [secureSrc]="dbPreviews[db.id]"
+            (imageError)="handleImageError(db.id)"
+            class="db-card-preview-img"
+            alt="Latest entry preview"
+          />
         </ng-container>
-        
+
         <ng-template #fallbackPlaceholder>
           <div class="db-card-placeholder {{ db.content_type }}-placeholder">
-            <img [src]="getIconForDb(db)" class="db-card-placeholder-icon" alt="db-type-icon"/>
+            <img [src]="getIconForDb(db)" class="db-card-placeholder-icon" alt="Database type" />
             <span class="db-type-badge">{{ db.content_type | uppercase }}</span>
           </div>
         </ng-template>
@@ -44,7 +62,7 @@
         <div class="db-card-title-row">
           <h2 class="db-card-title" title="{{ db.name }}">{{ db.name }}</h2>
         </div>
-        
+
         <div class="db-card-footer">
           <div class="db-card-stats" *ngIf="db.stats; else noStats">
             <span class="stat-pill">{{ db.stats.entry_count | number }} items</span>
@@ -59,12 +77,13 @@
             </div>
           </ng-template>
 
-          <button 
-            *ngIf="hasAdminAccess(db.id)" 
-            class="db-settings-btn" 
-            (click)="goToSettings($event, db.id)" 
-            title="Database Settings">
-            <img src="assets/icons/settings-icon.svg" alt="Settings" class="db-settings-icon-img"/>
+          <button
+            *ngIf="hasAdminAccess(db.id)"
+            class="db-settings-btn"
+            (click)="goToSettings($event, db.id)"
+            title="Database Settings"
+          >
+            <img src="assets/icons/settings-icon.svg" alt="Settings" class="db-settings-icon-img" />
           </button>
         </div>
       </div>
@@ -73,17 +92,33 @@
 
   <ng-template #noDbs>
     <div class="empty-overview-state">
-      <svg xmlns="http://www.w3.org/2000/svg" width="3em" height="3em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" class="empty-icon">
+      <svg
+        xmlns="http://www.w3.org/2000/svg"
+        width="3em"
+        height="3em"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        stroke-width="1.5"
+        stroke-linecap="round"
+        stroke-linejoin="round"
+        class="empty-icon"
+      >
         <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"></path>
         <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"></path>
       </svg>
       <h2>No databases found</h2>
-      <p *ngIf="currentUser?.is_admin">Get started by creating your first database to upload files.</p>
-      <p *ngIf="!currentUser?.is_admin">You do not have access to any databases. Contact your administrator.</p>
-      <button 
-        *ngIf="currentUser?.is_admin" 
-        class="btn btn-primary" 
-        (click)="openCreateDatabaseModal()">
+      <p *ngIf="currentUser?.is_admin">
+        Get started by creating your first database to upload files.
+      </p>
+      <p *ngIf="!currentUser?.is_admin">
+        You do not have access to any databases. Contact your administrator.
+      </p>
+      <button
+        *ngIf="currentUser?.is_admin"
+        class="btn btn-primary"
+        (click)="openCreateDatabaseModal()"
+      >
         Create Database
       </button>
     </div>

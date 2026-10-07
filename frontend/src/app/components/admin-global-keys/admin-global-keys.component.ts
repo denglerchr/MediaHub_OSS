@@ -7,14 +7,17 @@ import { ApiKey } from '../../models';
 import { AuthService } from '../../services/auth.service';
 import { ModalService } from '../../services/modal.service';
 import { NotificationService } from '../../services/notification.service';
-import { ConfirmationModalComponent, ConfirmationModalData } from '../confirmation-modal/confirmation-modal.component';
+import {
+  ConfirmationModalComponent,
+  ConfirmationModalData,
+} from '../confirmation-modal/confirmation-modal.component';
 import { ApiKeyModalComponent } from '../api-key-modal/api-key-modal.component';
 
 @Component({
   selector: 'app-admin-global-keys',
   templateUrl: './admin-global-keys.component.html',
   styleUrls: ['./admin-global-keys.component.css'],
-  standalone: false
+  standalone: false,
 })
 export class AdminGlobalKeysComponent implements OnInit, OnDestroy {
   public apiKeys: ApiKey[] = [];
@@ -26,7 +29,7 @@ export class AdminGlobalKeysComponent implements OnInit, OnDestroy {
     private authService: AuthService,
     private modalService: ModalService,
     private notificationService: NotificationService,
-    private cdr: ChangeDetectorRef
+    private cdr: ChangeDetectorRef,
   ) {}
 
   ngOnInit(): void {
@@ -36,14 +39,15 @@ export class AdminGlobalKeysComponent implements OnInit, OnDestroy {
   public loadGlobalKeys(): void {
     this.isLoading = true;
     this.cdr.markForCheck();
-    
-    this.authService.getGlobalKeys()
+
+    this.authService
+      .getGlobalKeys()
       .pipe(
         takeUntil(this.destroy$),
         finalize(() => {
           this.isLoading = false;
           this.cdr.markForCheck();
-        })
+        }),
       )
       .subscribe({
         next: (keys) => {
@@ -54,7 +58,7 @@ export class AdminGlobalKeysComponent implements OnInit, OnDestroy {
           console.error('Failed to load global API keys', err);
           this.notificationService.showError('Could not load global API keys.');
           this.cdr.markForCheck();
-        }
+        },
       });
   }
 
@@ -68,27 +72,28 @@ export class AdminGlobalKeysComponent implements OnInit, OnDestroy {
     const ownerName = key.user?.username || 'Unknown User';
     const modalData: ConfirmationModalData = {
       title: 'Revoke Key Globally',
-      message: `Are you sure you want to revoke the key "${key.name}" belonging to user "${ownerName}"? This action is immediate and cannot be undone.`
+      message: `Are you sure you want to revoke the key "${key.name}" belonging to user "${ownerName}"? This action is immediate and cannot be undone.`,
     };
 
-    this.modalService.open(ConfirmationModalComponent.MODAL_ID, modalData)
+    this.modalService
+      .open(ConfirmationModalComponent.MODAL_ID, modalData)
       .pipe(
         take(1),
-        filter(isConfirmed => isConfirmed === true)
+        filter((isConfirmed) => isConfirmed === true),
       )
       .subscribe(() => {
-        this.authService.deleteUserKey(ownerId, key.id)
+        this.authService
+          .deleteUserKey(ownerId, key.id)
           .pipe(takeUntil(this.destroy$))
           .subscribe({
             next: () => {
               this.notificationService.showSuccess('API key revoked successfully.');
               this.loadGlobalKeys();
             },
-            error: (err) => {
-              console.error('Failed to revoke key globally', err);
-              this.notificationService.showError('Could not revoke API key.');
+            error: () => {
+              // FE-046: the shared AuthService.handleError already surfaced the reason.
               this.cdr.markForCheck();
-            }
+            },
           });
       });
   }
@@ -104,9 +109,10 @@ export class AdminGlobalKeysComponent implements OnInit, OnDestroy {
       return;
     }
 
-    this.modalService.open(ApiKeyModalComponent.MODAL_ID, { userId: ownerId, apiKey: key })
+    this.modalService
+      .open(ApiKeyModalComponent.MODAL_ID, { userId: ownerId, apiKey: key })
       .pipe(take(1))
-      .subscribe(updated => {
+      .subscribe((updated) => {
         if (updated) {
           this.loadGlobalKeys();
         }

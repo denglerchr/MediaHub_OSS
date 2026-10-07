@@ -1,44 +1,74 @@
 <app-modal [modalId]="'entryDetailModal'" [modalTitle]="'Entry Details'" [size]="'lg'">
   <div class="detail-container" *ngIf="entryForMetadata && currentDatabase; else loading">
-    
     <div class="entry-preview">
-      
-      <div *ngIf="!isLoadingFile" [ngSwitch]="fileUrl ? ((entryForMetadata.mime_type || 'file') | slice:0:5) : 'fallback'">
-        
-        <img *ngSwitchCase="'image'" 
-             [src]="fileUrl" 
-             class="preview-image"
-             alt="Entry preview for ID {{ entryForMetadata.id }}" />
+      <div
+        *ngIf="!isLoadingFile && !loadError"
+        [ngSwitch]="fileUrl ? (entryForMetadata.mime_type || 'file' | slice: 0 : 5) : 'fallback'"
+      >
+        <img
+          *ngSwitchCase="'image'"
+          [src]="fileUrl"
+          class="preview-image"
+          alt="Entry preview for ID {{ entryForMetadata.id }}"
+        />
 
         <div *ngSwitchCase="'audio'" class="audio-preview-wrapper">
-          <img [secureSrc]="previewUrl" 
-               class="audio-waveform" 
-               alt="Waveform for {{ entryForMetadata.id }}" />
-          <audio controls [src]="fileUrl" class="audio-controls"></audio>
+          <img
+            [secureSrc]="previewUrl"
+            class="audio-waveform"
+            alt="Waveform for {{ entryForMetadata.id }}"
+          />
+          <audio
+            controls
+            [src]="fileUrl"
+            #detailMedia
+            class="audio-controls"
+            (error)="onMediaError($event)"
+            (loadedmetadata)="onMediaLoadedMetadata($event)"
+          ></audio>
         </div>
 
-        <video *ngSwitchCase="'video'" 
-               controls 
-               [src]="fileUrl" 
-               class="preview-video" 
-               style="max-width: 100%; max-height: 400px; display: block; margin: 0 auto;"></video>
+        <video
+          *ngSwitchCase="'video'"
+          controls
+          [src]="fileUrl"
+          #detailMedia
+          class="preview-video"
+          (error)="onMediaError($event)"
+          (loadedmetadata)="onMediaLoadedMetadata($event)"
+          style="max-width: 100%; max-height: 400px; display: block; margin: 0 auto"
+        ></video>
 
         <div *ngSwitchDefault class="generic-file-preview">
           <img src="assets/icons/file-icon.svg" class="file-icon" alt="File Icon" />
-          <p class="mt-2 text-muted fw-bold">No preview available for {{ entryForMetadata.mime_type || 'Unknown' }}</p>
+          <p class="mt-2 text-muted fw-bold">
+            No preview available for {{ entryForMetadata.mime_type || 'Unknown' }}
+          </p>
           <p class="small text-muted">Use the download button below to view this file locally.</p>
         </div>
       </div>
 
-      <div *ngIf="isLoadingFile" class="loading-placeholder d-flex flex-column align-items-center justify-content-center" style="min-height: 200px;">
+      <div
+        *ngIf="isLoadingFile && !loadError"
+        class="loading-placeholder d-flex flex-column align-items-center justify-content-center"
+        style="min-height: 200px"
+      >
         <div class="spinner mb-2" aria-hidden="true"></div>
         <p class="text-muted fw-bold">Loading media...</p>
       </div>
 
+      <!-- FE-012: explicit error state with retry instead of a forever-spinning modal. -->
+      <div
+        *ngIf="loadError"
+        class="loading-placeholder d-flex flex-column align-items-center justify-content-center"
+        style="min-height: 200px"
+      >
+        <p class="text-muted fw-bold">Could not load this entry. Please check your connection.</p>
+        <button type="button" class="btn btn-primary" (click)="retryLoad()">Retry</button>
+      </div>
     </div>
-    
+
     <div class="metadata-split-view">
-      
       <div class="metadata-block">
         <h3>File Information</h3>
         <table class="metadata-table">
@@ -57,45 +87,65 @@
             </tr>
             <tr>
               <th>Preview Size</th>
-              <td>{{ entryForMetadata.preview_filesize ? (entryForMetadata.preview_filesize | formatBytes) : 'N/A' }}</td>
+              <td>
+                {{
+                  entryForMetadata.preview_filesize
+                    ? (entryForMetadata.preview_filesize | formatBytes)
+                    : 'N/A'
+                }}
+              </td>
             </tr>
             <tr>
               <th>Type</th>
-              <td>{{ entryForMetadata.mime_type || (entryForMetadata.status === 'queued' ? 'Queued...' : 'Processing...') }}</td>
+              <td>
+                {{
+                  entryForMetadata.mime_type ||
+                    (entryForMetadata.status === 'queued' ? 'Queued...' : 'Processing...')
+                }}
+              </td>
             </tr>
             <tr>
               <th>Status</th>
               <td>
-                <span [ngClass]="{'text-warning': entryForMetadata.status === 'processing' || entryForMetadata.status === 'queued', 'text-danger': entryForMetadata.status === 'error'}">
+                <span
+                  [ngClass]="{
+                    'text-warning':
+                      entryForMetadata.status === 'processing' ||
+                      entryForMetadata.status === 'queued',
+                    'text-danger': entryForMetadata.status === 'error',
+                  }"
+                >
                   {{ entryForMetadata.status | titlecase }}
                 </span>
               </td>
             </tr>
             <tr>
               <th>Timestamp</th>
-              <td>{{ entryForMetadata.timestamp | date:'yyyy.MM.dd HH:mm:ss' }}</td>
+              <td>{{ entryForMetadata.timestamp | date: 'yyyy.MM.dd HH:mm:ss' }}</td>
             </tr>
             <tr>
               <th>Uploaded At</th>
-              <td>{{ entryForMetadata.created_at | date:'yyyy.MM.dd HH:mm:ss' }}</td>
+              <td>{{ entryForMetadata.created_at | date: 'yyyy.MM.dd HH:mm:ss' }}</td>
             </tr>
             <tr>
               <th>Updated At</th>
-              <td>{{ entryForMetadata.updated_at | date:'yyyy.MM.dd HH:mm:ss' }}</td>
+              <td>{{ entryForMetadata.updated_at | date: 'yyyy.MM.dd HH:mm:ss' }}</td>
             </tr>
           </tbody>
         </table>
       </div>
 
       <div class="metadata-block">
-        
         <ng-container [ngSwitch]="currentDatabase.content_type">
           <ng-container *ngSwitchCase="'image'">
             <h3>Image Properties</h3>
             <table class="metadata-table" *ngIf="entryForMetadata.media_fields">
               <tr>
                 <th>Dimensions</th>
-                <td>{{ entryForMetadata.media_fields.width }} x {{ entryForMetadata.media_fields.height }} px</td>
+                <td>
+                  {{ entryForMetadata.media_fields.width }} x
+                  {{ entryForMetadata.media_fields.height }} px
+                </td>
               </tr>
             </table>
           </ng-container>
@@ -105,7 +155,7 @@
             <table class="metadata-table" *ngIf="entryForMetadata.media_fields">
               <tr>
                 <th>Duration</th>
-                <td>{{ entryForMetadata.media_fields.duration | number:'1.1-2' }} sec</td>
+                <td>{{ entryForMetadata.media_fields.duration | number: '1.1-2' }} sec</td>
               </tr>
               <tr>
                 <th>Channels</th>
@@ -119,11 +169,14 @@
             <table class="metadata-table" *ngIf="entryForMetadata.media_fields">
               <tr>
                 <th>Dimensions</th>
-                <td>{{ entryForMetadata.media_fields.width }} x {{ entryForMetadata.media_fields.height }} px</td>
+                <td>
+                  {{ entryForMetadata.media_fields.width }} x
+                  {{ entryForMetadata.media_fields.height }} px
+                </td>
               </tr>
               <tr>
                 <th>Duration</th>
-                <td>{{ entryForMetadata.media_fields.duration | number:'1.1-2' }} sec</td>
+                <td>{{ entryForMetadata.media_fields.duration | number: '1.1-2' }} sec</td>
               </tr>
             </table>
           </ng-container>
@@ -136,69 +189,90 @@
               <tr *ngFor="let field of currentDatabase.custom_fields; trackBy: trackByFieldId">
                 <th>{{ field.name }}</th>
                 <td *ngIf="field.type === 'BOOLEAN'">
-                   <span [class.text-green]="entryForMetadata.custom_fields?.[field.name]" [class.text-muted]="!entryForMetadata.custom_fields?.[field.name]">
-                     {{ entryForMetadata.custom_fields?.[field.name] ? 'True' : 'False' }}
-                   </span>
+                  <span
+                    [class.text-green]="entryForMetadata.custom_fields?.[field.name]"
+                    [class.text-muted]="!entryForMetadata.custom_fields?.[field.name]"
+                  >
+                    {{ entryForMetadata.custom_fields?.[field.name] ? 'True' : 'False' }}
+                  </span>
                 </td>
                 <td *ngIf="field.type === 'COORDINATE'">
-                  <ng-container *ngIf="hasCoordinate(entryForMetadata.custom_fields?.[field.name]); else noCoord">
-                    <a [href]="getOpenStreetMapUrl(entryForMetadata.custom_fields?.[field.name])"
-                       target="_blank"
-                       rel="noopener noreferrer"
-                       class="coordinate-link"
-                       title="Open location in OpenStreetMap">
+                  <ng-container
+                    *ngIf="
+                      hasCoordinate(entryForMetadata.custom_fields?.[field.name]);
+                      else noCoord
+                    "
+                  >
+                    <a
+                      [href]="getOpenStreetMapUrl(entryForMetadata.custom_fields?.[field.name])"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      class="coordinate-link"
+                      title="Open location in OpenStreetMap"
+                    >
                       📍 {{ formatCoordinate(entryForMetadata.custom_fields?.[field.name]) }}
                       <span class="external-icon">↗</span>
                     </a>
                   </ng-container>
-                  <ng-template #noCoord>
-                    N/A
-                  </ng-template>
+                  <ng-template #noCoord> N/A </ng-template>
                 </td>
                 <td *ngIf="field.type !== 'BOOLEAN' && field.type !== 'COORDINATE'">
-                  {{ entryForMetadata.custom_fields?.[field.name] !== undefined && entryForMetadata.custom_fields?.[field.name] !== null ? entryForMetadata.custom_fields?.[field.name] : 'N/A' }}
+                  {{
+                    entryForMetadata.custom_fields?.[field.name] !== undefined &&
+                    entryForMetadata.custom_fields?.[field.name] !== null
+                      ? entryForMetadata.custom_fields?.[field.name]
+                      : 'N/A'
+                  }}
                 </td>
               </tr>
             </tbody>
           </table>
         </ng-container>
       </div>
-
     </div>
 
     <div class="modal-actions">
-      
       <div class="action-group-left">
-        <button 
+        <button
           *ngIf="canDelete"
-          type="button" 
-          class="btn btn-danger" 
+          type="button"
+          class="btn btn-danger"
           (click)="onDelete()"
-          [disabled]="isLoadingFile || entryForMetadata.status === 'processing' || entryForMetadata.status === 'queued'">
+          [disabled]="
+            isLoadingFile ||
+            entryForMetadata.status === 'processing' ||
+            entryForMetadata.status === 'queued'
+          "
+        >
           Delete
         </button>
 
-        <button 
+        <button
           *ngIf="canEdit"
-          type="button" 
-          class="btn btn-secondary" 
+          type="button"
+          class="btn btn-secondary"
           (click)="onEdit()"
-          [disabled]="entryForMetadata.status === 'processing'">
+          [disabled]="entryForMetadata.status === 'processing'"
+        >
           Edit
         </button>
       </div>
 
       <div class="action-group-right">
-        <a [href]="fileUrl" 
-           [download]="entryForMetadata.filename || 'download'" 
-           class="btn btn-secondary"
-           [class.disabled]="isLoadingFile" 
-           [style.pointer-events]="isLoadingFile ? 'none' : 'auto'">Download</a>
-        
+        <!-- FE-011: download via blob + object URL (onDownload) so the tokenized
+             media URL never lands in browser history or download metadata. -->
+        <button
+          type="button"
+          class="btn btn-secondary"
+          (click)="onDownload()"
+          [disabled]="isLoadingFile || isDownloading"
+        >
+          {{ isDownloading ? 'Downloading...' : 'Download' }}
+        </button>
+
         <button type="button" class="btn btn-primary" (click)="closeModal()">Close</button>
       </div>
     </div>
-
   </div>
   <ng-template #loading>
     <p *ngIf="!isLoadingFile">Loading entry details...</p>

@@ -8,7 +8,7 @@ import { FileDragDropDirective } from './file-drag-drop.directive';
 @Component({
   template: `<div appFileDragDrop (fileDropped)="onFileDropped($event)">Drop Zone</div>`,
   imports: [FileDragDropDirective],
-  standalone: true
+  standalone: true,
 })
 class TestComponent {
   lastFile: File | null = null;
@@ -24,7 +24,7 @@ describe('FileDragDropDirective', () => {
 
   beforeEach(() => {
     TestBed.configureTestingModule({
-      imports: [FileDragDropDirective, TestComponent]
+      imports: [FileDragDropDirective, TestComponent],
     });
     fixture = TestBed.createComponent(TestComponent);
     component = fixture.componentInstance;
@@ -35,7 +35,7 @@ describe('FileDragDropDirective', () => {
   it('should apply "file-drag-over" class on dragover', () => {
     divEl.triggerEventHandler('dragover', {
       preventDefault: () => {},
-      stopPropagation: () => {}
+      stopPropagation: () => {},
     });
     fixture.detectChanges();
     expect(divEl.classes['file-drag-over']).toBeTrue();
@@ -45,14 +45,14 @@ describe('FileDragDropDirective', () => {
     // First trigger dragover
     divEl.triggerEventHandler('dragover', {
       preventDefault: () => {},
-      stopPropagation: () => {}
+      stopPropagation: () => {},
     });
     fixture.detectChanges();
-    
+
     // Then trigger dragleave
     divEl.triggerEventHandler('dragleave', {
       preventDefault: () => {},
-      stopPropagation: () => {}
+      stopPropagation: () => {},
     });
     fixture.detectChanges();
     expect(divEl.classes['file-drag-over']).toBeFalsy();
@@ -64,8 +64,8 @@ describe('FileDragDropDirective', () => {
       preventDefault: () => {},
       stopPropagation: () => {},
       dataTransfer: {
-        files: [mockFile]
-      }
+        files: [mockFile],
+      },
     };
 
     // Trigger drop

@@ -1,15 +1,15 @@
 /* frontend/src/app/pages/dashboard-page/dashboard-page.component.css */
 :host {
-    display: block;
-    height: 100%;
-    width: 100%;
-    overflow: hidden;
-    
-    /* Define CSS variables for the sidebar widths
+  display: block;
+  height: 100%;
+  width: 100%;
+  overflow: hidden;
+
+  /* Define CSS variables for the sidebar widths
        for easy management and animation.
     */
-    --sidebar-width-expanded: 280px;
-    --sidebar-width-collapsed: 88px; /* (1.5rem padding * 2) + 40px icon = 88px */
+  --sidebar-width-expanded: 280px;
+  --sidebar-width-collapsed: 88px; /* (1.5rem padding * 2) + 40px icon = 88px */
 }
 
 .dashboard-layout {
@@ -17,12 +17,12 @@
   grid-template-columns: var(--sidebar-width-expanded) 1fr;
   grid-template-rows: 1fr;
   grid-template-areas: 'sidebar content';
-  
+
   /* Modern viewport fix for mobile browser URL bars */
   height: 100vh;
-  height: 100dvh; 
+  height: 100dvh;
   width: 100%;
-  
+
   overflow: hidden;
   transition: grid-template-columns 0.3s ease-in-out;
 }
@@ -35,7 +35,7 @@
   grid-area: sidebar;
   background-color: var(--sidebar-bg);
   overflow-y: auto;
-  overflow-x: hidden; 
+  overflow-x: hidden;
   border-right: 1px solid var(--border-color);
   /* The width transition is handled natively by the parent's CSS grid transition */
 }
@@ -43,7 +43,7 @@
 .dashboard-content {
   grid-area: content;
   background-color: var(--app-bg);
-  overflow-y: auto; 
+  overflow-y: auto;
   /* UPDATED: Fluid padding. 
      Top/Bottom: scales between 1rem and 2.5rem 
      Left/Right: scales between 1rem and 3rem 
@@ -61,4 +61,3 @@
     --sidebar-width-collapsed: 60px;
   }
 }
-
