@@ -41,6 +41,21 @@ jobs:
         working-directory: frontend
         run: npm run build -- --configuration production
 
+      # The Go binary embeds the built SPA at compile time
+      # (cmd/mediahub/main.go: `//go:embed all:frontend_embed/browser`), and that
+      # output directory is gitignored (.gitignore: cmd/mediahub/frontend_embed).
+      # Publish it so the backend-test job can compile against it (see `needs` below).
+      # Purely a hand-off between the two jobs — it lives in the run's artifact
+      # storage (not a release/package) and expires after 1 day instead of the
+      # 90-day default.
+      - name: Upload embedded frontend bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-embed
+          path: cmd/mediahub/frontend_embed
+          if-no-files-found: error
+          retention-days: 1
+
       # Karma needs a browser: the GitHub-hosted ubuntu runners ship Google
       # Chrome at /usr/bin/google-chrome. Setting CHROME_BIN makes karma.conf.js
       # pick the ChromeHeadless launcher (FirefoxHeadless is the local fallback).
@@ -53,10 +68,21 @@ jobs:
   backend-test:
     name: Go Build & Test
     runs-on: ubuntu-latest
+    # `go build ./...` compiles cmd/mediahub, which embeds the built SPA via
+    # `//go:embed all:frontend_embed/browser`. That directory is gitignored and only
+    # produced by `npm run build`, so it is fetched from the frontend job's artifact
+    # instead of being rebuilt here.
+    needs: frontend-quality
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Download embedded frontend bundle
+        uses: actions/download-artifact@v4
+        with:
+          name: frontend-embed
+          path: cmd/mediahub/frontend_embed
 
       - name: Set up Go
         uses: actions/setup-go@v5
