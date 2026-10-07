@@ -9,6 +9,9 @@ Features
 Improvements:
 - cleaning up of CSS styles
 
+Bug fixes:
+- minor bugs in frontend resolved by LLM
+
 # v3.1
 
 Features:
