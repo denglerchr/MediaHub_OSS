@@ -3,6 +3,8 @@ package processing
 import (
 	"sync"
 	"time"
+
+	repo "mediahub_oss/internal/repository"
 )
 
 // This file implements per-entry requeue backoff for claimed queue entries.
@@ -24,6 +26,12 @@ const (
 	retryMaxClaimDelay  = 5 * time.Minute
 )
 
+// retryEntryKey uniquely identifies an entry across all databases.
+type retryEntryKey struct {
+	dbID    repo.ULID
+	entryID int64
+}
+
 // claimRetry tracks how often an entry failed and when it may be claimed again.
 type claimRetry struct {
 	attempts int
@@ -34,20 +42,21 @@ type claimRetry struct {
 // the hot slot paths free of map bookkeeping.
 type retryRegistry struct {
 	mu     sync.Mutex
-	claims map[int64]claimRetry
+	claims map[retryEntryKey]claimRetry
 }
 
 func newRetryRegistry() *retryRegistry {
-	return &retryRegistry{claims: make(map[int64]claimRetry)}
+	return &retryRegistry{claims: make(map[retryEntryKey]claimRetry)}
 }
 
-// noteClaimFailure records a failed attempt for entryID and pushes its next
-// claim time out exponentially (30s, 60s, 120s ... capped at 5 minutes).
-func (rr *retryRegistry) noteClaimFailure(entryID int64) {
+// noteClaimFailure records a failed attempt for (dbID, entryID) and pushes its
+// next claim time out exponentially (30s, 60s, 120s ... capped at 5 minutes).
+func (rr *retryRegistry) noteClaimFailure(dbID repo.ULID, entryID int64) {
 	rr.mu.Lock()
 	defer rr.mu.Unlock()
 
-	info := rr.claims[entryID]
+	key := retryEntryKey{dbID: dbID, entryID: entryID}
+	info := rr.claims[key]
 	info.attempts++
 
 	delay := retryBaseClaimDelay << (info.attempts - 1)
@@ -55,22 +64,22 @@ func (rr *retryRegistry) noteClaimFailure(entryID int64) {
 		delay = retryMaxClaimDelay
 	}
 	info.nextTry = time.Now().Add(delay)
-	rr.claims[entryID] = info
+	rr.claims[key] = info
 }
 
 // clearClaimRetry forgets the retry state of an entry (after successful
 // processing or when it will never be retried).
-func (rr *retryRegistry) clearClaimRetry(entryID int64) {
+func (rr *retryRegistry) clearClaimRetry(dbID repo.ULID, entryID int64) {
 	rr.mu.Lock()
 	defer rr.mu.Unlock()
-	delete(rr.claims, entryID)
+	delete(rr.claims, retryEntryKey{dbID: dbID, entryID: entryID})
 }
 
 // claimDeferred reports whether the entry is still within its backoff window.
-func (rr *retryRegistry) claimDeferred(entryID int64) bool {
+func (rr *retryRegistry) claimDeferred(dbID repo.ULID, entryID int64) bool {
 	rr.mu.Lock()
 	defer rr.mu.Unlock()
-	info, ok := rr.claims[entryID]
+	info, ok := rr.claims[retryEntryKey{dbID: dbID, entryID: entryID}]
 	return ok && time.Now().Before(info.nextTry)
 }
 

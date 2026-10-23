@@ -2,6 +2,7 @@ package sqlite_test
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -9,6 +10,7 @@ import (
 	"mediahub_oss/internal/repository/migrations"
 	_ "mediahub_oss/internal/repository/migrations/sqlite"
 	"mediahub_oss/internal/repository/sqlite"
+	"mediahub_oss/internal/shared/customerrors"
 
 	"github.com/pressly/goose/v3"
 )
@@ -696,5 +698,116 @@ func TestGetDatabaseULIDsWithQueuedEntries(t *testing.T) {
 	}
 	if len(ulids) != 1 || ulids[0] != db2.ID {
 		t.Fatalf("expected only db2.ID after claiming db1, got %v", ulids)
+	}
+}
+
+func TestEnqueueEntry_QueueLimit(t *testing.T) {
+	ctx := context.Background()
+
+	r, err := sqlite.NewRepository(":memory:")
+	if err != nil {
+		t.Fatalf("failed to create repo: %v", err)
+	}
+	defer r.Close()
+
+	if err := goose.SetDialect("sqlite3"); err != nil {
+		t.Fatalf("failed to set goose dialect: %v", err)
+	}
+	goose.SetBaseFS(migrations.EmbedFS)
+	if err := goose.Up(r.DB, "sqlite"); err != nil {
+		t.Fatalf("failed to run migrations: %v", err)
+	}
+
+	db, err := r.CreateDatabase(ctx, repo.Database{Name: "db_enqueue", ContentType: "image"})
+	if err != nil {
+		t.Fatalf("failed to create db: %v", err)
+	}
+
+	// Create 3 preliminary entries in processing state
+	var prelimEntries []repo.Entry
+	for i := 0; i < 3; i++ {
+		e, err := r.CreateEntry(ctx, db, repo.Entry{
+			FileName:    "prelim.jpg",
+			MimeType:    "image/jpeg",
+			Size:        0,
+			Status:      repo.EntryStatusProcessing,
+			MediaFields: map[string]any{"width": 0, "height": 0},
+		})
+		if err != nil {
+			t.Fatalf("failed to create prelim entry %d: %v", i, err)
+		}
+		prelimEntries = append(prelimEntries, e)
+	}
+
+	// 1. maxQueued <= 0 returns ErrUnavailable and does not increment queued_count
+	prelimEntries[0].Size = 1024
+	_, err = r.EnqueueEntry(ctx, db.ID, prelimEntries[0], 0)
+	if !errors.Is(err, customerrors.ErrUnavailable) {
+		t.Fatalf("expected ErrUnavailable for maxQueued=0, got %v", err)
+	}
+	stats, err := r.GetDatabaseStats(ctx, db.ID)
+	if err != nil {
+		t.Fatalf("failed to get stats: %v", err)
+	}
+	if stats.QueuedCount != 0 {
+		t.Fatalf("expected QueuedCount 0 after rejected enqueue, got %d", stats.QueuedCount)
+	}
+
+	// 2. Enqueue first two entries with maxQueued = 2 -> succeeds
+	e0, err := r.EnqueueEntry(ctx, db.ID, prelimEntries[0], 2)
+	if err != nil {
+		t.Fatalf("EnqueueEntry 0 failed: %v", err)
+	}
+	if e0.Status != repo.EntryStatusQueued {
+		t.Errorf("expected status queued, got %v", e0.Status)
+	}
+
+	prelimEntries[1].Size = 2048
+	e1, err := r.EnqueueEntry(ctx, db.ID, prelimEntries[1], 2)
+	if err != nil {
+		t.Fatalf("EnqueueEntry 1 failed: %v", err)
+	}
+	if e1.Status != repo.EntryStatusQueued {
+		t.Errorf("expected status queued, got %v", e1.Status)
+	}
+
+	stats, err = r.GetDatabaseStats(ctx, db.ID)
+	if err != nil {
+		t.Fatalf("failed to get stats: %v", err)
+	}
+	if stats.QueuedCount != 2 {
+		t.Fatalf("expected QueuedCount 2, got %d", stats.QueuedCount)
+	}
+	if stats.TotalDiskSpaceBytes != 3072 {
+		t.Fatalf("expected TotalDiskSpaceBytes 3072, got %d", stats.TotalDiskSpaceBytes)
+	}
+
+	// 3. Third entry exceeds maxQueued = 2 -> returns ErrUnavailable, leaves entry in processing status and stats unchanged
+	prelimEntries[2].Size = 4096
+	_, err = r.EnqueueEntry(ctx, db.ID, prelimEntries[2], 2)
+	if !errors.Is(err, customerrors.ErrUnavailable) {
+		t.Fatalf("expected ErrUnavailable when queue is full, got %v", err)
+	}
+
+	fetched2, err := r.GetEntry(ctx, db.ID, prelimEntries[2].ID)
+	if err != nil {
+		t.Fatalf("failed to fetch entry 2: %v", err)
+	}
+	if fetched2.Status != repo.EntryStatusProcessing {
+		t.Errorf("expected entry 2 to remain in processing status, got %v", fetched2.Status)
+	}
+	if fetched2.Size != 0 {
+		t.Errorf("expected entry 2 size to remain 0, got %d", fetched2.Size)
+	}
+
+	stats, err = r.GetDatabaseStats(ctx, db.ID)
+	if err != nil {
+		t.Fatalf("failed to get stats: %v", err)
+	}
+	if stats.QueuedCount != 2 {
+		t.Fatalf("expected QueuedCount to remain 2, got %d", stats.QueuedCount)
+	}
+	if stats.TotalDiskSpaceBytes != 3072 {
+		t.Fatalf("expected TotalDiskSpaceBytes to remain 3072, got %d", stats.TotalDiskSpaceBytes)
 	}
 }

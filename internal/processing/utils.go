@@ -75,14 +75,6 @@ func (p *Processor) storeProcessedStream(ctx context.Context, db repo.Database, 
 	return nil
 }
 
-// readAllFromStart rewinds the stream and buffers it completely in memory.
-func readAllFromStart(stream io.ReadSeeker) ([]byte, error) {
-	if _, err := stream.Seek(0, io.SeekStart); err != nil {
-		return nil, err
-	}
-	return io.ReadAll(stream)
-}
-
 // generateAndStorePreview pipes the output of the given preview producer directly
 // into storage and returns the stored preview size in bytes. The pipe is drained
 // correctly even if the storage write fails first.

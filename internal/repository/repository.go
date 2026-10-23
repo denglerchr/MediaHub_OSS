@@ -62,6 +62,13 @@ type Repository interface {
 	// processing-owned columns, so it is safe to use while a background worker
 	// is still processing the entry.
 	UpdateEntryMetadata(ctx context.Context, dbID ULID, entry Entry) (Entry, error)
+	// EnqueueEntry atomically transitions an existing preliminary entry (created in
+	// processing status) to EntryStatusQueued, updates its processing-owned fields
+	// (filesize, preview_filesize, filename, mime_type, media fields), and increments
+	// the database's queued_count — but only if queued_count is currently strictly
+	// less than maxQueued. Returns customerrors.ErrUnavailable if maxQueued <= 0 or
+	// the queue limit has been reached.
+	EnqueueEntry(ctx context.Context, dbID ULID, entry Entry, maxQueued int) (Entry, error)
 	UpdateEntriesStatus(ctx context.Context, dbID ULID, entryIDs []int64, status EntryStatus) error
 	ClaimQueuedEntry(ctx context.Context, dbID ULID, entryID int64) (bool, error)
 	GetEntriesByStatus(ctx context.Context, dbID ULID, status EntryStatus, limit uint64) ([]Entry, error)

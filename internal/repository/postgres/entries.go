@@ -369,6 +369,126 @@ func (r *PostgresRepository) UpdateEntryMetadata(ctx context.Context, dbID repo.
 	return entry, nil
 }
 
+// EnqueueEntry atomically transitions an existing entry to EntryStatusQueued,
+// updates its processing-owned fields, and increments the parent database's
+// queued_count — but only if queued_count is strictly less than maxQueued.
+// In a multi-pod PostgreSQL deployment, UPDATE databases ... WHERE id = $1 AND queued_count < $2
+// acquires a row-level write lock on the databases row and under READ COMMITTED re-evaluates
+// queued_count < $2 after any concurrent transaction commits, serializing concurrent enqueue
+// attempts across all pods.
+func (r *PostgresRepository) EnqueueEntry(ctx context.Context, dbID repo.ULID, entry repo.Entry, maxQueued int) (repo.Entry, error) {
+	if !shared.IsValidULID(dbID.String()) {
+		return repo.Entry{}, fmt.Errorf("%w: invalid database id", customerrors.ErrValidation)
+	}
+	if maxQueued <= 0 {
+		return repo.Entry{}, customerrors.ErrUnavailable
+	}
+
+	tableName := fmt.Sprintf(`"entries_%s"`, dbID.String())
+
+	tx, err := r.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return repo.Entry{}, fmt.Errorf("failed to begin enqueue transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	var oldSize, oldPreviewSize uint64
+	var oldStatus repo.EntryStatus
+	queryOld, argsOld, err := r.Builder.Select("filesize", "preview_filesize", "status").
+		From(tableName).
+		Where(squirrel.Eq{"id": entry.ID}).
+		ToSql()
+	if err != nil {
+		return repo.Entry{}, fmt.Errorf("failed to build select old sizes query: %w", err)
+	}
+
+	err = tx.QueryRowContext(ctx, queryOld, argsOld...).Scan(&oldSize, &oldPreviewSize, &oldStatus)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return repo.Entry{}, customerrors.ErrNotFound
+		}
+		return repo.Entry{}, fmt.Errorf("failed to query old sizes and status: %w", err)
+	}
+
+	delta := (int64(entry.Size) + int64(entry.PreviewSize)) - (int64(oldSize) + int64(oldPreviewSize))
+
+	if oldStatus != repo.EntryStatusQueued {
+		statsBuilder := r.Builder.Update("databases").
+			Set("queued_count", squirrel.Expr("queued_count + 1")).
+			Where(squirrel.Eq{"id": dbID.String()}).
+			Where(squirrel.Lt{"queued_count": maxQueued})
+		if delta != 0 {
+			statsBuilder = statsBuilder.Set("total_disk_space_bytes", squirrel.Expr("GREATEST(0, total_disk_space_bytes + ?)", delta))
+		}
+
+		statsQuery, statsArgs, err := statsBuilder.ToSql()
+		if err != nil {
+			return repo.Entry{}, fmt.Errorf("failed to build conditional stats update query: %w", err)
+		}
+
+		res, err := tx.ExecContext(ctx, statsQuery, statsArgs...)
+		if err != nil {
+			return repo.Entry{}, fmt.Errorf("failed to update database stats: %w", err)
+		}
+		rows, err := res.RowsAffected()
+		if err != nil {
+			return repo.Entry{}, fmt.Errorf("failed to retrieve rows affected: %w", err)
+		}
+		if rows == 0 {
+			return repo.Entry{}, customerrors.ErrUnavailable
+		}
+	} else if delta != 0 {
+		statsQuery, statsArgs, err := r.Builder.Update("databases").
+			Set("total_disk_space_bytes", squirrel.Expr("GREATEST(0, total_disk_space_bytes + ?)", delta)).
+			Where(squirrel.Eq{"id": dbID.String()}).
+			ToSql()
+		if err != nil {
+			return repo.Entry{}, fmt.Errorf("failed to build stats update query: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, statsQuery, statsArgs...); err != nil {
+			return repo.Entry{}, fmt.Errorf("failed to update database stats: %w", err)
+		}
+	}
+
+	updateData := map[string]any{
+		"updated_at":       squirrel.Expr("(EXTRACT(EPOCH FROM clock_timestamp()) * 1000)::BIGINT"),
+		"filesize":         entry.Size,
+		"preview_filesize": entry.PreviewSize,
+		"filename":         entry.FileName,
+		"status":           repo.EntryStatusQueued,
+		"mime_type":        entry.MimeType,
+	}
+
+	for key, value := range entry.MediaFields {
+		updateData[key] = value
+	}
+
+	updateQuery, argsUpdate, err := r.Builder.Update(tableName).
+		SetMap(updateData).
+		Where(squirrel.Eq{"id": entry.ID}).
+		Suffix("RETURNING updated_at").
+		ToSql()
+	if err != nil {
+		return repo.Entry{}, fmt.Errorf("failed to build update query: %w", err)
+	}
+
+	var updatedMillis int64
+	if err = tx.QueryRowContext(ctx, updateQuery, argsUpdate...).Scan(&updatedMillis); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return repo.Entry{}, customerrors.ErrNotFound
+		}
+		return repo.Entry{}, fmt.Errorf("failed to update entry: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return repo.Entry{}, fmt.Errorf("failed to commit enqueue transaction: %w", err)
+	}
+
+	entry.Status = repo.EntryStatusQueued
+	entry.UpdatedAt = time.UnixMilli(updatedMillis)
+	return entry, nil
+}
+
 // UpdateEntriesStatus modifies the status of multiple entries at once using ANY($1).
 func (r *PostgresRepository) UpdateEntriesStatus(ctx context.Context, dbID repo.ULID, entryIDs []int64, status repo.EntryStatus) error {
 	if !shared.IsValidULID(dbID.String()) {

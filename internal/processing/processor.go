@@ -7,10 +7,12 @@
 //   - Outgoing entries (downloads): ProcessOutgoingEntry converts a stored entry
 //     on the fly, holding a conversion slot until the returned stream is closed.
 //
-// Conversion concurrency is bounded by two limits: NFfmpegTotal caps all active
-// conversions, while NFfmpegAsync additionally caps background conversions.
-// Preview generation is exempt from these limits. Queued entries are drained by
-// background workers whenever async capacity becomes available (see worker.go).
+// Conversion and preview generation concurrency is bounded by two limits:
+// NFfmpegTotal caps all active processing operations, while NFfmpegAsync
+// additionally caps background operations. Pure passthrough uploads (neither
+// conversion nor preview generation) are exempt from these limits. Queued
+// entries are drained by background workers whenever async capacity becomes
+// available (see worker.go).
 package processing
 
 import (

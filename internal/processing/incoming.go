@@ -1,7 +1,6 @@
 package processing
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -18,13 +17,13 @@ import (
 // The upload is routed based on the processing plan and the upload's spool location:
 //
 //   - Small files (held in memory by the HTTP layer) are processed synchronously
-//     and return synchronous=true. Conversion occupies a sync slot for the
-//     duration of the request; the optional preview is generated in the background.
+//     and return synchronous=true. Conversion or preview generation occupies a
+//     sync slot (held until background preview generation completes if configured).
 //   - Large files (spooled to disk by the HTTP layer, i.e. file is an *os.File)
 //     are processed by a background worker occupying an async slot and return
 //     synchronous=false with an entry in "processing" status.
-//   - If no conversion is required, the file is stored as-is without occupying
-//     a conversion slot.
+//   - If neither conversion nor preview generation is required, the file is stored
+//     as-is without occupying a processing slot.
 //   - If the applicable concurrency limit is reached, the file is queued instead
 //     (entry status "queued") as long as the database's NMaxQueued limit allows it.
 //
@@ -70,8 +69,9 @@ func (p *Processor) ProcessIncomingEntry(
 }
 
 // processSynchronously converts (if required) and stores an in-memory upload
-// within the request scope. A sync conversion slot is held while converting;
-// the preview, if configured, is generated in the background afterwards.
+// within the request scope. A sync processing slot is held while converting or
+// generating a preview; if a preview is configured, it is generated in the
+// background afterwards and releases the slot upon completion.
 func (p *Processor) processSynchronously(
 	ctx context.Context,
 	file io.ReadSeeker,
@@ -79,12 +79,21 @@ func (p *Processor) processSynchronously(
 	req EntryRequest,
 	plan ProcessingPlan,
 ) (repo.Entry, error) {
-	needsConversion := plan.NeedsConversion
-	if needsConversion && !p.tryReserveSyncSlot() {
+	if plan.NeedsConversion && !plan.CanConvert {
+		return repo.Entry{}, fmt.Errorf("cannot convert %v to the database mime type %v", plan.InitMimeType, db.Config.AutoConversion)
+	}
+
+	needsSlot := plan.NeedsSlot()
+	if needsSlot && !p.tryReserveSyncSlot() {
 		return repo.Entry{}, customerrors.ErrResourceExhausted
 	}
-	if needsConversion {
-		defer p.releaseSyncSlot()
+	slotHandedOff := false
+	if needsSlot {
+		defer func() {
+			if !slotHandedOff {
+				p.releaseSyncSlot()
+			}
+		}()
 	}
 
 	createdEntry, err := p.createPreliminaryEntry(ctx, db, req, plan, true)
@@ -94,13 +103,7 @@ func (p *Processor) processSynchronously(
 
 	streamToStore := file
 	var tempStream *TempFileStream
-	if needsConversion {
-		if !plan.CanConvert {
-			err := fmt.Errorf("cannot convert %v to the database mime type %v", plan.InitMimeType, db.Config.AutoConversion)
-			p.failUploadEntry(ctx, db, createdEntry, err)
-			return repo.Entry{}, err
-		}
-
+	if plan.NeedsConversion {
 		tempStream, _, err = p.convertToTempFile(ctx, file, plan.InitMimeType, media.ConversionOptions{
 			TargetMimeType: plan.ResultMimeType,
 		})
@@ -147,15 +150,6 @@ func (p *Processor) processSynchronously(
 
 	// Hand the stored file off to background preview generation if configured.
 	if plan.WantsPreview && plan.CanGenPreview {
-		var rawBytes []byte
-		if tempStream == nil {
-			if rawBytes, err = readAllFromStart(streamToStore); err != nil {
-				// The file itself is stored; skip the preview and finalize as ready.
-				p.Logger.Error("Failed to buffer stored file for preview generation", "entry", createdEntry.ID, "error", err)
-				return p.markEntryReady(ctx, db, createdEntry)
-			}
-		}
-
 		createdEntry.Status = repo.EntryStatusProcessing
 		processingEntry, err := p.Repo.UpdateEntry(ctx, db.ID, createdEntry)
 		if err != nil {
@@ -164,7 +158,8 @@ func (p *Processor) processSynchronously(
 		}
 
 		keepTempStream = true // owned by the preview goroutine
-		go p.generatePreviewInBackground(db, processingEntry, tempStream, rawBytes, plan.ResultMimeType)
+		slotHandedOff = true  // released by the preview goroutine
+		go p.generatePreviewInBackground(db, processingEntry, tempStream, plan.ResultMimeType)
 		return processingEntry, nil
 	}
 
@@ -172,8 +167,9 @@ func (p *Processor) processSynchronously(
 }
 
 // processAsynchronously hands a disk-spooled upload over to a background worker.
-// An async conversion slot is reserved when conversion is required. The returned
-// entry is in "processing" status; clients poll until it transitions to "ready".
+// An async processing slot is reserved when conversion or preview generation is
+// required. The returned entry is in "processing" status; clients poll until it
+// transitions to "ready".
 func (p *Processor) processAsynchronously(
 	ctx context.Context,
 	file *os.File,
@@ -181,14 +177,18 @@ func (p *Processor) processAsynchronously(
 	req EntryRequest,
 	plan ProcessingPlan,
 ) (repo.Entry, error) {
-	needsConversion := plan.NeedsConversion
-	if needsConversion && !p.tryReserveAsyncSlot() {
+	if plan.NeedsConversion && !plan.CanConvert {
+		return repo.Entry{}, fmt.Errorf("cannot convert %v to the database mime type %v", plan.InitMimeType, db.Config.AutoConversion)
+	}
+
+	needsSlot := plan.NeedsSlot()
+	if needsSlot && !p.tryReserveAsyncSlot() {
 		return repo.Entry{}, customerrors.ErrResourceExhausted
 	}
 
 	workerTempPath, err := claimTempFile(file)
 	if err != nil {
-		if needsConversion {
+		if needsSlot {
 			p.unreserveAsyncSlot()
 		}
 		return repo.Entry{}, err
@@ -196,7 +196,7 @@ func (p *Processor) processAsynchronously(
 
 	createdEntry, err := p.createPreliminaryEntry(ctx, db, req, plan, false)
 	if err != nil {
-		if needsConversion {
+		if needsSlot {
 			p.unreserveAsyncSlot()
 		}
 		os.Remove(workerTempPath)
@@ -204,7 +204,7 @@ func (p *Processor) processAsynchronously(
 	}
 
 	go func() {
-		if needsConversion {
+		if needsSlot {
 			defer p.releaseAsyncSlot()
 		}
 		p.finalizeEntryFile(context.Background(), db, createdEntry, workerTempPath, plan)
@@ -226,6 +226,16 @@ func (p *Processor) queueIncomingFile(
 	req EntryRequest,
 	plan ProcessingPlan,
 ) (repo.Entry, error) {
+	if plan.NeedsConversion && !plan.CanConvert {
+		return repo.Entry{}, fmt.Errorf("cannot convert %v to the database mime type %v", plan.InitMimeType, db.Config.AutoConversion)
+	}
+
+	if db.NMaxQueued <= 0 {
+		p.Logger.Warn("Upload rejected: conversion capacity exhausted and queue is full",
+			"database_id", db.ID.String(), "queued_count", 0, "max_queued", db.NMaxQueued)
+		return repo.Entry{}, customerrors.ErrUnavailable
+	}
+
 	queuedCount, err := p.Repo.CountEntriesByStatus(ctx, db.ID, repo.EntryStatusQueued)
 	if err != nil {
 		return repo.Entry{}, fmt.Errorf("failed to count queued entries: %w", err)
@@ -261,11 +271,15 @@ func (p *Processor) queueIncomingFile(
 	}
 
 	createdEntry.Size = uint64(fileSize)
-	createdEntry.Status = repo.EntryStatusQueued
-	queuedEntry, err := p.Repo.UpdateEntry(ctx, db.ID, createdEntry)
+	queuedEntry, err := p.Repo.EnqueueEntry(ctx, db.ID, createdEntry, db.NMaxQueued)
 	if err != nil {
 		_ = p.Storage.Delete(ctx, db.ID.String(), createdEntry.ID)
 		discardEntry()
+		if errors.Is(err, customerrors.ErrUnavailable) {
+			p.Logger.Warn("Upload rejected: conversion capacity exhausted and queue is full",
+				"database_id", db.ID.String(), "max_queued", db.NMaxQueued)
+			return repo.Entry{}, customerrors.ErrUnavailable
+		}
 		return repo.Entry{}, fmt.Errorf("failed to mark entry as queued: %w", err)
 	}
 
@@ -275,9 +289,12 @@ func (p *Processor) queueIncomingFile(
 }
 
 // generatePreviewInBackground generates and stores the preview for a synchronously
-// stored entry, then marks the entry ready. Exactly one of tempStream (converted
-// file on disk, closed on completion) or rawBytes (in-memory original) must be set.
-func (p *Processor) generatePreviewInBackground(db repo.Database, entry repo.Entry, tempStream *TempFileStream, rawBytes []byte, mimeType string) {
+// stored entry, then marks the entry ready and releases the reserved sync slot.
+// If tempStream is non-nil (converted file on disk), it is used directly and closed
+// on completion; otherwise the stored original is streamed back from storage.
+func (p *Processor) generatePreviewInBackground(db repo.Database, entry repo.Entry, tempStream *TempFileStream, mimeType string) {
+	defer p.releaseSyncSlot()
+
 	ctx := context.Background()
 	var previewSize uint64
 	var err error
@@ -288,9 +305,34 @@ func (p *Processor) generatePreviewInBackground(db repo.Database, entry repo.Ent
 			return p.MediaConverter.CreatePreviewFromFile(ctx, tempStream.Name(), w, mimeType)
 		})
 	} else {
-		previewSize, err = p.generateAndStorePreview(ctx, db, entry.ID, mimeType, func(ctx context.Context, w io.Writer) error {
-			return p.MediaConverter.CreatePreviewFromStream(ctx, bytes.NewReader(rawBytes), w, mimeType)
-		})
+		storedStream, readErr := p.Storage.Read(ctx, db.ID.String(), entry.ID, 0, -1)
+		if readErr != nil {
+			err = fmt.Errorf("failed to read stored file for preview: %w", readErr)
+		} else {
+			defer storedStream.Close()
+			previewSize, err = p.generateAndStorePreview(ctx, db, entry.ID, mimeType, func(ctx context.Context, w io.Writer) error {
+				if rs, ok := storedStream.(io.ReadSeeker); ok {
+					return p.MediaConverter.CreatePreviewFromStream(ctx, rs, w, mimeType)
+				}
+
+				spoolFile, spoolErr := os.CreateTemp("", "mh-previewspool-*")
+				if spoolErr != nil {
+					return fmt.Errorf("failed to create preview spool file: %w", spoolErr)
+				}
+				spoolPath := spoolFile.Name()
+				defer func() {
+					spoolFile.Close()
+					os.Remove(spoolPath)
+				}()
+				if _, copyErr := io.Copy(spoolFile, storedStream); copyErr != nil {
+					return fmt.Errorf("failed to spool stored file for preview: %w", copyErr)
+				}
+				if closeErr := spoolFile.Close(); closeErr != nil {
+					return fmt.Errorf("failed to close preview spool file: %w", closeErr)
+				}
+				return p.MediaConverter.CreatePreviewFromFile(ctx, spoolPath, w, mimeType)
+			})
+		}
 	}
 	if err != nil {
 		p.Logger.Error("Background preview generation failed", "entry", entry.ID, "error", err)

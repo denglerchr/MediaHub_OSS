@@ -1,6 +1,7 @@
 package processing
 
 import (
+	"fmt"
 	"path/filepath"
 	"strings"
 
@@ -16,7 +17,7 @@ type ProcessingPlan struct {
 	CanConvert      bool // the converter is capable of performing the conversion
 
 	WantsPreview  bool // database is configured to create previews
-	CanGenPreview bool // the converter can generate a preview for the input type
+	CanGenPreview bool // the converter can generate a preview for the result type
 
 	InitMimeType   string // normalized MIME type of the uploaded file
 	TargetMimeType string // configured auto-conversion target (normalized)
@@ -24,6 +25,12 @@ type ProcessingPlan struct {
 
 	InitFileName  string // file name before conversion (user name preferred)
 	FinalFileName string // file name after a potential conversion (extension adjusted)
+}
+
+// NeedsSlot reports whether executing this plan requires an FFmpeg processing slot
+// (either for format conversion or for preview generation).
+func (p ProcessingPlan) NeedsSlot() bool {
+	return p.NeedsConversion || (p.WantsPreview && p.CanGenPreview)
 }
 
 // determinePlan computes the processing plan for a file with the given MIME type
@@ -65,7 +72,7 @@ func determinePlan(mc media.MediaConverter, db repo.Database, originalMimeType, 
 		NeedsConversion: convCheck.NeedsConversion,
 		CanConvert:      convCheck.CanConvert,
 		WantsPreview:    db.Config.CreatePreview,
-		CanGenPreview:   mc.CanCreatePreview(originalMimeType),
+		CanGenPreview:   mc.CanCreatePreview(resultMimeType),
 		InitMimeType:    originalMimeType,
 		TargetMimeType:  targetMimeType,
 		ResultMimeType:  resultMimeType,
@@ -76,7 +83,7 @@ func determinePlan(mc media.MediaConverter, db repo.Database, originalMimeType, 
 
 // DetermineConversionPlan evaluates the processing plan for a newly uploaded file.
 // It returns customerrors.ErrBadMimeType if the file's MIME type does not match
-// the database content type.
+// the database content type, or an error if the required conversion is unsupported.
 func DetermineConversionPlan(mc media.MediaConverter, db repo.Database, originalMimeType string, originalFileName string, userFileName string) (ProcessingPlan, error) {
 	normalizedMime := media.NormalizeMimeType(originalMimeType)
 
@@ -88,7 +95,11 @@ func DetermineConversionPlan(mc media.MediaConverter, db repo.Database, original
 		return ProcessingPlan{InitMimeType: normalizedMime}, customerrors.ErrBadMimeType
 	}
 
-	return determinePlan(mc, db, normalizedMime, originalFileName, userFileName), nil
+	plan := determinePlan(mc, db, normalizedMime, originalFileName, userFileName)
+	if plan.NeedsConversion && !plan.CanConvert {
+		return plan, fmt.Errorf("cannot convert %v to the database mime type %v", plan.InitMimeType, db.Config.AutoConversion)
+	}
+	return plan, nil
 }
 
 // DeterminePlanForEntry evaluates the processing plan for an entry that is already

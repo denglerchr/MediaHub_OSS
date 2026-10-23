@@ -295,16 +295,38 @@ func TestProcessSynchronously_CannotConvertMarksEntryError(t *testing.T) {
 		t.Fatal("expected error from processSynchronously, got nil")
 	}
 
-	// The entry must not be left in a phantom "processing" state.
+	// Unconvertible plans must fail fast without creating any entry in the database.
 	entries, err := r.GetEntries(context.Background(), db.ID, repo.QueryOptions{})
 	if err != nil {
 		t.Fatalf("failed to fetch entries: %v", err)
 	}
-	if len(entries) != 1 {
-		t.Fatalf("expected 1 entry in DB, found %d", len(entries))
+	if len(entries) != 0 {
+		t.Fatalf("expected 0 entries in DB after fast failure, found %d", len(entries))
 	}
-	if entries[0].Status != repo.EntryStatusError {
-		t.Fatalf("expected entry status %v, got %v", repo.EntryStatusError, entries[0].Status)
+}
+
+func TestProcessIncomingEntry_CannotConvertFailsFastWithoutDBEntryOrQueue(t *testing.T) {
+	conv := &testMockConverter{
+		canConvertCheck: media.ConversionCheck{CanConvert: false, NeedsConversion: true},
+	}
+	proc, r, db := setupTestProcessor(t, conv, nil)
+	defer r.Close()
+
+	db.NMaxQueued = 10
+
+	_, _, err := proc.ProcessIncomingEntry(context.Background(), db,
+		EntryRequest{Timestamp: time.Now().UnixMilli(), FileName: "photo.jpg"},
+		strings.NewReader("sample image data"), "image/jpeg", "photo.jpg")
+	if err == nil {
+		t.Fatal("expected error from ProcessIncomingEntry when conversion is unsupported, got nil")
+	}
+
+	entries, err := r.GetEntries(context.Background(), db.ID, repo.QueryOptions{})
+	if err != nil {
+		t.Fatalf("failed to fetch entries: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("expected 0 entries in DB, found %d", len(entries))
 	}
 }
 
@@ -1221,3 +1243,261 @@ func TestStartQueueMonitor_ContextCancel(t *testing.T) {
 		t.Fatal("StartQueueMonitor did not terminate after context cancellation")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Issue 1.1: RetryRegistry composite key (dbID, entryID)
+// ---------------------------------------------------------------------------
+
+func TestRetryRegistry_ScopedByDatabaseAndEntryID(t *testing.T) {
+	rr := newRetryRegistry()
+	db1 := repo.ULID("01ARZ3NDEKTSV4RRFFQ69G5FAV")
+	db2 := repo.ULID("01ARZ3NDEKTSV4RRFFQ69G5FAW")
+
+	rr.noteClaimFailure(db1, 1)
+
+	if !rr.claimDeferred(db1, 1) {
+		t.Fatal("expected (db1, 1) to be deferred after noteClaimFailure")
+	}
+	if rr.claimDeferred(db2, 1) {
+		t.Fatal("expected (db2, 1) NOT to be deferred when only (db1, 1) failed")
+	}
+
+	// Clearing (db2, 1) must not clear (db1, 1).
+	rr.clearClaimRetry(db2, 1)
+	if !rr.claimDeferred(db1, 1) {
+		t.Fatal("expected (db1, 1) to remain deferred after clearClaimRetry(db2, 1)")
+	}
+
+	rr.clearClaimRetry(db1, 1)
+	if rr.claimDeferred(db1, 1) {
+		t.Fatal("expected (db1, 1) to be cleared after clearClaimRetry(db1, 1)")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Issue 1.4: Concurrent queueIncomingFile respects NMaxQueued without TOCTOU
+// ---------------------------------------------------------------------------
+
+func TestQueueIncomingFile_ConcurrentRespectsMaxQueued(t *testing.T) {
+	conv := &testMockConverter{
+		canConvertCheck: media.ConversionCheck{CanConvert: true, NeedsConversion: true},
+	}
+	proc, r, db := setupTestProcessor(t, conv, nil)
+	defer r.Close()
+
+	// Disable background workers so queued entries stay queued during the test.
+	proc.NFfmpegAsync = 0
+	proc.NFfmpegTotal = 0
+
+	const maxQueued = 5
+	const totalCallers = 20
+	db.NMaxQueued = maxQueued
+
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	var mu sync.Mutex
+	var succeeded []repo.Entry
+	var unavailableCount int
+	var unexpectedErrs []error
+
+	for i := 0; i < totalCallers; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			<-start
+			entry, err := proc.queueIncomingFile(
+				context.Background(),
+				strings.NewReader("concurrent payload"),
+				db,
+				EntryRequest{Timestamp: time.Now().UnixMilli(), FileName: "concurrent.jpg"},
+				conversionPlan(),
+			)
+			mu.Lock()
+			defer mu.Unlock()
+			if err == nil {
+				succeeded = append(succeeded, entry)
+			} else if errors.Is(err, customerrors.ErrUnavailable) {
+				unavailableCount++
+			} else {
+				unexpectedErrs = append(unexpectedErrs, err)
+			}
+		}(i)
+	}
+
+	close(start)
+	wg.Wait()
+
+	if len(unexpectedErrs) > 0 {
+		t.Fatalf("unexpected errors during concurrent queueing: %v", unexpectedErrs)
+	}
+	if len(succeeded) != maxQueued {
+		t.Errorf("expected exactly %d queued entries, got %d", maxQueued, len(succeeded))
+	}
+	if unavailableCount != totalCallers-maxQueued {
+		t.Errorf("expected %d ErrUnavailable responses, got %d", totalCallers-maxQueued, unavailableCount)
+	}
+
+	stats, err := r.GetDatabaseStats(context.Background(), db.ID)
+	if err != nil {
+		t.Fatalf("failed to get database stats: %v", err)
+	}
+	if stats.QueuedCount != maxQueued {
+		t.Errorf("expected stats.QueuedCount == %d, got %d", maxQueued, stats.QueuedCount)
+	}
+	if stats.EntryCount != maxQueued {
+		t.Errorf("expected stats.EntryCount == %d (no orphaned entries), got %d", maxQueued, stats.EntryCount)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Issue 1.5: Preview generation slot reservation & streaming from storage
+// ---------------------------------------------------------------------------
+
+type blockingPreviewConverter struct {
+	*testMockConverter
+	previewStarted chan struct{}
+	unblockPreview chan struct{}
+}
+
+func (b *blockingPreviewConverter) CreatePreviewFromStream(ctx context.Context, inputData io.ReadSeeker, outputWriter io.Writer, inputMimeType string) error {
+	select {
+	case b.previewStarted <- struct{}{}:
+	default:
+	}
+	<-b.unblockPreview
+	data, err := io.ReadAll(inputData)
+	if err != nil {
+		return err
+	}
+	_, err = outputWriter.Write([]byte("preview:" + string(data)))
+	return err
+}
+
+func TestProcessIncomingEntry_SyncPassthroughWithPreviewHoldsSlotAndStreamsFromStorage(t *testing.T) {
+	baseConv := &testMockConverter{
+		canConvertCheck: media.ConversionCheck{CanConvert: true, NeedsConversion: false},
+	}
+	conv := &blockingPreviewConverter{
+		testMockConverter: baseConv,
+		previewStarted:    make(chan struct{}, 1),
+		unblockPreview:    make(chan struct{}),
+	}
+	proc, r, _ := setupTestProcessor(t, conv, nil)
+	defer r.Close()
+
+	// Allow only 1 total slot and 0 async slots so a second upload while the
+	// preview is running must fall back to queueing.
+	proc.NFfmpegTotal = 1
+	proc.NFfmpegAsync = 0
+
+	previewDB, err := r.CreateDatabase(context.Background(), repo.Database{
+		Name:        "sync_preview_passthrough",
+		ContentType: "image",
+		NMaxQueued:  5,
+		Config: repo.DatabaseConfig{
+			AutoConversion: "",
+			CreatePreview:  true,
+		},
+	})
+	if err != nil {
+		t.Fatalf("failed to create preview database: %v", err)
+	}
+
+	// First upload: passthrough with preview. It reserves the single sync slot and
+	// hands it off to generatePreviewInBackground.
+	entry1, wasSync1, err := proc.ProcessIncomingEntry(context.Background(), previewDB,
+		EntryRequest{Timestamp: time.Now().UnixMilli(), FileName: "first.jpg"},
+		strings.NewReader("first-image-bytes"), "image/jpeg", "first.jpg")
+	if err != nil {
+		t.Fatalf("unexpected error on first upload: %v", err)
+	}
+	if !wasSync1 {
+		t.Error("expected wasSync=true for first upload")
+	}
+
+	// Wait until generatePreviewInBackground is actively running.
+	select {
+	case <-conv.previewStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for background preview to start")
+	}
+
+	// While the background preview holds the sync slot, a second upload with
+	// preview must see the slot occupied and fall back to queueing.
+	entry2, wasSync2, err := proc.ProcessIncomingEntry(context.Background(), previewDB,
+		EntryRequest{Timestamp: time.Now().UnixMilli(), FileName: "second.jpg"},
+		strings.NewReader("second-image-bytes"), "image/jpeg", "second.jpg")
+	if err != nil {
+		t.Fatalf("expected second upload to be queued while preview holds slot, got err: %v", err)
+	}
+	if wasSync2 || entry2.Status != repo.EntryStatusQueued {
+		t.Errorf("expected second upload to be queued (wasSync=false, status=queued), got wasSync=%v status=%v", wasSync2, entry2.Status)
+	}
+
+	// Unblock preview generation for the first upload and wait for it to become ready.
+	close(conv.unblockPreview)
+	ready1 := waitForStatus(t, r, previewDB.ID, entry1.ID, repo.EntryStatusReady)
+	if ready1.PreviewSize == 0 {
+		t.Errorf("expected non-zero PreviewSize after background preview streamed from storage")
+	}
+
+	// Verify the preview content was streamed from the stored file.
+	prevStream, err := proc.Storage.ReadPreview(context.Background(), previewDB.ID.String(), entry1.ID)
+	if err != nil {
+		t.Fatalf("failed to read preview from storage: %v", err)
+	}
+	defer prevStream.Close()
+	prevBytes, _ := io.ReadAll(prevStream)
+	if string(prevBytes) != "preview:first-image-bytes" {
+		t.Errorf("expected preview %q, got %q", "preview:first-image-bytes", string(prevBytes))
+	}
+}
+
+func TestProcessIncomingEntry_AsyncPassthroughWithPreviewReservesSlot(t *testing.T) {
+	conv := &testMockConverter{
+		canConvertCheck: media.ConversionCheck{CanConvert: true, NeedsConversion: false},
+	}
+	proc, r, _ := setupTestProcessor(t, conv, nil)
+	defer r.Close()
+
+	// Exhaust async slots so an async upload requiring a preview must fall back to queueing.
+	proc.NFfmpegAsync = 0
+	proc.NFfmpegTotal = 2
+
+	previewDB, err := r.CreateDatabase(context.Background(), repo.Database{
+		Name:        "async_preview_passthrough",
+		ContentType: "image",
+		NMaxQueued:  5,
+		Config: repo.DatabaseConfig{
+			AutoConversion: "",
+			CreatePreview:  true,
+		},
+	})
+	if err != nil {
+		t.Fatalf("failed to create preview database: %v", err)
+	}
+
+	tempPath := writeTempFile(t, "mh-upload-preview-*.jpg", []byte("large image with preview"))
+	file, err := os.Open(tempPath)
+	if err != nil {
+		t.Fatalf("failed to open temp file: %v", err)
+	}
+	defer func() {
+		file.Close()
+		os.Remove(tempPath)
+	}()
+
+	entry, synchronous, err := proc.ProcessIncomingEntry(context.Background(), previewDB,
+		EntryRequest{Timestamp: time.Now().UnixMilli(), FileName: "large.jpg"},
+		file, "image/jpeg", "large.jpg")
+	if err != nil {
+		t.Fatalf("expected large passthrough with preview to fall back to queue when async slots exhausted, got err: %v", err)
+	}
+	if synchronous {
+		t.Error("expected synchronous=false")
+	}
+	if entry.Status != repo.EntryStatusQueued {
+		t.Errorf("expected status queued when async slots are exhausted for preview-enabled passthrough, got %v", entry.Status)
+	}
+}
+

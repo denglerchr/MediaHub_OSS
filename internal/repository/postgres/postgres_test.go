@@ -533,6 +533,13 @@ func TestPostgresRepository_InvalidULIDValidation(t *testing.T) {
 	if _, err := r.HouseKeepingWasCalled(ctx, invalidID); !errors.Is(err, customerrors.ErrValidation) {
 		t.Errorf("expected ErrValidation from HouseKeepingWasCalled, got: %v", err)
 	}
+
+	if _, err := r.EnqueueEntry(ctx, invalidID, repo.Entry{ID: 1}, 10); !errors.Is(err, customerrors.ErrValidation) {
+		t.Errorf("expected ErrValidation from EnqueueEntry with invalid ULID, got: %v", err)
+	}
+
+	validID := repo.ULID("01HGFB9Z5W7ABCDEFGHJKMNPQR")
+	if _, err := r.EnqueueEntry(ctx, validID, repo.Entry{ID: 1}, 0); !errors.Is(err, customerrors.ErrUnavailable) {
+		t.Errorf("expected ErrUnavailable from EnqueueEntry with maxQueued=0, got: %v", err)
+	}
 }
-
-
