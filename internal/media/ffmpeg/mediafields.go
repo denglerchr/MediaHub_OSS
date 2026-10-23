@@ -40,7 +40,7 @@ func (c *FfmpegConverter) ReadMediaFieldsFromStream(ctx context.Context, inputDa
 		return c.runFFprobe(ctx, path, contentType)
 	}
 
-	id, fullURL, err := c.localServer.Register(inputData, 2*time.Minute)
+	id, fullURL, err := c.localServer.Register(ctx, inputData, 2*time.Minute)
 	if err != nil {
 		return map[string]any{}, fmt.Errorf("failed to register stream: %w", err)
 	}
@@ -67,7 +67,8 @@ func (c *FfmpegConverter) runFFprobe(ctx context.Context, inputSource string, co
 	// Bind the ffprobe process to the provided context
 	cmd := exec.CommandContext(ctx, probePath, args...)
 
-	var stdout, stderr bytes.Buffer
+	var stdout bytes.Buffer
+	var stderr limitedBuffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 

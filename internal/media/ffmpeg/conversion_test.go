@@ -3,6 +3,7 @@ package ffmpeg
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"math"
@@ -65,14 +66,14 @@ func TestBuildImageFilter(t *testing.T) {
 			width:    800,
 			height:   0,
 			fit:      "cut",
-			expected: "scale=w=800:h=-1",
+			expected: "scale=w=800:h=-2",
 		},
 		{
 			name:     "single dimension height only",
 			width:    0,
 			height:   480,
 			fit:      "stretch",
-			expected: "scale=w=-1:h=480",
+			expected: "scale=w=-2:h=480",
 		},
 		{
 			name:     "no dimensions specified",
@@ -271,7 +272,7 @@ func TestLocalStreamServer_Register(t *testing.T) {
 	// Custom type implementing io.ReaderAt that is NOT in the safe allowlist should be
 	// spooled to a temporary file on disk (concurrent-safe *os.File) instead of RAM.
 	customStream := &nonConcurrentReaderAt{Reader: bytes.NewReader([]byte("hello world"))}
-	id, _, err := srv.Register(customStream, time.Minute)
+	id, _, err := srv.Register(context.Background(), customStream, time.Minute)
 	if err != nil {
 		t.Fatalf("Register failed: %v", err)
 	}
@@ -302,3 +303,97 @@ func TestLocalStreamServer_Register(t *testing.T) {
 	}
 }
 
+type cancellingReadSeeker struct {
+	cancel context.CancelFunc
+	calls  int
+}
+
+func (r *cancellingReadSeeker) Read(p []byte) (int, error) {
+	r.calls++
+	if r.calls == 1 {
+		r.cancel()
+		return copy(p, "chunk1"), nil
+	}
+	return copy(p, "chunk2"), nil
+}
+
+func (r *cancellingReadSeeker) Seek(offset int64, whence int) (int64, error) {
+	return 0, nil
+}
+
+func TestLocalStreamServer_Register_ContextCancelled(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	srv, err := NewLocalStreamServer(logger)
+	if err != nil {
+		t.Fatalf("failed to start LocalStreamServer: %v", err)
+	}
+	defer srv.Shutdown(context.Background())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	stream := &cancellingReadSeeker{cancel: cancel}
+
+	_, _, err = srv.Register(ctx, stream, time.Minute)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected error wrapping context.Canceled, got: %v", err)
+	}
+
+	srv.mu.RLock()
+	sessionCount := len(srv.sessions)
+	srv.mu.RUnlock()
+	if sessionCount != 0 {
+		t.Errorf("expected 0 registered sessions after cancelled spool, got %d", sessionCount)
+	}
+}
+
+func TestCreateInMemoryFile(t *testing.T) {
+	// Small input: eligible for in-memory optimization (/dev/shm on Linux if available, RAM cache on Windows)
+	smallPath, err := createInMemoryFile("", "ffmpeg-output-*.tmp", 1024)
+	if err != nil {
+		t.Fatalf("createInMemoryFile(small) failed: %v", err)
+	}
+	defer os.Remove(smallPath)
+	if _, err := os.Stat(smallPath); err != nil {
+		t.Errorf("expected created small temp file to exist at %q: %v", smallPath, err)
+	}
+
+	// Large input (> 32 MiB): must bypass /dev/shm and use disk temp directory
+	largePath, err := createInMemoryFile("", "ffmpeg-output-*.tmp", 100<<20)
+	if err != nil {
+		t.Fatalf("createInMemoryFile(large) failed: %v", err)
+	}
+	defer os.Remove(largePath)
+	if filepath.ToSlash(filepath.Dir(largePath)) == "/dev/shm" {
+		t.Errorf("expected large temp file not to be created in /dev/shm, got %q", largePath)
+	}
+	if _, err := os.Stat(largePath); err != nil {
+		t.Errorf("expected created large temp file to exist at %q: %v", largePath, err)
+	}
+
+	// Verify getSeekerSize preserves current read offset
+	r := bytes.NewReader([]byte("hello world"))
+	_, _ = r.Seek(6, io.SeekStart)
+	if got := getSeekerSize(r); got != 5 {
+		t.Errorf("expected remaining seeker size 5, got %d", got)
+	}
+	pos, _ := r.Seek(0, io.SeekCurrent)
+	if pos != 6 {
+		t.Errorf("expected seeker offset preserved at 6, got %d", pos)
+	}
+}
+
+func TestLimitedBuffer_CappedAtStderrCap(t *testing.T) {
+	var buf limitedBuffer
+	chunk := bytes.Repeat([]byte("a"), 16*1024)
+	for i := 0; i < 8; i++ {
+		n, err := buf.Write(chunk)
+		if err != nil {
+			t.Fatalf("unexpected Write error: %v", err)
+		}
+		if n != len(chunk) {
+			t.Fatalf("expected Write to report %d bytes, got %d", len(chunk), n)
+		}
+	}
+	if len(buf.String()) != stderrCap {
+		t.Errorf("expected buffer length capped at %d, got %d", stderrCap, len(buf.String()))
+	}
+}

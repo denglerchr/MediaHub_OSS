@@ -34,12 +34,13 @@ func BuildImageFilter(width, height int, fit string) (string, error) {
 		return "", nil
 	}
 
-	// Single dimension: proportional scaling preserving aspect ratio
+	// Single dimension: proportional scaling preserving aspect ratio.
+	// Use -2 so the calculated dimension is divisible by 2 (required by yuv420p encoders such as image/avif).
 	if width > 0 && height == 0 {
-		return fmt.Sprintf("scale=w=%d:h=-1", width), nil
+		return fmt.Sprintf("scale=w=%d:h=-2", width), nil
 	}
 	if width == 0 && height > 0 {
-		return fmt.Sprintf("scale=w=-1:h=%d", height), nil
+		return fmt.Sprintf("scale=w=-2:h=%d", height), nil
 	}
 
 	// Both dimensions provided
@@ -157,6 +158,24 @@ func (c *FfmpegConverter) ConvertFile(ctx context.Context, inputPath string, out
 	return c.runFFmpegCommand(ctx, ffmpegPath, args, "FFmpeg file conversion failed", normTarget)
 }
 
+// getSeekerSize returns the remaining byte length of rs without altering its read offset,
+// or -1 if the stream size cannot be determined.
+func getSeekerSize(rs io.ReadSeeker) int64 {
+	if rs == nil {
+		return -1
+	}
+	cur, err := rs.Seek(0, io.SeekCurrent)
+	if err != nil {
+		return -1
+	}
+	end, err := rs.Seek(0, io.SeekEnd)
+	_, restoreErr := rs.Seek(cur, io.SeekStart)
+	if err != nil || restoreErr != nil || end < cur {
+		return -1
+	}
+	return end - cur
+}
+
 // ConvertStreamToFile executes the stream conversion and returns an open *os.File to the resulting temporary file.
 // The caller is responsible for closing the returned file and removing it from disk.
 func (c *FfmpegConverter) ConvertStreamToFile(ctx context.Context, inputData io.ReadSeeker, inputMimeType string, opts media.ConversionOptions) (*os.File, error) {
@@ -170,11 +189,13 @@ func (c *FfmpegConverter) ConvertStreamToFile(ctx context.Context, inputData io.
 		return nil, err
 	}
 
+	inputSize := getSeekerSize(inputData)
+
 	inputSource, isLocal := localFilePath(inputData)
 	if !isLocal {
 		// Register the stream with the local loopback server.
 		var id string
-		id, inputSource, err = c.localServer.Register(inputData, 30*time.Minute)
+		id, inputSource, err = c.localServer.Register(ctx, inputData, 30*time.Minute)
 		if err != nil {
 			return nil, fmt.Errorf("failed to register stream: %w", err)
 		}
@@ -182,7 +203,7 @@ func (c *FfmpegConverter) ConvertStreamToFile(ctx context.Context, inputData io.
 	}
 
 	// Create the highly optimized temporary file to satisfy FFmpeg's need for a seekable output
-	tmpPath, err := createInMemoryFile("", "ffmpeg-output-*.tmp")
+	tmpPath, err := createInMemoryFile("", "ffmpeg-output-*.tmp", inputSize)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create temporary output file: %w", err)
 	}

@@ -1,7 +1,6 @@
 package ffmpeg
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -28,7 +27,7 @@ func (c *FfmpegConverter) CreatePreviewFromStream(ctx context.Context, inputData
 	}
 
 	// Register the stream with the local loopback server with a short Time-To-Live.
-	id, fullURL, err := c.localServer.Register(inputData, 2*time.Minute)
+	id, fullURL, err := c.localServer.Register(ctx, inputData, 2*time.Minute)
 	if err != nil {
 		return fmt.Errorf("failed to register stream: %w", err)
 	}
@@ -78,7 +77,7 @@ func (c *FfmpegConverter) generatePreview(ctx context.Context, inputSource strin
 	}
 
 	// Assemble the final FFmpeg command arguments
-	args := []string{"-v", "error"} // Only output fatal errors to keep logs clean
+	args := []string{"-hide_banner", "-nostats", "-v", "error"} // Only output fatal errors to keep logs clean
 	args = append(args, "-i", inputSource)
 	args = append(args, filterArgs...)
 
@@ -91,8 +90,8 @@ func (c *FfmpegConverter) generatePreview(ctx context.Context, inputSource strin
 	// Pipe the WebP binary data directly into the provided outputWriter
 	cmd.Stdout = outputWriter
 
-	// Capture standard error for debugging purposes
-	var stderr bytes.Buffer
+	// Capture standard error for debugging purposes (capped at stderrCap bytes)
+	var stderr limitedBuffer
 	cmd.Stderr = &stderr
 
 	if err := cmd.Run(); err != nil {

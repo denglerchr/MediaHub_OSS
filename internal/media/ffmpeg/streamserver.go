@@ -96,10 +96,33 @@ func isConcurrentSafeReaderAt(stream io.ReadSeeker) (io.ReaderAt, bool) {
 	}
 }
 
+// contextReader wraps an io.Reader and aborts reads when ctx is cancelled.
+type contextReader struct {
+	ctx context.Context
+	r   io.Reader
+}
+
+func (cr contextReader) Read(p []byte) (int, error) {
+	if err := cr.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return cr.r.Read(p)
+}
+
 // Register securely mounts an in-memory stream and returns its unique ID and full FFmpeg-ready URL.
-func (l *LocalStreamServer) Register(stream io.ReadSeeker, ttl time.Duration) (string, string, error) {
-	id := generateRandomHex(16)
-	token := generateRandomHex(16)
+func (l *LocalStreamServer) Register(ctx context.Context, stream io.ReadSeeker, ttl time.Duration) (string, string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", "", err
+	}
+
+	id, err := generateRandomHex(16)
+	if err != nil {
+		return "", "", err
+	}
+	token, err := generateRandomHex(16)
+	if err != nil {
+		return "", "", err
+	}
 
 	var readerAt io.ReaderAt
 	var size int64
@@ -127,7 +150,7 @@ func (l *LocalStreamServer) Register(stream io.ReadSeeker, ttl time.Duration) (s
 			return "", "", fmt.Errorf("failed to create stream spool file: %w", err)
 		}
 		spoolPath = spoolFile.Name()
-		written, err := io.Copy(spoolFile, stream)
+		written, err := io.Copy(spoolFile, contextReader{ctx: ctx, r: stream})
 		if err != nil {
 			spoolFile.Close()
 			os.Remove(spoolPath)
@@ -231,8 +254,10 @@ func (l *LocalStreamServer) startSweeper(ctx context.Context) {
 	}
 }
 
-func generateRandomHex(n int) string {
+func generateRandomHex(n int) (string, error) {
 	b := make([]byte, n)
-	rand.Read(b)
-	return hex.EncodeToString(b)
+	if _, err := rand.Read(b); err != nil {
+		return "", fmt.Errorf("failed to generate random bytes: %w", err)
+	}
+	return hex.EncodeToString(b), nil
 }
