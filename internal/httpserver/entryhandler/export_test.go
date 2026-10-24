@@ -8,13 +8,16 @@ import (
 	"encoding/json"
 	"io"
 	"log/slog"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"net/textproto"
 	"strings"
 	"testing"
 	"time"
 
 	"mediahub_oss/internal/httpserver/entryhandler"
+	"mediahub_oss/internal/media"
 	"mediahub_oss/internal/httpserver/utils"
 	repo "mediahub_oss/internal/repository"
 	"mediahub_oss/internal/shared/customerrors"
@@ -29,7 +32,8 @@ func (m *mockAuditor) Log(ctx context.Context, action string, actor string, reso
 type mockExportRepo struct {
 	repo.Repository
 	db      repo.Database
-	entries map[int64]repo.Entry
+	entries   map[int64]repo.Entry
+	createdCh chan repo.Entry
 }
 
 func (m *mockExportRepo) GetDatabase(ctx context.Context, dbID repo.ULID) (repo.Database, error) {
@@ -43,6 +47,14 @@ func (m *mockExportRepo) GetEntry(ctx context.Context, dbID repo.ULID, id int64)
 	return repo.Entry{}, customerrors.ErrNotFound
 }
 
+func (m *mockExportRepo) CreateEntry(ctx context.Context, db repo.Database, entry repo.Entry) (repo.Entry, error) {
+	entry.ID = 202
+	if m.createdCh != nil {
+		m.createdCh <- entry
+	}
+	return entry, nil
+}
+
 type mockStorage struct {
 	storage.StorageProvider
 }
@@ -53,6 +65,22 @@ func (m *mockStorage) Read(ctx context.Context, dbID string, id int64, offset in
 
 func (m *mockStorage) ReadPreview(ctx context.Context, dbID string, id int64) (io.ReadCloser, error) {
 	return io.NopCloser(strings.NewReader("dummy preview content")), nil
+}
+
+func (m *mockStorage) Write(ctx context.Context, dbID string, id int64, r io.Reader) (int64, error) {
+	return io.Copy(io.Discard, r)
+}
+
+func (m *mockStorage) WritePreview(ctx context.Context, dbID string, id int64, r io.Reader) (int64, error) {
+	return io.Copy(io.Discard, r)
+}
+
+type mockImportMediaConverter struct {
+	media.MediaConverter
+}
+
+func (m *mockImportMediaConverter) ReadMediaFieldsFromFile(ctx context.Context, filePath string, contentType string) (map[string]any, error) {
+	return map[string]any{"width": 1920, "height": 1080}, nil
 }
 
 func TestExportEntries_IncludesMediaSpecificColumns(t *testing.T) {
@@ -168,5 +196,91 @@ func TestExportEntries_IncludesMediaSpecificColumns(t *testing.T) {
 		if row[i] != val {
 			t.Errorf("row col %d (%s) mismatch: expected %q, got %q", i, expectedHeader[i], val, row[i])
 		}
+	}
+}
+
+
+func TestImportEntries_DiskSpooledMultipartFile(t *testing.T) {
+	mockDB := repo.Database{
+		ID:          "01HGFB9Z5W7ABCDEFGHJKMNPQR",
+		Name:        "TestImageDB",
+		ContentType: "image",
+		CustomFields: []repo.CustomFieldDef{
+			{Name: "photographer", Type: repo.CustomFieldTypeText},
+		},
+	}
+
+	var zipBuf bytes.Buffer
+	zw := zip.NewWriter(&zipBuf)
+
+	csvWriter, err := zw.Create("entries.csv")
+	if err != nil {
+		t.Fatalf("failed to create entries.csv in zip: %v", err)
+	}
+	w := csv.NewWriter(csvWriter)
+	_ = w.Write([]string{"id", "filename", "timestamp", "filesize", "previewsize", "mime_type", "status", "photographer"})
+	_ = w.Write([]string{"101", "photo1.jpg", "2026-01-15T10:00:00Z", "18", "0", "image/jpeg", "0", "Jane Doe"})
+	w.Flush()
+
+	mediaWriter, err := zw.Create("files/101_photo1.jpg")
+	if err != nil {
+		t.Fatalf("failed to create media file in zip: %v", err)
+	}
+	_, _ = mediaWriter.Write([]byte("dummy file content"))
+	if err := zw.Close(); err != nil {
+		t.Fatalf("failed to close zip writer: %v", err)
+	}
+
+	createdCh := make(chan repo.Entry, 1)
+	mockRepo := &mockExportRepo{
+		db:        mockDB,
+		entries:   map[int64]repo.Entry{},
+		createdCh: createdCh,
+	}
+
+	h := &entryhandler.EntryHandler{
+		Logger:                 slog.Default(),
+		Auditor:                &mockAuditor{},
+		Repo:                   mockRepo,
+		Storage:                &mockStorage{},
+		MediaConverter:         &mockImportMediaConverter{},
+		MaxSyncUploadSizeBytes: 0, // Force multipart upload to be spooled to an *os.File on disk
+	}
+
+	var body bytes.Buffer
+	mw := multipart.NewWriter(&body)
+	partHeader := make(textproto.MIMEHeader)
+	partHeader.Set("Content-Disposition", `form-data; name="file"; filename="export.zip"`)
+	partHeader.Set("Content-Type", "application/zip")
+	part, err := mw.CreatePart(partHeader)
+	if err != nil {
+		t.Fatalf("failed to create multipart part: %v", err)
+	}
+	_, _ = part.Write(zipBuf.Bytes())
+	_ = mw.Close()
+
+	req := httptest.NewRequest(http.MethodPost, "/api/database/01HGFB9Z5W7ABCDEFGHJKMNPQR/entries/import", &body)
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	req.SetPathValue("database_id", "01HGFB9Z5W7ABCDEFGHJKMNPQR")
+	user := repo.User{Username: "testuser"}
+	req = req.WithContext(context.WithValue(req.Context(), utils.UserKey, &user))
+
+	rec := httptest.NewRecorder()
+	h.ImportEntries(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("expected status 202 Accepted, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	select {
+	case imported := <-createdCh:
+		if imported.FileName != "photo1.jpg" {
+			t.Errorf("expected imported filename 'photo1.jpg', got %q", imported.FileName)
+		}
+		if imported.CustomFields["photographer"] != "Jane Doe" {
+			t.Errorf("expected custom field photographer='Jane Doe', got %v", imported.CustomFields["photographer"])
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for background import job to process disk-spooled multipart upload")
 	}
 }

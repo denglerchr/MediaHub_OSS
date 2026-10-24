@@ -194,10 +194,10 @@ func (h *UserHandler) GetUsers(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 3. Initialize our response array
-	var response = make([]UserResponse, len(dbUsers))
+	response := make([]UserResponse, 0, len(dbUsers))
 
 	// 4. Iterate through each user to build their specific response object
-	for i, u := range dbUsers {
+	for _, u := range dbUsers {
 		userRes := UserResponse{
 			ID:          u.ID,
 			Username:    u.Username,
@@ -229,7 +229,7 @@ func (h *UserHandler) GetUsers(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// Add the populated user response to our list
-		response[i] = userRes
+		response = append(response, userRes)
 	}
 
 	// 6. Return the full list

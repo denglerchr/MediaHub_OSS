@@ -10,7 +10,6 @@ import (
 	"testing"
 
 	"mediahub_oss/internal/httpserver/infohandler"
-	"mediahub_oss/internal/logging/audit"
 	"mediahub_oss/internal/media"
 )
 
@@ -36,7 +35,6 @@ func (m *mockAuthEndpointProvider) GetAuthEndpoint(ctx context.Context) (string,
 
 func TestInfoHandler_GetInfo_OIDCEnabled_WithAuthEndpoint(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	auditor := audit.NewAuditLogger(false, "stdio", logger, nil)
 	mc := &mockMediaConverter{}
 	provider := &mockAuthEndpointProvider{
 		authEndpoint: "https://idp.example.com/oauth2/authorize",
@@ -44,7 +42,6 @@ func TestInfoHandler_GetInfo_OIDCEnabled_WithAuthEndpoint(t *testing.T) {
 
 	handler := infohandler.NewInfoHandler(
 		logger,
-		auditor,
 		"1.0.0-test",
 		mc,
 		true, // oidcEnabled
@@ -80,12 +77,10 @@ func TestInfoHandler_GetInfo_OIDCEnabled_WithAuthEndpoint(t *testing.T) {
 
 func TestInfoHandler_GetInfo_OIDCDisabled(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	auditor := audit.NewAuditLogger(false, "stdio", logger, nil)
 	mc := &mockMediaConverter{}
 
 	handler := infohandler.NewInfoHandler(
 		logger,
-		auditor,
 		"1.0.0-test",
 		mc,
 		false, // oidcEnabled

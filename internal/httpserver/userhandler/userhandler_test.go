@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -19,7 +20,9 @@ import (
 
 type mockUserRepo struct {
 	repo.Repository
-	users map[repo.ULID]repo.User
+	users     map[repo.ULID]repo.User
+	userSlice []repo.User
+	permsErr  map[repo.ULID]error
 }
 
 func (m *mockUserRepo) GetUserByID(ctx context.Context, id repo.ULID) (repo.User, error) {
@@ -50,7 +53,16 @@ func (m *mockUserRepo) SetUserPermissions(ctx context.Context, p repo.UserPermis
 	return nil
 }
 
+func (m *mockUserRepo) GetUsers(ctx context.Context, accountType *repo.AccountType) ([]repo.User, error) {
+	return m.userSlice, nil
+}
+
 func (m *mockUserRepo) GetAllUserPermissions(ctx context.Context, userID repo.ULID) ([]repo.UserPermissions, error) {
+	if m.permsErr != nil {
+		if err, ok := m.permsErr[userID]; ok {
+			return nil, err
+		}
+	}
 	return nil, nil
 }
 
@@ -286,3 +298,45 @@ func TestCreateUser_DefaultAccountTypeLocal(t *testing.T) {
 	}
 }
 
+func TestGetUsers_SkipsUserOnPermissionsErrorWithoutZeroValueEntry(t *testing.T) {
+	u1 := repo.User{ID: "01HGFB9Z5W7ABCDEFGHJKMNPQ1", Username: "alice", IsAdmin: false, AccountType: repo.AccountTypeLocal}
+	u2 := repo.User{ID: "01HGFB9Z5W7ABCDEFGHJKMNPQ2", Username: "broken", IsAdmin: false, AccountType: repo.AccountTypeLocal}
+	u3 := repo.User{ID: "01HGFB9Z5W7ABCDEFGHJKMNPQ3", Username: "bob", IsAdmin: true, AccountType: repo.AccountTypeLocal}
+
+	mockRepo := &mockUserRepo{
+		userSlice: []repo.User{u1, u2, u3},
+		permsErr: map[repo.ULID]error{
+			u2.ID: errors.New("db error"),
+		},
+	}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	auditor := audit.NewAuditLogger(false, "stdio", logger, mockRepo)
+	handler := userhandler.UserHandler{Logger: logger, Auditor: auditor, Repo: mockRepo}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/user", nil)
+	req = req.WithContext(context.WithValue(req.Context(), utils.UserKey, &repo.User{Username: "admin", IsAdmin: true}))
+	rec := httptest.NewRecorder()
+
+	handler.GetUsers(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200 OK, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var users []userhandler.UserResponse
+	if err := json.NewDecoder(rec.Body).Decode(&users); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+
+	if len(users) != 2 {
+		t.Fatalf("expected 2 users in response, got %d: %+v", len(users), users)
+	}
+	for i, u := range users {
+		if u.ID == "" || u.Username == "" {
+			t.Errorf("unexpected zero-value user at index %d: %+v", i, u)
+		}
+	}
+	if users[0].Username != "alice" || users[1].Username != "bob" {
+		t.Errorf("expected [alice, bob], got [%s, %s]", users[0].Username, users[1].Username)
+	}
+}

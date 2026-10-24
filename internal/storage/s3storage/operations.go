@@ -75,14 +75,6 @@ func (s *S3StorageProvider) StatPreview(ctx context.Context, dbID string, id int
 func (s *S3StorageProvider) Read(ctx context.Context, dbID string, id int64, offset int64, length int64) (io.ReadCloser, error) {
 	objectKey := getObjectKey(dbID, id)
 
-	// Verify object exists before returning reader
-	if _, err := s.client.StatObject(ctx, s.bucket, objectKey, minio.StatObjectOptions{}); err != nil {
-		if isNotFoundError(err) {
-			return nil, customerrors.ErrNotFound
-		}
-		return nil, err
-	}
-
 	opts := minio.GetObjectOptions{}
 	if offset > 0 || length >= 0 {
 		var end int64
@@ -94,7 +86,11 @@ func (s *S3StorageProvider) Read(ctx context.Context, dbID string, id int64, off
 		}
 	}
 
-	obj, err := s.client.GetObject(ctx, s.bucket, objectKey, opts)
+	// Use minio.Core.GetObject so the GET request (including any Range header)
+	// is executed immediately in a single round-trip without a separate HEAD
+	// (StatObject) request, while still surfacing 404 errors upfront.
+	core := minio.Core{Client: s.client}
+	obj, _, _, err := core.GetObject(ctx, s.bucket, objectKey, opts)
 	if err != nil {
 		if isNotFoundError(err) {
 			return nil, customerrors.ErrNotFound

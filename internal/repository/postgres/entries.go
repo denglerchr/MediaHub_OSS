@@ -170,6 +170,9 @@ func (r *PostgresRepository) GetEntries(ctx context.Context, dbID repo.ULID, opt
 	if !opts.TEnd.IsZero() {
 		builder = builder.Where(squirrel.LtOrEq{opts.TimeField: opts.TEnd.UnixMilli()})
 	}
+	if len(opts.Statuses) > 0 {
+		builder = builder.Where(squirrel.Eq{"status": opts.Statuses})
+	}
 
 	builder = builder.OrderBy(fmt.Sprintf("%s %s", opts.SortBy, strings.ToUpper(opts.Order)))
 

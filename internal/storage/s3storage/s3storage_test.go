@@ -93,8 +93,9 @@ func TestNewS3StorageProviderValidation(t *testing.T) {
 
 // Simple in-memory S3 mock server to test operations
 type mockS3Server struct {
-	mu      sync.RWMutex
-	objects map[string][]byte
+	mu           sync.RWMutex
+	objects      map[string][]byte
+	headRequests int
 }
 
 func newMockS3Server() (*httptest.Server, *mockS3Server) {
@@ -134,6 +135,7 @@ func newMockS3Server() (*httptest.Server, *mockS3Server) {
 			w.WriteHeader(http.StatusOK)
 
 		case http.MethodHead:
+			mock.headRequests++
 			data, ok := mock.objects[key]
 			if !ok {
 				w.WriteHeader(http.StatusNotFound)
@@ -252,7 +254,7 @@ func newMockS3Server() (*httptest.Server, *mockS3Server) {
 }
 
 func TestS3StorageProviderOperations(t *testing.T) {
-	ts, _ := newMockS3Server()
+	ts, mock := newMockS3Server()
 	defer ts.Close()
 
 	u, err := url.Parse(ts.URL)
@@ -301,7 +303,11 @@ func TestS3StorageProviderOperations(t *testing.T) {
 		t.Errorf("expected customerrors.ErrNotFound, got: %v", err)
 	}
 
-	// 4. Read file
+	// 4. Read file (verify no HEAD request is issued during Read)
+	mock.mu.RLock()
+	headBefore := mock.headRequests
+	mock.mu.RUnlock()
+
 	rc, err := provider.Read(ctx, dbID, entryID, 0, -1)
 	if err != nil {
 		t.Fatalf("Read failed: %v", err)
@@ -327,6 +333,19 @@ func TestS3StorageProviderOperations(t *testing.T) {
 	}
 	if string(rangeBytes) != "s3" {
 		t.Errorf("Read range content = %s; want 's3'", string(rangeBytes))
+	}
+
+	// 5b. Read non-existent file returns ErrNotFound without HEAD request
+	_, err = provider.Read(ctx, dbID, 99999, 0, -1)
+	if err != customerrors.ErrNotFound {
+		t.Errorf("Read non-existent: expected customerrors.ErrNotFound, got: %v", err)
+	}
+
+	mock.mu.RLock()
+	headAfter := mock.headRequests
+	mock.mu.RUnlock()
+	if headAfter != headBefore {
+		t.Errorf("expected Read to issue 0 HEAD requests, but issued %d", headAfter-headBefore)
 	}
 
 	// 6. Write Preview & Stat Preview & Read Preview

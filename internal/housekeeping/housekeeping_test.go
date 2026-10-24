@@ -187,3 +187,76 @@ func TestRunDBHousekeeping_DiskSpace_ZeroFreedTerminatesLoop(t *testing.T) {
 		t.Errorf("expected loop to terminate after 1 batch when freed is 0, but called %d times", callCount)
 	}
 }
+
+func TestRunDBHousekeeping_FiltersDeletableStatusesInSQL(t *testing.T) {
+	ctx := context.Background()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	var recordedOpts []repo.QueryOptions
+	mockRepo := &mockHousekeepingRepo{
+		getEntriesFunc: func(ctx context.Context, dbID repo.ULID, opts repo.QueryOptions) ([]repo.Entry, error) {
+			recordedOpts = append(recordedOpts, opts)
+			// Return one ready entry on first call of each sweep, then empty
+			if len(recordedOpts) == 1 {
+				return []repo.Entry{
+					{ID: 1, Size: 1000, Status: repo.EntryStatusReady},
+				}, nil
+			}
+			if len(recordedOpts) == 3 {
+				return []repo.Entry{
+					{ID: 2, Size: 3000, Status: repo.EntryStatusError},
+				}, nil
+			}
+			return nil, nil
+		},
+		deleteEntriesFunc: func(ctx context.Context, dbID repo.ULID, ids []int64) ([]repo.DeletedEntryMeta, error) {
+			var metas []repo.DeletedEntryMeta
+			for _, id := range ids {
+				size := uint64(1000)
+				if id == 2 {
+					size = 3000
+				}
+				metas = append(metas, repo.DeletedEntryMeta{ID: id, Filesize: size})
+			}
+			return metas, nil
+		},
+	}
+
+	mockStorage := &mockStorageProvider{}
+	hk := housekeeping.NewHouseKeeper(mockRepo, mockStorage, logger, 24*time.Hour)
+
+	db := repo.Database{
+		ID:   "01HGFB9Z5W7ABCDEFGHJKMNPQR",
+		Name: "test_db",
+		Housekeeping: repo.DatabaseHK{
+			MaxAge:    1 * time.Hour,
+			DiskSpace: 1500,
+		},
+		Stats: repo.DatabaseStats{
+			TotalDiskSpaceBytes: 5000,
+		},
+	}
+
+	delCount, freed, err := hk.RunDBHousekeeping(ctx, db)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if delCount != 2 {
+		t.Errorf("expected 2 deleted, got %d", delCount)
+	}
+	if freed != 4000 {
+		t.Errorf("expected 4000 freed, got %d", freed)
+	}
+	if len(recordedOpts) < 3 {
+		t.Fatalf("expected at least 3 GetEntries calls (MaxAge + DiskSpace), got %d", len(recordedOpts))
+	}
+
+	expectedStatuses := []repo.EntryStatus{repo.EntryStatusReady, repo.EntryStatusError}
+	for i, opts := range recordedOpts {
+		if len(opts.Statuses) != len(expectedStatuses) ||
+			opts.Statuses[0] != expectedStatuses[0] ||
+			opts.Statuses[1] != expectedStatuses[1] {
+			t.Errorf("call %d: expected Statuses=%v, got %v", i, expectedStatuses, opts.Statuses)
+		}
+	}
+}

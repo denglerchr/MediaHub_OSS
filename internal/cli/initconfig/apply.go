@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"strings"
 
 	"github.com/BurntSushi/toml"
 	"golang.org/x/crypto/bcrypt"
@@ -38,10 +39,19 @@ func Apply(ctx context.Context, config *InitConfig, repo repository.Repository, 
 			}
 
 			customFields := make([]repository.CustomFieldDef, len(dbInit.CustomFields))
+			validFields := true
 			for i, cf := range dbInit.CustomFields {
+				fieldName := strings.TrimSpace(cf.Name)
+				if fieldName == "" || repository.IsReservedCustomFieldName(fieldName) {
+					logger.Error("Invalid or reserved custom field name in init config", "database", dbInit.Name, "field", cf.Name)
+					validFields = false
+					break
+				}
 				fieldType, err := repository.ParseCustomFieldType(cf.Type)
 				if err != nil {
 					logger.Error("Invalid custom field type in init config", "database", dbInit.Name, "field", cf.Name, "type", cf.Type, "error", err)
+					validFields = false
+					break
 				}
 				isIndexed := true
 				if cf.IsIndexed != nil {
@@ -49,10 +59,14 @@ func Apply(ctx context.Context, config *InitConfig, repo repository.Repository, 
 				}
 				customFields[i] = repository.CustomFieldDef{
 					ID:        i,
-					Name:      cf.Name,
+					Name:      fieldName,
 					Type:      fieldType,
 					IsIndexed: isIndexed,
 				}
+			}
+
+			if !validFields {
+				continue
 			}
 
 			db := repository.Database{

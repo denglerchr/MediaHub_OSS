@@ -306,7 +306,6 @@ func buildHandlers(cfg *config.Config, repo repository.Repository, storageProvid
 
 	infoH := ih.NewInfoHandler(
 		logger,
-		svcs.auditLogger,
 		docs.SwaggerInfo.Version,
 		svcs.mediaConverter,
 		cfg.Auth.OIDC.Enabled,

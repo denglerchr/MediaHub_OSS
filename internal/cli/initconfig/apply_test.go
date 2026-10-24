@@ -376,3 +376,63 @@ password = "ShouldBeRedacted"
 	})
 }
 
+
+func TestApply_CustomFieldValidation(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	ctx := context.Background()
+	validHK := initconfig.InitHousekeeping{
+		Interval:  "1h",
+		DiskSpace: "10G",
+		MaxAge:    "0",
+	}
+
+	t.Run("rejects database with invalid custom field type", func(t *testing.T) {
+		repo := newMockRepo()
+		cfg := initconfig.InitConfig{
+			Databases: []initconfig.InitDatabase{
+				{
+					Name:         "InvalidTypeDB",
+					ContentType:  "image",
+					Housekeeping: validHK,
+					CustomFields: []initconfig.InitCustomField{
+						{Name: "bad_field", Type: "NOT_A_TYPE"},
+					},
+				},
+			},
+		}
+
+		if err := initconfig.Apply(ctx, &cfg, repo, logger, ""); err != nil {
+			t.Fatalf("Apply failed: %v", err)
+		}
+
+		if len(repo.databases) != 0 {
+			t.Errorf("expected database with invalid custom field type to be skipped, got %+v", repo.databases)
+		}
+	})
+
+	t.Run("rejects database with reserved or empty custom field name", func(t *testing.T) {
+		for _, reservedName := range []string{"id", "status", "timestamp", "ID", "  ", ""} {
+			repo := newMockRepo()
+			cfg := initconfig.InitConfig{
+				Databases: []initconfig.InitDatabase{
+					{
+						Name:         "ReservedFieldDB",
+						ContentType:  "image",
+						Housekeeping: validHK,
+						CustomFields: []initconfig.InitCustomField{
+							{Name: reservedName, Type: "TEXT"},
+						},
+					},
+				},
+			}
+
+			if err := initconfig.Apply(ctx, &cfg, repo, logger, ""); err != nil {
+				t.Fatalf("Apply failed for %q: %v", reservedName, err)
+			}
+
+			if len(repo.databases) != 0 {
+				t.Errorf("expected database with reserved/empty custom field name %q to be skipped, got %+v", reservedName, repo.databases)
+			}
+		}
+	})
+}

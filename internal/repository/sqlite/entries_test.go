@@ -811,3 +811,67 @@ func TestEnqueueEntry_QueueLimit(t *testing.T) {
 		t.Fatalf("expected TotalDiskSpaceBytes to remain 3072, got %d", stats.TotalDiskSpaceBytes)
 	}
 }
+
+func TestGetEntries_StatusFilter(t *testing.T) {
+	ctx := context.Background()
+
+	r, err := sqlite.NewRepository(":memory:")
+	if err != nil {
+		t.Fatalf("failed to create repo: %v", err)
+	}
+	defer r.Close()
+
+	if err := goose.SetDialect("sqlite3"); err != nil {
+		t.Fatalf("failed to set goose dialect: %v", err)
+	}
+	goose.SetBaseFS(migrations.EmbedFS)
+	if err := goose.Up(r.DB, "sqlite"); err != nil {
+		t.Fatalf("failed to run migrations: %v", err)
+	}
+
+	db, err := r.CreateDatabase(ctx, repo.Database{
+		Name:        "test_status_filter",
+		ContentType: "image",
+	})
+	if err != nil {
+		t.Fatalf("failed to create database: %v", err)
+	}
+
+	statuses := []repo.EntryStatus{
+		repo.EntryStatusQueued,
+		repo.EntryStatusProcessing,
+		repo.EntryStatusReady,
+		repo.EntryStatusError,
+		repo.EntryStatusDeleting,
+	}
+
+	baseTime := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+	for i, st := range statuses {
+		_, err := r.CreateEntry(ctx, db, repo.Entry{
+			FileName:    "test.jpg",
+			MimeType:    "image/jpeg",
+			Size:        1024,
+			Status:      st,
+			Timestamp:   baseTime.Add(time.Duration(i) * time.Minute),
+			MediaFields: map[string]any{"width": 800, "height": 600},
+		})
+		if err != nil {
+			t.Fatalf("failed to create entry with status %v: %v", st, err)
+		}
+	}
+
+	// Filter by Ready and Error only
+	entries, err := r.GetEntries(ctx, db.ID, repo.QueryOptions{
+		Order:    "asc",
+		Statuses: []repo.EntryStatus{repo.EntryStatusReady, repo.EntryStatusError},
+	})
+	if err != nil {
+		t.Fatalf("GetEntries with Statuses filter failed: %v", err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("expected 2 entries (ready and error), got %d", len(entries))
+	}
+	if entries[0].Status != repo.EntryStatusReady || entries[1].Status != repo.EntryStatusError {
+		t.Errorf("expected statuses [ready, error], got [%v, %v]", entries[0].Status, entries[1].Status)
+	}
+}

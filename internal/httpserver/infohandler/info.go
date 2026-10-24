@@ -7,13 +7,11 @@ import (
 	"time"
 
 	"mediahub_oss/internal/httpserver/utils"
-	"mediahub_oss/internal/logging/audit"
 	"mediahub_oss/internal/media"
 )
 
 func NewInfoHandler(
 	logger *slog.Logger,
-	auditor audit.AuditLogger,
 	version string,
 	mc media.MediaConverter,
 	oidcEnabled bool,

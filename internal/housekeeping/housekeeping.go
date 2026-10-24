@@ -170,6 +170,8 @@ func (s *HouseKeeper) RunDBHousekeeping(ctx context.Context, db repository.Datab
 		}
 	}()
 
+	deletableStatuses := []repository.EntryStatus{repository.EntryStatusReady, repository.EntryStatusError}
+
 	// If MaxAge is 0, this check is disabled.
 	if db.Housekeeping.MaxAge > 0 {
 		maxAgeDur := db.Housekeeping.MaxAge
@@ -187,10 +189,11 @@ func (s *HouseKeeper) RunDBHousekeeping(ctx context.Context, db repository.Datab
 		for {
 			// We process in batches of 100 to prevent memory spikes.
 			entries, err := s.Repo.GetEntries(ctx, db.ID, repository.QueryOptions{
-				Limit:  100,
-				Offset: 0,
-				Order:  "asc",
-				TEnd:   cutoff,
+				Limit:    100,
+				Offset:   0,
+				Order:    "asc",
+				TEnd:     cutoff,
+				Statuses: deletableStatuses,
 			})
 			if err != nil {
 				s.Logger.Error("Housekeeper failed to fetch entries for MaxAge", "error", err, "database_id", db.ID, "database_name", db.Name)
@@ -240,9 +243,10 @@ func (s *HouseKeeper) RunDBHousekeeping(ctx context.Context, db repository.Datab
 		for currentSpace > limit {
 			// Fetch the absolute oldest entries in the DB, regardless of age
 			entries, err := s.Repo.GetEntries(ctx, db.ID, repository.QueryOptions{
-				Limit:  100,
-				Offset: 0,
-				Order:  "asc",
+				Limit:    100,
+				Offset:   0,
+				Order:    "asc",
+				Statuses: deletableStatuses,
 			})
 			if err != nil {
 				s.Logger.Error("Housekeeper failed to fetch entries for DiskSpace", "error", err, "database_id", db.ID, "database_name", db.Name)

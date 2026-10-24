@@ -908,8 +908,13 @@ func (h *EntryHandler) ImportEntries(w http.ResponseWriter, r *http.Request) {
 	// Fast Path: Try to move the file directly if it's already on disk
 	moved := false
 	if f, ok := file.(*os.File); ok {
-		if err := os.Rename(f.Name(), tempFilePath); err == nil {
+		srcPath := f.Name()
+		_ = file.Close()
+		if err := os.Rename(srcPath, tempFilePath); err == nil {
 			moved = true
+		} else if reopened, openErr := os.Open(srcPath); openErr == nil {
+			file = reopened
+			defer file.Close()
 		}
 	}
 
