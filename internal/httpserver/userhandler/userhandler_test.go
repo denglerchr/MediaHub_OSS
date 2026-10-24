@@ -45,6 +45,11 @@ func (m *mockUserRepo) UpdateUser(ctx context.Context, u repo.User) (repo.User, 
 	if _, ok := m.users[u.ID]; !ok {
 		return repo.User{}, customerrors.ErrNotFound
 	}
+	for id, existing := range m.users {
+		if id != u.ID && existing.Username == u.Username {
+			return repo.User{}, customerrors.ErrUserExists
+		}
+	}
 	m.users[u.ID] = u
 	return u, nil
 }
@@ -338,5 +343,35 @@ func TestGetUsers_SkipsUserOnPermissionsErrorWithoutZeroValueEntry(t *testing.T)
 	}
 	if users[0].Username != "alice" || users[1].Username != "bob" {
 		t.Errorf("expected [alice, bob], got [%s, %s]", users[0].Username, users[1].Username)
+	}
+}
+
+func TestUpdateUser_DuplicateUsernameReturnsConflict(t *testing.T) {
+	u1ID := repo.ULID("01HGFB9Z5W7ABCDEFGHJKMNPQ1")
+	u2ID := repo.ULID("01HGFB9Z5W7ABCDEFGHJKMNPQ2")
+	mockRepo := &mockUserRepo{
+		users: map[repo.ULID]repo.User{
+			u1ID: {ID: u1ID, Username: "alice", PasswordHash: "hash1"},
+			u2ID: {ID: u2ID, Username: "bob", PasswordHash: "hash2"},
+		},
+	}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	auditor := audit.NewAuditLogger(false, "stdio", logger, mockRepo)
+	handler := userhandler.UserHandler{Logger: logger, Auditor: auditor, Repo: mockRepo}
+
+	payload := userhandler.UpdateUserPayload{
+		Username: "alice",
+	}
+	body, _ := json.Marshal(payload)
+
+	req := httptest.NewRequest(http.MethodPatch, "/api/user/"+string(u2ID), bytes.NewReader(body))
+	req.SetPathValue("user_ulid", string(u2ID))
+	req = req.WithContext(context.WithValue(req.Context(), utils.UserKey, &repo.User{Username: "admin", IsAdmin: true}))
+	rec := httptest.NewRecorder()
+
+	handler.UpdateUser(rec, req)
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("expected status 409 Conflict for duplicate username in UpdateUser, got %d: %s", rec.Code, rec.Body.String())
 	}
 }

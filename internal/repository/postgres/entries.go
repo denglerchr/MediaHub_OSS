@@ -48,7 +48,8 @@ func (r *PostgresRepository) CreateEntry(ctx context.Context, db repo.Database, 
 		insertData["timestamp"] = dbNowExpr
 	}
 
-	if entry.ID > 0 {
+	hasExplicitID := entry.ID > 0
+	if hasExplicitID {
 		insertData["id"] = entry.ID
 	}
 
@@ -86,10 +87,13 @@ func (r *PostgresRepository) CreateEntry(ctx context.Context, db repo.Database, 
 	entry.CreatedAt = time.UnixMilli(createdMillis)
 	entry.UpdatedAt = time.UnixMilli(updatedMillis)
 
-	if entry.ID > 0 {
+	if hasExplicitID {
 		// Synchronize the sequence so subsequent auto-generated IDs don't collide
-		seqQuery := fmt.Sprintf(`SELECT setval(pg_get_serial_sequence('%s', 'id'), (SELECT COALESCE(MAX(id), 1) FROM %s))`, tableName, tableName)
-		if _, err := tx.ExecContext(ctx, seqQuery); err != nil {
+		seqQuery := fmt.Sprintf(
+			`SELECT setval(pg_get_serial_sequence('%s', 'id'), GREATEST((SELECT COALESCE(MAX(id), 1) FROM %s), $1))`,
+			tableName, tableName,
+		)
+		if _, err := tx.ExecContext(ctx, seqQuery, entry.ID); err != nil {
 			return repo.Entry{}, fmt.Errorf("failed to synchronize sequence: %w", err)
 		}
 	}

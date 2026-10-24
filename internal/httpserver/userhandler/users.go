@@ -478,6 +478,14 @@ func (h *UserHandler) UpdateUser(w http.ResponseWriter, r *http.Request) {
 
 	if userChanged {
 		if _, err := h.Repo.UpdateUser(ctx, existingUser); err != nil {
+			if errors.Is(err, customerrors.ErrUserExists) {
+				utils.RespondWithError(w, http.StatusConflict, "Username already exists")
+				return
+			}
+			if errors.Is(err, customerrors.ErrNotFound) {
+				utils.RespondWithError(w, http.StatusNotFound, "User not found")
+				return
+			}
 			h.Logger.Error("Failed to update user record", "error", err, "user_id", userID)
 			utils.RespondWithError(w, http.StatusInternalServerError, "Failed to update user")
 			return

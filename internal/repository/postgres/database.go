@@ -218,6 +218,9 @@ func (r *PostgresRepository) GetDatabases(ctx context.Context) ([]repo.Database,
 
 // UpdateDatabase updates the mutable configuration fields of a database.
 func (r *PostgresRepository) UpdateDatabase(ctx context.Context, db repo.Database) (repo.Database, error) {
+	if !safeNameRegex.MatchString(db.Name) {
+		return repo.Database{}, fmt.Errorf("%w: database name contains invalid characters", customerrors.ErrInvalidName)
+	}
 	if !shared.IsValidULID(db.ID.String()) {
 		return repo.Database{}, fmt.Errorf("%w: invalid database id", customerrors.ErrValidation)
 	}

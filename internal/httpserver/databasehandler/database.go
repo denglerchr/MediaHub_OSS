@@ -236,6 +236,8 @@ func (h *DatabaseHandler) UpdateDatabase(w http.ResponseWriter, r *http.Request)
 	if err != nil {
 		if errors.Is(err, customerrors.ErrDatabaseExists) {
 			utils.RespondWithError(w, http.StatusConflict, "Database name already in use.")
+		} else if errors.Is(err, customerrors.ErrInvalidName) || errors.Is(err, customerrors.ErrValidation) {
+			utils.RespondWithError(w, http.StatusBadRequest, err.Error())
 		} else {
 			utils.RespondWithError(w, http.StatusInternalServerError, fmt.Sprintf("Error updating database: %v", err))
 		}

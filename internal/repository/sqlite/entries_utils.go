@@ -19,6 +19,14 @@ const (
 	colKindCustomCoordLng
 )
 
+type coordAccum struct {
+	name   string
+	lat    float64
+	lng    float64
+	hasLat bool
+	hasLng bool
+}
+
 // entryScanner holds pre-allocated slices and pre-computed field names
 type entryScanner struct {
 	cols           []string
@@ -26,6 +34,8 @@ type entryScanner struct {
 	columnPointers []any
 	cleanNames     []string // Pre-trimmed names for Custom/Media fields
 	colKinds       []colKind
+	coordIdx       []int
+	coords         []coordAccum
 }
 
 // newEntryScanner initializes the scanner once per query result.
@@ -55,6 +65,18 @@ func newEntryScanner(rows *sql.Rows, customFields []repo.CustomFieldDef) (entryS
 		columnPointers: make([]any, size),
 		cleanNames:     make([]string, size),
 		colKinds:       make([]colKind, size),
+		coordIdx:       make([]int, size),
+	}
+
+	coordNameIdx := make(map[string]int)
+	getCoordIdx := func(name string) int {
+		if idx, ok := coordNameIdx[name]; ok {
+			return idx
+		}
+		idx := len(s.coords)
+		s.coords = append(s.coords, coordAccum{name: name})
+		coordNameIdx[name] = idx
+		return idx
 	}
 
 	for i, colName := range cols {
@@ -63,9 +85,11 @@ func newEntryScanner(rows *sql.Rows, customFields []repo.CustomFieldDef) (entryS
 		if name, ok := coordLatMap[colName]; ok {
 			s.colKinds[i] = colKindCustomCoordLat
 			s.cleanNames[i] = name
+			s.coordIdx[i] = getCoordIdx(name)
 		} else if name, ok := coordLngMap[colName]; ok {
 			s.colKinds[i] = colKindCustomCoordLng
 			s.cleanNames[i] = name
+			s.coordIdx[i] = getCoordIdx(name)
 		} else if name, ok := scalarMap[colName]; ok {
 			s.colKinds[i] = colKindCustomScalar
 			s.cleanNames[i] = name
@@ -92,10 +116,10 @@ func (s entryScanner) scan(rows *sql.Rows) (repo.Entry, error) {
 		CustomFields: make(map[string]any),
 	}
 
-	var coordLats map[string]float64
-	var coordLngs map[string]float64
-	var coordHasLat map[string]bool
-	var coordHasLng map[string]bool
+	for i := range s.coords {
+		s.coords[i].hasLat = false
+		s.coords[i].hasLng = false
+	}
 
 	for i, colName := range s.cols {
 		val := s.colVals[i]
@@ -105,19 +129,13 @@ func (s entryScanner) scan(rows *sql.Rows) (repo.Entry, error) {
 
 		switch s.colKinds[i] {
 		case colKindCustomCoordLat:
-			if coordLats == nil {
-				coordLats = make(map[string]float64)
-				coordHasLat = make(map[string]bool)
-			}
-			coordLats[s.cleanNames[i]] = asFloat64(val)
-			coordHasLat[s.cleanNames[i]] = true
+			idx := s.coordIdx[i]
+			s.coords[idx].lat = asFloat64(val)
+			s.coords[idx].hasLat = true
 		case colKindCustomCoordLng:
-			if coordLngs == nil {
-				coordLngs = make(map[string]float64)
-				coordHasLng = make(map[string]bool)
-			}
-			coordLngs[s.cleanNames[i]] = asFloat64(val)
-			coordHasLng[s.cleanNames[i]] = true
+			idx := s.coordIdx[i]
+			s.coords[idx].lng = asFloat64(val)
+			s.coords[idx].hasLng = true
 		case colKindCustomScalar:
 			if b, ok := val.([]byte); ok {
 				val = string(b)
@@ -162,11 +180,11 @@ func (s entryScanner) scan(rows *sql.Rows) (repo.Entry, error) {
 		}
 	}
 
-	for name, hasLat := range coordHasLat {
-		if hasLat && coordHasLng[name] {
-			entry.CustomFields[name] = repo.Coordinate{
-				Latitude:  coordLats[name],
-				Longitude: coordLngs[name],
+	for _, c := range s.coords {
+		if c.hasLat && c.hasLng {
+			entry.CustomFields[c.name] = repo.Coordinate{
+				Latitude:  c.lat,
+				Longitude: c.lng,
 			}
 		}
 	}
@@ -353,7 +371,7 @@ func mapCustomFieldsToSQLiteColumns(
 // isValidOperator checks if the requested SQL operator is whitelisted.
 func isValidOperator(op string) bool {
 	valid := map[string]bool{
-		"=": true, "!=": true, ">": true, ">=": true, "<": true, "<=": true, "LIKE": true,
+		"=": true, "!=": true, ">": true, ">=": true, "<": true, "<=": true, "LIKE": true, "ILIKE": true,
 	}
 	return valid[strings.ToUpper(op)]
 }

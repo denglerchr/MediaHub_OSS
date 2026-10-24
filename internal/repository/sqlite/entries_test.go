@@ -875,3 +875,147 @@ func TestGetEntries_StatusFilter(t *testing.T) {
 		t.Errorf("expected statuses [ready, error], got [%v, %v]", entries[0].Status, entries[1].Status)
 	}
 }
+
+func TestCreateEntry_DuplicateExplicitIDReturnsConflict(t *testing.T) {
+	ctx := context.Background()
+
+	r, err := sqlite.NewRepository(":memory:")
+	if err != nil {
+		t.Fatalf("failed to create repo: %v", err)
+	}
+	defer r.Close()
+
+	if err := goose.SetDialect("sqlite3"); err != nil {
+		t.Fatalf("failed to set goose dialect: %v", err)
+	}
+	goose.SetBaseFS(migrations.EmbedFS)
+	if err := goose.Up(r.DB, "sqlite"); err != nil {
+		t.Fatalf("failed to run migrations: %v", err)
+	}
+
+	db, err := r.CreateDatabase(ctx, repo.Database{
+		Name:        "dup_id_db",
+		ContentType: "image",
+	})
+	if err != nil {
+		t.Fatalf("failed to create database: %v", err)
+	}
+
+	entry := repo.Entry{
+		ID:          42,
+		FileName:    "first.jpg",
+		MimeType:    "image/jpeg",
+		Size:        512,
+		Status:      repo.EntryStatusReady,
+		MediaFields: map[string]any{"width": 100, "height": 100},
+	}
+	if _, err := r.CreateEntry(ctx, db, entry); err != nil {
+		t.Fatalf("failed to create first entry with explicit ID: %v", err)
+	}
+
+	entry.FileName = "second.jpg"
+	_, err = r.CreateEntry(ctx, db, entry)
+	if !errors.Is(err, customerrors.ErrConflict) {
+		t.Fatalf("expected ErrConflict when inserting duplicate explicit ID, got: %v", err)
+	}
+}
+
+func TestUpdateDatabase_ValidationAndDuplicateName(t *testing.T) {
+	ctx := context.Background()
+
+	r, err := sqlite.NewRepository(":memory:")
+	if err != nil {
+		t.Fatalf("failed to create repo: %v", err)
+	}
+	defer r.Close()
+
+	if err := goose.SetDialect("sqlite3"); err != nil {
+		t.Fatalf("failed to set goose dialect: %v", err)
+	}
+	goose.SetBaseFS(migrations.EmbedFS)
+	if err := goose.Up(r.DB, "sqlite"); err != nil {
+		t.Fatalf("failed to run migrations: %v", err)
+	}
+
+	db1, err := r.CreateDatabase(ctx, repo.Database{Name: "db_one", ContentType: "image"})
+	if err != nil {
+		t.Fatalf("failed to create db1: %v", err)
+	}
+	db2, err := r.CreateDatabase(ctx, repo.Database{Name: "db_two", ContentType: "image"})
+	if err != nil {
+		t.Fatalf("failed to create db2: %v", err)
+	}
+
+	// 1. Invalid name rejected with ErrInvalidName
+	db1Invalid := db1
+	db1Invalid.Name = "invalid name!"
+	if _, err := r.UpdateDatabase(ctx, db1Invalid); !errors.Is(err, customerrors.ErrInvalidName) {
+		t.Fatalf("expected ErrInvalidName on UpdateDatabase with invalid name, got: %v", err)
+	}
+
+	// 2. Duplicate name rejected with ErrDatabaseExists
+	db2Dup := db2
+	db2Dup.Name = "db_one"
+	if _, err := r.UpdateDatabase(ctx, db2Dup); !errors.Is(err, customerrors.ErrDatabaseExists) {
+		t.Fatalf("expected ErrDatabaseExists on UpdateDatabase with duplicate name, got: %v", err)
+	}
+}
+
+func TestSearchEntries_ILIKEOperator(t *testing.T) {
+	ctx := context.Background()
+
+	r, err := sqlite.NewRepository(":memory:")
+	if err != nil {
+		t.Fatalf("failed to create repo: %v", err)
+	}
+	defer r.Close()
+
+	if err := goose.SetDialect("sqlite3"); err != nil {
+		t.Fatalf("failed to set goose dialect: %v", err)
+	}
+	goose.SetBaseFS(migrations.EmbedFS)
+	if err := goose.Up(r.DB, "sqlite"); err != nil {
+		t.Fatalf("failed to run migrations: %v", err)
+	}
+
+	db, err := r.CreateDatabase(ctx, repo.Database{
+		Name:        "ilike_test_db",
+		ContentType: "image",
+	})
+	if err != nil {
+		t.Fatalf("failed to create database: %v", err)
+	}
+
+	_, err = r.CreateEntry(ctx, db, repo.Entry{
+		FileName:    "VacationPhoto.JPG",
+		MimeType:    "image/jpeg",
+		Size:        1024,
+		Status:      repo.EntryStatusReady,
+		MediaFields: map[string]any{"width": 800, "height": 600},
+	})
+	if err != nil {
+		t.Fatalf("failed to create entry: %v", err)
+	}
+
+	req := repo.SearchRequest{
+		Filter: &repo.FilterGroup{
+			Operator: "and",
+			Conditions: []repo.Condition{
+				{
+					Field:    "filename",
+					Operator: "ILIKE",
+					Value:    "%vacationphoto%",
+				},
+			},
+		},
+		Pagination: repo.Pagination{Limit: 10},
+	}
+
+	results, err := r.SearchEntries(ctx, db.ID, req, nil)
+	if err != nil {
+		t.Fatalf("SearchEntries with ILIKE failed: %v", err)
+	}
+	if len(results) != 1 || results[0].FileName != "VacationPhoto.JPG" {
+		t.Fatalf("expected 1 matching entry for ILIKE search, got: %+v", results)
+	}
+}

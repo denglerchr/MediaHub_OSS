@@ -160,3 +160,45 @@ func TestSQLite_CreateOIDCUser(t *testing.T) {
 		t.Errorf("expected ErrNotFound, got %v", err)
 	}
 }
+
+func TestSQLite_UpdateUser_DuplicateUsernameReturnsErrUserExists(t *testing.T) {
+	ctx := context.Background()
+
+	r, err := sqlite.NewRepository(":memory:")
+	if err != nil {
+		t.Fatalf("failed to create repo: %v", err)
+	}
+	defer r.Close()
+
+	if err := goose.SetDialect("sqlite3"); err != nil {
+		t.Fatalf("failed to set dialect: %v", err)
+	}
+	goose.SetBaseFS(migrations.EmbedFS)
+	if err := goose.Up(r.DB, "sqlite"); err != nil {
+		t.Fatalf("failed to run migrations: %v", err)
+	}
+
+	u1, err := r.CreateUser(ctx, repo.User{
+		Username:     "user_one",
+		PasswordHash: "hash1",
+		AccountType:  repo.AccountTypeLocal,
+	})
+	if err != nil {
+		t.Fatalf("failed to create u1: %v", err)
+	}
+
+	u2, err := r.CreateUser(ctx, repo.User{
+		Username:     "user_two",
+		PasswordHash: "hash2",
+		AccountType:  repo.AccountTypeLocal,
+	})
+	if err != nil {
+		t.Fatalf("failed to create u2: %v", err)
+	}
+
+	u2.Username = u1.Username
+	_, err = r.UpdateUser(ctx, u2)
+	if !errors.Is(err, customerrors.ErrUserExists) {
+		t.Fatalf("expected ErrUserExists when updating username to an existing one, got: %v", err)
+	}
+}

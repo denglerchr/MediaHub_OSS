@@ -542,4 +542,8 @@ func TestPostgresRepository_InvalidULIDValidation(t *testing.T) {
 	if _, err := r.EnqueueEntry(ctx, validID, repo.Entry{ID: 1}, 0); !errors.Is(err, customerrors.ErrUnavailable) {
 		t.Errorf("expected ErrUnavailable from EnqueueEntry with maxQueued=0, got: %v", err)
 	}
+
+	if _, err := r.UpdateDatabase(ctx, repo.Database{ID: validID, Name: "invalid name!"}); !errors.Is(err, customerrors.ErrInvalidName) {
+		t.Errorf("expected ErrInvalidName from UpdateDatabase with invalid name, got: %v", err)
+	}
 }

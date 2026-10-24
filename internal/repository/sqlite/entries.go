@@ -82,6 +82,9 @@ func (r *SQLiteRepository) CreateEntry(ctx context.Context, db repo.Database, en
 	res, err := tx.ExecContext(ctx, insertQuery, args...)
 	if err != nil {
 		// If entry.ID > 0 and already exists, SQLite throws a UNIQUE constraint failed error right here.
+		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
+			return repo.Entry{}, customerrors.ErrConflict
+		}
 		return repo.Entry{}, fmt.Errorf("failed to insert entry: %w", err)
 	}
 
@@ -782,8 +785,13 @@ func (r *SQLiteRepository) SearchEntries(ctx context.Context, dbID repo.ULID, re
 					return nil, fmt.Errorf("%w: invalid operator '%s'", customerrors.ErrValidation, cond.Operator)
 				}
 
+				sqlOp := strings.ToUpper(cond.Operator)
+				if sqlOp == "ILIKE" {
+					sqlOp = "LIKE"
+				}
+
 				// Safely assemble the SQL condition using squirrel.Expr
-				expr := squirrel.Expr(fmt.Sprintf("%s %s ?", safeField, cond.Operator), cond.Value)
+				expr := squirrel.Expr(fmt.Sprintf("%s %s ?", safeField, sqlOp), cond.Value)
 				if isOr {
 					orExpr = append(orExpr, expr)
 				} else {
