@@ -1,6 +1,7 @@
 package userhandler
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
@@ -198,6 +199,12 @@ func (h *UserHandler) CreateAPIKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	requestedScope := repository.NewAccessGrant(payload.ScopeView, payload.ScopeCreate, payload.ScopeEdit, payload.ScopeDelete, payload.ScopeAdmin)
+	if status, msg := authorizeAPIKeyAction(ctx, &requestedScope, "create"); status != 0 {
+		utils.RespondWithError(w, status, msg)
+		return
+	}
+
 	if payload.Name == "" {
 		utils.RespondWithError(w, http.StatusBadRequest, "Name is required")
 		return
@@ -229,7 +236,7 @@ func (h *UserHandler) CreateAPIKey(w http.ResponseWriter, r *http.Request) {
 		Name:      payload.Name,
 		KeyHash:   keyHash,
 		KeyHint:   keyHint,
-		Scope:     repository.NewAccessGrant(payload.ScopeView, payload.ScopeCreate, payload.ScopeEdit, payload.ScopeDelete, payload.ScopeAdmin),
+		Scope:     requestedScope,
 		CreatedAt: time.Now(),
 		ExpiresAt: expiresAt,
 	}
@@ -408,31 +415,16 @@ func (h *UserHandler) UpdateAPIKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	newScope := applyAPIKeyScopeUpdates(key.Scope, payload)
+	if status, msg := authorizeAPIKeyAction(ctx, &newScope, "update"); status != 0 {
+		utils.RespondWithError(w, status, msg)
+		return
+	}
+
 	if payload.Name != nil {
 		key.Name = *payload.Name
 	}
-	canView := key.Scope.HasAccess(repository.AccessView)
-	canCreate := key.Scope.HasAccess(repository.AccessCreate)
-	canEdit := key.Scope.HasAccess(repository.AccessEdit)
-	canDelete := key.Scope.HasAccess(repository.AccessDelete)
-	canAdmin := key.Scope.HasAccess(repository.AccessAdmin)
-
-	if payload.ScopeView != nil {
-		canView = *payload.ScopeView
-	}
-	if payload.ScopeCreate != nil {
-		canCreate = *payload.ScopeCreate
-	}
-	if payload.ScopeEdit != nil {
-		canEdit = *payload.ScopeEdit
-	}
-	if payload.ScopeDelete != nil {
-		canDelete = *payload.ScopeDelete
-	}
-	if payload.ScopeAdmin != nil {
-		canAdmin = *payload.ScopeAdmin
-	}
-	key.Scope = repository.NewAccessGrant(canView, canCreate, canEdit, canDelete, canAdmin)
+	key.Scope = newScope
 
 	// Detect if expires_at was explicitly sent (even if null)
 	var rawMap map[string]any
@@ -484,6 +476,10 @@ func (h *UserHandler) UpdateAPIKey(w http.ResponseWriter, r *http.Request) {
 // @Router       /user/{user_ulid}/keys/{key_ulid} [delete]
 func (h *UserHandler) DeleteAPIKey(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
+	if status, msg := authorizeAPIKeyAction(ctx, nil, "delete"); status != 0 {
+		utils.RespondWithError(w, status, msg)
+		return
+	}
 	userIDStr := r.PathValue("user_ulid")
 	keyIDStr := r.PathValue("key_ulid")
 
@@ -520,4 +516,48 @@ func (h *UserHandler) DeleteAPIKey(w http.ResponseWriter, r *http.Request) {
 	utils.RespondWithJSON(w, http.StatusOK, utils.MessageResponse{
 		Message: fmt.Sprintf("API key '%s' (ID: %s) was successfully deleted.", key.Name, key.ID),
 	})
+}
+
+func authorizeAPIKeyAction(ctx context.Context, targetScope *repository.AccessGrant, action string) (int, string) {
+	holder := utils.GetPermissionHolderFromContext(ctx)
+
+	if targetScope != nil && targetScope.HasAccess(repository.AccessAdmin) && !holder.IsGlobalAdmin() {
+		return http.StatusForbidden, "Forbidden: Cannot grant admin scope without admin privileges"
+	}
+
+	if _, isAPIKey := utils.GetAPIKeyFromContext(ctx); isAPIKey {
+		if !holder.HasGlobalScope(repository.AccessAdmin) {
+			return http.StatusForbidden, fmt.Sprintf("Forbidden: API key requires admin scope to %s API keys", action)
+		}
+		if targetScope != nil && (*targetScope&^holder.EffectiveScope()) != 0 {
+			return http.StatusForbidden, "Forbidden: Cannot grant scopes exceeding the API key's own permissions"
+		}
+	}
+
+	return 0, ""
+}
+
+func applyAPIKeyScopeUpdates(current repository.AccessGrant, payload UpdateAPIKeyPayload) repository.AccessGrant {
+	canView := current.HasAccess(repository.AccessView)
+	canCreate := current.HasAccess(repository.AccessCreate)
+	canEdit := current.HasAccess(repository.AccessEdit)
+	canDelete := current.HasAccess(repository.AccessDelete)
+	canAdmin := current.HasAccess(repository.AccessAdmin)
+
+	if payload.ScopeView != nil {
+		canView = *payload.ScopeView
+	}
+	if payload.ScopeCreate != nil {
+		canCreate = *payload.ScopeCreate
+	}
+	if payload.ScopeEdit != nil {
+		canEdit = *payload.ScopeEdit
+	}
+	if payload.ScopeDelete != nil {
+		canDelete = *payload.ScopeDelete
+	}
+	if payload.ScopeAdmin != nil {
+		canAdmin = *payload.ScopeAdmin
+	}
+	return repository.NewAccessGrant(canView, canCreate, canEdit, canDelete, canAdmin)
 }

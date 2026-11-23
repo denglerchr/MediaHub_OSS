@@ -9,11 +9,14 @@ import (
 
 	"mediahub_oss/internal/housekeeping"
 	repo "mediahub_oss/internal/repository"
+	"mediahub_oss/internal/shared/customerrors"
 	"mediahub_oss/internal/storage"
 )
 
 type mockHousekeepingRepo struct {
 	repo.Repository
+	getDatabaseFunc           func(ctx context.Context, dbID repo.ULID) (repo.Database, error)
+	getDatabaseStatsFunc      func(ctx context.Context, dbID repo.ULID) (repo.DatabaseStats, error)
 	getEntriesFunc            func(ctx context.Context, dbID repo.ULID, opts repo.QueryOptions) ([]repo.Entry, error)
 	updateEntriesStatusFunc   func(ctx context.Context, dbID repo.ULID, ids []int64, status repo.EntryStatus) error
 	deleteEntriesFunc         func(ctx context.Context, dbID repo.ULID, ids []int64) ([]repo.DeletedEntryMeta, error)
@@ -21,6 +24,20 @@ type mockHousekeepingRepo struct {
 	acquireLockFunc           func(ctx context.Context, lockName string, ownerID string, ttl time.Duration) (bool, error)
 	releaseLockFunc           func(ctx context.Context, lockName string, ownerID string) (bool, error)
 	houseKeepingWasCalledFunc func(ctx context.Context, dbID repo.ULID) (time.Time, error)
+}
+
+func (m *mockHousekeepingRepo) GetDatabase(ctx context.Context, dbID repo.ULID) (repo.Database, error) {
+	if m.getDatabaseFunc != nil {
+		return m.getDatabaseFunc(ctx, dbID)
+	}
+	return repo.Database{}, customerrors.ErrNotFound
+}
+
+func (m *mockHousekeepingRepo) GetDatabaseStats(ctx context.Context, dbID repo.ULID) (repo.DatabaseStats, error) {
+	if m.getDatabaseStatsFunc != nil {
+		return m.getDatabaseStatsFunc(ctx, dbID)
+	}
+	return repo.DatabaseStats{}, customerrors.ErrNotFound
 }
 
 func (m *mockHousekeepingRepo) GetEntries(ctx context.Context, dbID repo.ULID, opts repo.QueryOptions) ([]repo.Entry, error) {
@@ -258,5 +275,59 @@ func TestRunDBHousekeeping_FiltersDeletableStatusesInSQL(t *testing.T) {
 			opts.Statuses[1] != expectedStatuses[1] {
 			t.Errorf("call %d: expected Statuses=%v, got %v", i, expectedStatuses, opts.Statuses)
 		}
+	}
+}
+
+func TestRunDBHousekeeping_FreshStatsReFetchAvoidsStaleRun(t *testing.T) {
+	ctx := context.Background()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	getEntriesCalled := false
+	mockRepo := &mockHousekeepingRepo{
+		getDatabaseFunc: func(ctx context.Context, dbID repo.ULID) (repo.Database, error) {
+			// Return fresh stats indicating disk space is already below the limit
+			return repo.Database{
+				ID:   dbID,
+				Name: "test_db",
+				Stats: repo.DatabaseStats{
+					TotalDiskSpaceBytes: 2000, // Below limit of 5000
+				},
+			}, nil
+		},
+		getDatabaseStatsFunc: func(ctx context.Context, dbID repo.ULID) (repo.DatabaseStats, error) {
+			return repo.DatabaseStats{
+				TotalDiskSpaceBytes: 2000,
+			}, nil
+		},
+		getEntriesFunc: func(ctx context.Context, dbID repo.ULID, opts repo.QueryOptions) ([]repo.Entry, error) {
+			getEntriesCalled = true
+			return nil, nil
+		},
+	}
+
+	mockStorage := &mockStorageProvider{}
+	hk := housekeeping.NewHouseKeeper(mockRepo, mockStorage, logger, 24*time.Hour)
+
+	// Pre-lock stale db snapshot has 10000 bytes (exceeding limit of 5000)
+	staleDB := repo.Database{
+		ID:   "01HGFB9Z5W7ABCDEFGHJKMNPQR",
+		Name: "test_db",
+		Housekeeping: repo.DatabaseHK{
+			DiskSpace: 5000,
+		},
+		Stats: repo.DatabaseStats{
+			TotalDiskSpaceBytes: 10000,
+		},
+	}
+
+	delCount, freed, err := hk.RunDBHousekeeping(ctx, staleDB)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if delCount != 0 || freed != 0 {
+		t.Errorf("expected 0 deletions, got %d del, %d freed", delCount, freed)
+	}
+	if getEntriesCalled {
+		t.Errorf("expected GetEntries not to be called because fresh stats are below limit")
 	}
 }

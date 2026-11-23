@@ -233,11 +233,7 @@ func (s *HouseKeeper) RunDBHousekeeping(ctx context.Context, db repository.Datab
 
 	// If DiskSpace is 0, this check is disabled.
 	if db.Housekeeping.DiskSpace > 0 {
-		// Calculate current space using the initial stats minus what we just freed, guarded against underflow
-		var currentSpace uint64 = 0
-		if db.Stats.TotalDiskSpaceBytes > totalFreed {
-			currentSpace = db.Stats.TotalDiskSpaceBytes - totalFreed
-		}
+		currentSpace := s.resolveCurrentDiskSpace(ctx, db, totalFreed)
 		limit := db.Housekeeping.DiskSpace
 
 		for currentSpace > limit {
@@ -312,6 +308,19 @@ func (s *HouseKeeper) RunDBHousekeeping(ctx context.Context, db repository.Datab
 
 	s.Logger.Info("Housekeeping completed", "database_id", db.ID.String(), "database_name", db.Name, "deleted", totalDeleted, "freed_bytes", totalFreed)
 	return totalDeleted, totalFreed, runErr
+}
+
+func (s *HouseKeeper) resolveCurrentDiskSpace(ctx context.Context, db repository.Database, totalFreed uint64) uint64 {
+	if freshStats, err := s.Repo.GetDatabaseStats(ctx, db.ID); err == nil {
+		return freshStats.TotalDiskSpaceBytes
+	}
+	if freshDB, err := s.Repo.GetDatabase(ctx, db.ID); err == nil {
+		return freshDB.Stats.TotalDiskSpaceBytes
+	}
+	if db.Stats.TotalDiskSpaceBytes > totalFreed {
+		return db.Stats.TotalDiskSpaceBytes - totalFreed
+	}
+	return 0
 }
 
 // filterDeletableEntries returns only the entries housekeeping may delete:

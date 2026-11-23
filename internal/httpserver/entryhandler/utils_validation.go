@@ -3,8 +3,8 @@ package entryhandler
 import (
 	"encoding/json"
 	"fmt"
-	"math"
 	"mediahub_oss/internal/repository"
+	"mediahub_oss/internal/shared"
 	"mediahub_oss/internal/shared/customerrors"
 )
 
@@ -13,7 +13,7 @@ import (
 func parseUploadMetadata(metadataStr string) (PostPatchEntryRequest, error) {
 	var entry = PostPatchEntryRequest{
 		FileName:  "",
-		Timestamp: math.MinInt64, // default, indicates missing timestamp
+		Timestamp: shared.MissingTimestamp, // default, indicates missing timestamp
 	}
 
 	// Parse Metadata
@@ -45,6 +45,10 @@ func validateCustomFields(provided map[string]any, defined []repository.CustomFi
 			return fmt.Errorf("unknown custom field provided: '%s'", key)
 		}
 
+		if val == nil {
+			continue
+		}
+
 		// Check if the type matches
 		switch fieldType {
 		case repository.CustomFieldTypeText:
@@ -71,9 +75,6 @@ func validateCustomFields(provided map[string]any, defined []repository.CustomFi
 				return fmt.Errorf("custom field '%s' must be a boolean", key)
 			}
 		case repository.CustomFieldTypeCoordinate:
-			if val == nil {
-				continue
-			}
 			coord, err := repository.ParseCoordinate(val)
 			if err != nil {
 				return fmt.Errorf("custom field '%s' must be a valid coordinate: %w", key, err)

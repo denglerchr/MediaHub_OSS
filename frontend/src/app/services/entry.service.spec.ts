@@ -272,4 +272,96 @@ describe('EntryService — FE-013 poll termination', () => {
       expect(last?.filename).toBe('other.mp3');
     });
   });
+
+  describe('202 async upload timestamp preservation', () => {
+    it('preserves pre-1970 timestamps (< 0) on 202 async uploads', fakeAsync(() => {
+      const pre1970 = Date.UTC(1950, 0, 1, 12, 0, 0);
+      const created: Entry[] = [];
+      service.entryCreated$.subscribe((e) => created.push(e));
+
+      service
+        .uploadEntry(
+          'db1',
+          { timestamp: pre1970, filename: 'vintage.mp4', custom_fields: {} },
+          new File(['x'], 'vintage.mp4', { type: 'video/mp4' }),
+          { silentSuccess: true },
+        )
+        .subscribe();
+
+      httpMock.expectOne('/api/database/db1/entry').flush(
+        {
+          id: 101,
+          timestamp: pre1970,
+          created_at: pre1970,
+          updated_at: pre1970,
+          database_id: 'db1',
+          status: 'processing',
+        },
+        { status: 202, statusText: 'Accepted' },
+      );
+
+      expect(created.length).toBe(1);
+      expect(created[0].timestamp).toBe(pre1970);
+      expect(created[0].created_at).toBe(pre1970);
+      expect(created[0].updated_at).toBe(pre1970);
+
+      currentUser$.next(null);
+    }));
+
+    it('preserves exact Unix epoch (0) timestamps on 202 async uploads without falling back to Date.now()', fakeAsync(() => {
+      const created: Entry[] = [];
+      service.entryCreated$.subscribe((e) => created.push(e));
+
+      service
+        .uploadEntry(
+          'db1',
+          { timestamp: 0, filename: 'epoch-a.mp4', custom_fields: {} },
+          new File(['x'], 'epoch-a.mp4', { type: 'video/mp4' }),
+          { silentSuccess: true },
+        )
+        .subscribe();
+
+      httpMock.expectOne('/api/database/db1/entry').flush(
+        {
+          id: 102,
+          timestamp: 0,
+          created_at: 0,
+          updated_at: 0,
+          database_id: 'db1',
+          status: 'queued',
+        },
+        { status: 202, statusText: 'Accepted' },
+      );
+
+      // Also verify fallback from missing partialEntry.timestamp to metadata.timestamp === 0
+      service
+        .uploadEntry(
+          'db1',
+          { timestamp: 0, filename: 'epoch-b.mp4', custom_fields: {} },
+          new File(['x'], 'epoch-b.mp4', { type: 'video/mp4' }),
+          { silentSuccess: true },
+        )
+        .subscribe();
+
+      httpMock.expectOne('/api/database/db1/entry').flush(
+        {
+          id: 103,
+          created_at: 0,
+          updated_at: 0,
+          database_id: 'db1',
+          status: 'processing',
+        },
+        { status: 202, statusText: 'Accepted' },
+      );
+
+      expect(created.length).toBe(2);
+      for (const entry of created) {
+        expect(entry.timestamp).toBe(0);
+        expect(entry.created_at).toBe(0);
+        expect(entry.updated_at).toBe(0);
+      }
+
+      currentUser$.next(null);
+    }));
+  });
 });

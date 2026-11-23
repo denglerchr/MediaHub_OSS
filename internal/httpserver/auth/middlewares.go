@@ -82,6 +82,7 @@ func (am *AuthMiddleware) AuthMiddleware(next http.Handler) http.Handler {
 		isAPIKey := !apiKey.CreatedAt.IsZero()
 		if isAPIKey {
 			am.asyncUpdateAPIKeyLastUsed(apiKey.ID) // Now uses the worker channel
+			ctx = context.WithValue(ctx, utils.APIKeyKey, &apiKey)
 		}
 
 		ctx = am.cacheUserPermissions(ctx, user, apiKey, isAPIKey)
@@ -149,7 +150,14 @@ func (am *AuthMiddleware) cacheUserPermissions(ctx context.Context, user reposit
 	}
 
 	if isEffectiveAdmin {
+		var scope repository.AccessGrant
+		if isAPIKey {
+			scope = apiKey.Scope
+		} else {
+			scope = repository.NewAccessGrant(true, true, true, true, true)
+		}
 		holder = &utils.GlobalAdmin{
+			Scope:    scope,
 			UserULID: user.ID,
 		}
 		return context.WithValue(ctx, utils.PermissionHolderKey, holder)
@@ -228,6 +236,17 @@ func (am *AuthMiddleware) RequireSelfOrAdmin() func(http.Handler) http.Handler {
 			if holder.IsGlobalAdmin() {
 				next.ServeHTTP(w, r)
 				return
+			}
+
+			// If caller authenticated via an API key and is not a global admin,
+			// it must at least have AccessAdmin scope to manage keys.
+			_, isAPIKeyHolder := holder.(*utils.APIKeyOfAdmin)
+			_, isAPIKeyCtx := utils.GetAPIKeyFromContext(r.Context())
+			if isAPIKeyHolder || isAPIKeyCtx {
+				if !holder.HasGlobalScope(repository.AccessAdmin) {
+					utils.RespondWithError(w, http.StatusForbidden, "Forbidden: API key requires admin scope to manage API keys")
+					return
+				}
 			}
 
 			userULID := r.PathValue("user_ulid")

@@ -338,10 +338,15 @@ func (p *Processor) generatePreviewInBackground(db repo.Database, entry repo.Ent
 		p.Logger.Error("Background preview generation failed", "entry", entry.ID, "error", err)
 	}
 
+	if currentEntry, getErr := p.Repo.GetEntry(ctx, db.ID, entry.ID); getErr == nil {
+		entry.FileName = currentEntry.FileName
+	}
+
 	entry.Status = repo.EntryStatusReady
 	entry.PreviewSize = previewSize
 	if _, err := p.Repo.UpdateEntry(ctx, db.ID, entry); err != nil {
 		p.Logger.Error("Failed to update status to ready after background preview", "entry", entry.ID, "error", err)
+		_ = p.Storage.DeletePreview(ctx, db.ID.String(), entry.ID)
 	}
 }
 

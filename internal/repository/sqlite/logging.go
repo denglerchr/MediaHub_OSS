@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"mediahub_oss/internal/repository"
+	"mediahub_oss/internal/shared"
 
 	"github.com/Masterminds/squirrel"
 )
@@ -98,7 +99,7 @@ func (r *SQLiteRepository) GetLogs(ctx context.Context, opts repository.QueryOpt
 			return nil, fmt.Errorf("failed to scan audit log row: %w", err)
 		}
 
-		if logTimestamp > 0 {
+		if logTimestamp != shared.MissingTimestamp {
 			log.Timestamp = time.UnixMilli(logTimestamp)
 		}
 

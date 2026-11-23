@@ -60,6 +60,13 @@ func EnsureAdminUser(ctx context.Context, repo repository.Repository, logger *sl
 
 		_, err = repo.CreateUser(ctx, newUser)
 		if err != nil {
+			if errors.Is(err, customerrors.ErrUserExists) {
+				// Multi-pod startup race: another instance created the admin user concurrently
+				if _, fetchErr := repo.GetUserByUsername(ctx, adminUsername); fetchErr == nil {
+					logger.Info("Admin user was created concurrently by another instance.")
+					return nil
+				}
+			}
 			return fmt.Errorf("failed to create admin user: %w", err)
 		}
 

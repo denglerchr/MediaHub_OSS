@@ -15,6 +15,10 @@ import (
 // re-scans the databases for queued entries.
 const queueMonitorInterval = 15 * time.Second
 
+// dispatchBatchSize is the minimum batch size fetched per database query when
+// scanning for queued entries.
+const dispatchBatchSize = 50
+
 // StartQueueMonitor periodically checks for queued entries across all databases
 // and spawns background workers if concurrency limits allow.
 // It runs an initial check at startup and continues on a fixed interval until
@@ -139,13 +143,39 @@ func (p *Processor) runDispatchPass(ctx context.Context) bool {
 			break
 		}
 
-		entries, err := p.Repo.GetEntriesByStatus(ctx, dbID, repo.EntryStatusQueued, uint64(remaining))
+		dbSpawned, aborted := p.dispatchDatabaseQueue(ctx, dbID, remaining)
+		spawned += dbSpawned
+		remaining -= dbSpawned
+		if aborted {
+			return false
+		}
+	}
+
+	return spawned > 0 && remaining > 0
+}
+
+func (p *Processor) dispatchDatabaseQueue(ctx context.Context, dbID repo.ULID, remaining int) (spawned int, aborted bool) {
+	var lastID int64
+	for remaining > 0 && ctx.Err() == nil {
+		limit := max(dispatchBatchSize, remaining)
+
+		entries, err := p.Repo.GetEntries(ctx, dbID, repo.QueryOptions{
+			Statuses: []repo.EntryStatus{repo.EntryStatusQueued},
+			SortBy:   "id",
+			Order:    "asc",
+			Limit:    limit,
+			AfterID:  lastID,
+		})
 		if err != nil {
 			p.Logger.Error("Queue dispatch: Failed to get queued entries", "database_id", dbID.String(), "error", err)
-			continue
+			return spawned, false
+		}
+		if len(entries) == 0 {
+			return spawned, false
 		}
 
 		for _, entry := range entries {
+			lastID = entry.ID
 			if remaining <= 0 || ctx.Err() != nil {
 				break
 			}
@@ -154,15 +184,19 @@ func (p *Processor) runDispatchPass(ctx context.Context) bool {
 				spawned++
 				remaining--
 			case claimLost:
-				// Another node claimed the entry; try the next candidate.
+				// Another node claimed the entry or retry backoff deferred it;
+				// try the next candidate.
 			case claimAborted:
 				// No capacity left or a fatal claim error; stop this pass.
-				return false
+				return spawned, true
 			}
 		}
-	}
 
-	return spawned > 0 && remaining > 0
+		if len(entries) < limit {
+			return spawned, false
+		}
+	}
+	return spawned, false
 }
 
 // tryClaimAndSpawn reserves an async slot, atomically claims the queued entry via
@@ -282,6 +316,8 @@ func (p *Processor) failProcessedEntry(ctx context.Context, dbID repo.ULID, entr
 	entry.Status = repo.EntryStatusError
 	p.retries.clearClaimRetry(dbID, entry.ID)
 	if _, err := p.Repo.UpdateEntry(ctx, dbID, entry); err != nil {
-		p.Logger.Error("Worker: CRITICAL: Failed to set status error", "entry", entry.ID, "error", err)
+		if !errors.Is(err, customerrors.ErrNotFound) {
+			p.Logger.Error("Worker: CRITICAL: Failed to set status error", "entry", entry.ID, "error", err)
+		}
 	}
 }

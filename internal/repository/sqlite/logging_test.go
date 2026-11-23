@@ -9,6 +9,7 @@ import (
 	"mediahub_oss/internal/repository/migrations"
 	_ "mediahub_oss/internal/repository/migrations/sqlite"
 	"mediahub_oss/internal/repository/sqlite"
+	"mediahub_oss/internal/shared"
 
 	"github.com/pressly/goose/v3"
 )
@@ -72,6 +73,30 @@ func TestGetLogs_TimeFilterEpochAndHistorical(t *testing.T) {
 		t.Fatalf("expected 2 logs for range [1940, 1970], got %d", len(logs))
 	}
 
+	byMsg := make(map[string]repo.AuditLog, len(logs))
+	for _, logEntry := range logs {
+		if logEntry.Timestamp.IsZero() || logEntry.Timestamp.Year() == 1 {
+			t.Fatalf("expected non-Year-1 timestamp for log %v, got %v", logEntry.Details, logEntry.Timestamp)
+		}
+		if msg, ok := logEntry.Details["msg"].(string); ok {
+			byMsg[msg] = logEntry
+		}
+	}
+	log1950, ok := byMsg["historical 1950 log"]
+	if !ok {
+		t.Fatalf("expected historical 1950 log in range [1940, 1970], got %v", logs)
+	}
+	if !log1950.Timestamp.Equal(t1950) {
+		t.Errorf("expected 1950 log timestamp %v, got %v", t1950, log1950.Timestamp)
+	}
+	log1970, ok := byMsg["epoch 1970 log"]
+	if !ok {
+		t.Fatalf("expected epoch 1970 log in range [1940, 1970], got %v", logs)
+	}
+	if !log1970.Timestamp.Equal(t1970) {
+		t.Errorf("expected 1970 log timestamp %v, got %v", t1970, log1970.Timestamp)
+	}
+
 	// 2. Filter with exact epoch timestamp TStart = 1970, TEnd = 1970 -> Should return only 1970 log
 	logsEpoch, err := r.GetLogs(ctx, repo.QueryOptions{
 		TStart: t1970,
@@ -82,6 +107,36 @@ func TestGetLogs_TimeFilterEpochAndHistorical(t *testing.T) {
 	}
 	if len(logsEpoch) != 1 || logsEpoch[0].Details["msg"] != "epoch 1970 log" {
 		t.Fatalf("expected only epoch 1970 log, got %v", logsEpoch)
+	}
+	if logsEpoch[0].Timestamp.IsZero() || logsEpoch[0].Timestamp.Year() == 1 {
+		t.Fatalf("expected non-Year-1 timestamp for epoch log, got %v", logsEpoch[0].Timestamp)
+	}
+	if !logsEpoch[0].Timestamp.Equal(t1970) {
+		t.Errorf("expected epoch log timestamp %v, got %v", t1970, logsEpoch[0].Timestamp)
+	}
+
+	// 3. Log row stored with shared.MissingTimestamp sentinel scans as zero time.Time{}
+	if _, err := r.DB.ExecContext(ctx,
+		`INSERT INTO audit_logs (timestamp, action, actor, resource, details) VALUES (?, ?, ?, ?, ?)`,
+		shared.MissingTimestamp, "CREATE", "admin", "db1", `{"msg":"missing sentinel log"}`,
+	); err != nil {
+		t.Fatalf("failed to insert MissingTimestamp log: %v", err)
+	}
+	allLogs, err := r.GetLogs(ctx, repo.QueryOptions{Order: "asc"})
+	if err != nil {
+		t.Fatalf("GetLogs (all) failed: %v", err)
+	}
+	var foundSentinel bool
+	for _, entry := range allLogs {
+		if entry.Details["msg"] == "missing sentinel log" {
+			foundSentinel = true
+			if !entry.Timestamp.IsZero() {
+				t.Errorf("expected IsZero() == true for MissingTimestamp log, got %v", entry.Timestamp)
+			}
+		}
+	}
+	if !foundSentinel {
+		t.Fatalf("expected missing sentinel log in GetLogs output")
 	}
 }
 

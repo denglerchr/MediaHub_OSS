@@ -255,9 +255,9 @@ export class EntryService {
               const status = partialEntry.status === 'queued' ? 'queued' : 'processing';
               const entry: Entry = {
                 id: partialEntry.id,
-                timestamp: metadata.timestamp || Date.now(),
-                created_at: partialEntry.created_at || Date.now(),
-                updated_at: partialEntry.updated_at || Date.now(),
+                timestamp: partialEntry.timestamp ?? metadata.timestamp ?? Date.now(),
+                created_at: partialEntry.created_at ?? Date.now(),
+                updated_at: partialEntry.updated_at ?? Date.now(),
                 database_id: dbId,
                 filename: file.name,
                 filesize: file.size,

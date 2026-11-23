@@ -16,10 +16,14 @@ type QueryOptions struct {
 	TStart    time.Time
 	TEnd      time.Time
 	Statuses  []EntryStatus // Optional status filter (e.g. ready, error)
+	AfterID   int64         // Filter entries with id > AfterID
 }
 
 // Validate checks query options, assigns defaults for missing values, and returns an error if any parameter is invalid.
 func (o *QueryOptions) Validate() error {
+	if o.AfterID < 0 {
+		o.AfterID = 0
+	}
 	if o.Limit <= 0 {
 		o.Limit = 30
 	}

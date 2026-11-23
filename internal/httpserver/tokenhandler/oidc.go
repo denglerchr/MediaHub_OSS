@@ -355,81 +355,102 @@ func (p *HTTPOIDCProvider) ExchangeCode(ctx context.Context, code, redirectURI, 
 		return nil, fmt.Errorf("idp error (%d): %s", resp.StatusCode, msg)
 	}
 
-	claims := &OIDCClaims{}
+	// Per OIDC Core 1.0 section 3.1.3.3, code exchange MUST return an id_token
+	if tokenRes.IDToken == "" {
+		return nil, errors.New("missing id_token in token response")
+	}
 
-	// Parse and cryptographically verify ID token if present
-	if tokenRes.IDToken != "" {
-		parsedToken, err := jwt.Parse(tokenRes.IDToken, func(token *jwt.Token) (any, error) {
-			kid, _ := token.Header["kid"].(string)
-			return p.getJWKSPublicKey(ctx, endpoints.JWKSURI, kid)
-		}, jwt.WithAudience(p.Config.ClientID))
-
-		if err != nil || !parsedToken.Valid {
-			return nil, fmt.Errorf("invalid id_token signature or claims: %w", err)
-		}
-
-		if mapClaims, ok := parsedToken.Claims.(jwt.MapClaims); ok {
-			iss, _ := mapClaims["iss"].(string)
-			expectedIssuer := strings.TrimRight(endpoints.Issuer, "/")
-			tokenIssuer := strings.TrimRight(iss, "/")
-			configIssuer := strings.TrimRight(p.Config.IssuerURL, "/")
-			if tokenIssuer == "" || (tokenIssuer != expectedIssuer && tokenIssuer != configIssuer) {
-				return nil, fmt.Errorf("invalid id_token issuer '%s': expected '%s'", iss, endpoints.Issuer)
-			}
-			claims.Issuer = iss
-
-			if sub, ok := mapClaims["sub"].(string); ok {
-				claims.Subject = sub
-			}
-			if pref, ok := mapClaims["preferred_username"].(string); ok {
-				claims.PreferredUsername = pref
-			}
-			if em, ok := mapClaims["email"].(string); ok {
-				claims.Email = em
-			}
-		}
+	claims, err := p.verifyIDToken(ctx, tokenRes.IDToken, endpoints)
+	if err != nil {
+		return nil, err
 	}
 
 	// If preferred_username or email are missing, call userinfo endpoint
-	if (claims.PreferredUsername == "" || claims.Email == "" || claims.Subject == "") && tokenRes.AccessToken != "" && endpoints.UserinfoEndpoint != "" {
-		uiReq, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoints.UserinfoEndpoint, nil)
-		if err == nil {
-			uiReq.Header.Set("Authorization", "Bearer "+tokenRes.AccessToken)
-			uiResp, err := p.HTTPClient.Do(uiReq)
-			if err == nil && uiResp.StatusCode == http.StatusOK {
-				defer uiResp.Body.Close()
-				var uiMap map[string]any
-				if err := json.NewDecoder(uiResp.Body).Decode(&uiMap); err == nil {
-					if claims.Subject == "" {
-						if sub, ok := uiMap["sub"].(string); ok {
-							claims.Subject = sub
-						}
-					}
-					if claims.PreferredUsername == "" {
-						if pref, ok := uiMap["preferred_username"].(string); ok {
-							claims.PreferredUsername = pref
-						}
-					}
-					if claims.Email == "" {
-						if em, ok := uiMap["email"].(string); ok {
-							claims.Email = em
-						}
-					}
-				}
-			} else if uiResp != nil {
-				uiResp.Body.Close()
-			}
+	if (claims.PreferredUsername == "" || claims.Email == "") && tokenRes.AccessToken != "" && endpoints.UserinfoEndpoint != "" {
+		if err := p.enrichClaimsFromUserinfo(ctx, tokenRes.AccessToken, endpoints.UserinfoEndpoint, claims); err != nil {
+			return nil, err
 		}
 	}
 
-	if claims.Issuer == "" {
-		claims.Issuer = p.Config.IssuerURL
-	}
-	if claims.Subject == "" {
-		return nil, errors.New("missing 'sub' claim in OIDC token")
+	return claims, nil
+}
+
+func (p *HTTPOIDCProvider) verifyIDToken(ctx context.Context, idToken string, endpoints openIDConfiguration) (*OIDCClaims, error) {
+	parsedToken, err := jwt.Parse(idToken, func(token *jwt.Token) (any, error) {
+		kid, _ := token.Header["kid"].(string)
+		return p.getJWKSPublicKey(ctx, endpoints.JWKSURI, kid)
+	}, jwt.WithAudience(p.Config.ClientID), jwt.WithExpirationRequired())
+	if err != nil || !parsedToken.Valid {
+		return nil, fmt.Errorf("invalid id_token signature or claims: %w", err)
 	}
 
+	mapClaims, ok := parsedToken.Claims.(jwt.MapClaims)
+	if !ok {
+		return nil, errors.New("unexpected id_token claims type")
+	}
+
+	iss, _ := mapClaims["iss"].(string)
+	expectedIssuer := strings.TrimRight(endpoints.Issuer, "/")
+	tokenIssuer := strings.TrimRight(iss, "/")
+	configIssuer := strings.TrimRight(p.Config.IssuerURL, "/")
+	if tokenIssuer == "" || (tokenIssuer != expectedIssuer && tokenIssuer != configIssuer) {
+		return nil, fmt.Errorf("invalid id_token issuer '%s': expected '%s'", iss, endpoints.Issuer)
+	}
+
+	sub, _ := mapClaims["sub"].(string)
+	if sub == "" {
+		return nil, errors.New("missing 'sub' claim in id_token")
+	}
+
+	claims := &OIDCClaims{
+		Issuer:  iss,
+		Subject: sub,
+	}
+	if pref, ok := mapClaims["preferred_username"].(string); ok {
+		claims.PreferredUsername = pref
+	}
+	if em, ok := mapClaims["email"].(string); ok {
+		claims.Email = em
+	}
 	return claims, nil
+}
+
+func (p *HTTPOIDCProvider) enrichClaimsFromUserinfo(ctx context.Context, accessToken string, userinfoURL string, claims *OIDCClaims) error {
+	uiReq, err := http.NewRequestWithContext(ctx, http.MethodGet, userinfoURL, nil)
+	if err != nil {
+		return nil
+	}
+	uiReq.Header.Set("Authorization", "Bearer "+accessToken)
+	uiResp, err := p.HTTPClient.Do(uiReq)
+	if err != nil {
+		return nil
+	}
+	defer uiResp.Body.Close()
+
+	if uiResp.StatusCode != http.StatusOK {
+		return nil
+	}
+
+	var uiMap map[string]any
+	if err := json.NewDecoder(uiResp.Body).Decode(&uiMap); err != nil {
+		return nil
+	}
+
+	uiSub, _ := uiMap["sub"].(string)
+	if uiSub == "" || uiSub != claims.Subject {
+		return fmt.Errorf("userinfo sub claim '%s' does not match id_token subject '%s'", uiSub, claims.Subject)
+	}
+	if claims.PreferredUsername == "" {
+		if pref, ok := uiMap["preferred_username"].(string); ok {
+			claims.PreferredUsername = pref
+		}
+	}
+	if claims.Email == "" {
+		if em, ok := uiMap["email"].(string); ok {
+			claims.Email = em
+		}
+	}
+	return nil
 }
 
 // GetTokenOIDC exchanges an authorization code from an OIDC provider for internal access/refresh tokens.

@@ -1,7 +1,12 @@
 package postgres
 
 import (
+	"context"
+	"database/sql"
+	"database/sql/driver"
 	"errors"
+	"fmt"
+	"io"
 	"strings"
 	"testing"
 	"time"
@@ -546,4 +551,254 @@ func TestPostgresRepository_InvalidULIDValidation(t *testing.T) {
 	if _, err := r.UpdateDatabase(ctx, repo.Database{ID: validID, Name: "invalid name!"}); !errors.Is(err, customerrors.ErrInvalidName) {
 		t.Errorf("expected ErrInvalidName from UpdateDatabase with invalid name, got: %v", err)
 	}
+}
+
+type lockRecQuery struct {
+	sql  string
+	inTx bool
+}
+
+type lockRecRecorder struct {
+	queries []lockRecQuery
+	inTx    bool
+}
+
+type lockRecDriver struct{}
+
+func (d *lockRecDriver) Open(name string) (driver.Conn, error) {
+	return nil, errors.New("lockRecDriver only supports OpenDB")
+}
+
+type lockRecConnector struct {
+	rec *lockRecRecorder
+}
+
+func (c *lockRecConnector) Connect(ctx context.Context) (driver.Conn, error) {
+	return &lockRecConn{rec: c.rec}, nil
+}
+
+func (c *lockRecConnector) Driver() driver.Driver {
+	return &lockRecDriver{}
+}
+
+type lockRecConn struct {
+	rec *lockRecRecorder
+}
+
+func (c *lockRecConn) Prepare(query string) (driver.Stmt, error) {
+	return nil, errors.New("not implemented")
+}
+
+func (c *lockRecConn) Close() error { return nil }
+
+func (c *lockRecConn) Begin() (driver.Tx, error) {
+	return c.BeginTx(context.Background(), driver.TxOptions{})
+}
+
+func (c *lockRecConn) BeginTx(ctx context.Context, opts driver.TxOptions) (driver.Tx, error) {
+	c.rec.inTx = true
+	return &lockRecTx{rec: c.rec}, nil
+}
+
+func (c *lockRecConn) CheckNamedValue(nv *driver.NamedValue) error {
+	return nil
+}
+
+func (c *lockRecConn) ExecContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Result, error) {
+	c.rec.queries = append(c.rec.queries, lockRecQuery{sql: query, inTx: c.rec.inTx})
+	return &lockRecResult{rowsAffected: 1}, nil
+}
+
+func (c *lockRecConn) QueryContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Rows, error) {
+	c.rec.queries = append(c.rec.queries, lockRecQuery{sql: query, inTx: c.rec.inTx})
+	switch {
+	case strings.Contains(query, "SELECT filesize, preview_filesize, status"):
+		return &lockRecRows{
+			cols: []string{"filesize", "preview_filesize", "status"},
+			data: [][]driver.Value{{int64(100), int64(0), int64(repo.EntryStatusProcessing)}},
+		}, nil
+	case strings.Contains(query, "SELECT id, status"):
+		return &lockRecRows{
+			cols: []string{"id", "status"},
+			data: [][]driver.Value{
+				{int64(1), int64(repo.EntryStatusQueued)},
+				{int64(2), int64(repo.EntryStatusProcessing)},
+			},
+		}, nil
+	case strings.Contains(query, "RETURNING updated_at"):
+		return &lockRecRows{
+			cols: []string{"updated_at"},
+			data: [][]driver.Value{{int64(1700000000000)}},
+		}, nil
+	case strings.Contains(query, "SELECT 1 FROM databases WHERE id = $1 FOR UPDATE"):
+		return &lockRecRows{
+			cols: []string{"one"},
+			data: [][]driver.Value{{int64(1)}},
+		}, nil
+	case strings.Contains(query, "FROM database_custom_fields"):
+		return &lockRecRows{
+			cols: []string{"field_id", "name", "type", "is_indexed"},
+		}, nil
+	default:
+		return nil, fmt.Errorf("unexpected query in lockRecConn: %s", query)
+	}
+}
+
+type lockRecTx struct {
+	rec *lockRecRecorder
+}
+
+func (tx *lockRecTx) Commit() error {
+	tx.rec.inTx = false
+	return nil
+}
+
+func (tx *lockRecTx) Rollback() error {
+	tx.rec.inTx = false
+	return nil
+}
+
+type lockRecResult struct {
+	rowsAffected int64
+}
+
+func (r *lockRecResult) LastInsertId() (int64, error) { return 0, nil }
+func (r *lockRecResult) RowsAffected() (int64, error) { return r.rowsAffected, nil }
+
+type lockRecRows struct {
+	cols []string
+	data [][]driver.Value
+	idx  int
+}
+
+func (r *lockRecRows) Columns() []string { return r.cols }
+func (r *lockRecRows) Close() error      { return nil }
+func (r *lockRecRows) Next(dest []driver.Value) error {
+	if r.idx >= len(r.data) {
+		return io.EOF
+	}
+	copy(dest, r.data[r.idx])
+	r.idx++
+	return nil
+}
+
+func newRecordingPostgresRepo(t *testing.T) (*PostgresRepository, *lockRecRecorder) {
+	t.Helper()
+	rec := &lockRecRecorder{}
+	db := sql.OpenDB(&lockRecConnector{rec: rec})
+	t.Cleanup(func() { _ = db.Close() })
+	return &PostgresRepository{
+		DB:      db,
+		Builder: squirrel.StatementBuilder.PlaceholderFormat(squirrel.Dollar),
+	}, rec
+}
+
+func TestPostgres_LockingQueries(t *testing.T) {
+	dbID := repo.ULID("01HGFB9Z5W7ABCDEFGHJKMNPQR")
+	entriesTable := `"entries_` + dbID.String() + `"`
+	ctx := t.Context()
+
+	t.Run("UpdateEntry acquires row lock with FOR UPDATE", func(t *testing.T) {
+		r, rec := newRecordingPostgresRepo(t)
+		_, err := r.UpdateEntry(ctx, dbID, repo.Entry{
+			ID:       42,
+			Size:     256,
+			FileName: "test.jpg",
+			Status:   repo.EntryStatusReady,
+			MimeType: "image/jpeg",
+		})
+		if err != nil {
+			t.Fatalf("UpdateEntry failed: %v", err)
+		}
+
+		foundLock := false
+		for _, q := range rec.queries {
+			if q.inTx && strings.HasPrefix(q.sql, "SELECT ") && strings.Contains(q.sql, entriesTable) && strings.HasSuffix(strings.TrimSpace(q.sql), "FOR UPDATE") {
+				foundLock = true
+				break
+			}
+		}
+		if !foundLock {
+			t.Fatalf("expected SELECT ... FOR UPDATE on %s inside transaction, got queries: %+v", entriesTable, rec.queries)
+		}
+	})
+
+	t.Run("EnqueueEntry acquires row lock with FOR UPDATE before updating databases", func(t *testing.T) {
+		r, rec := newRecordingPostgresRepo(t)
+		_, err := r.EnqueueEntry(ctx, dbID, repo.Entry{
+			ID:       42,
+			Size:     256,
+			FileName: "test.jpg",
+			MimeType: "image/jpeg",
+		}, 10)
+		if err != nil {
+			t.Fatalf("EnqueueEntry failed: %v", err)
+		}
+
+		lockIdx, entryUpdateIdx, dbUpdateIdx := -1, -1, -1
+		for i, q := range rec.queries {
+			if q.inTx && strings.HasPrefix(q.sql, "SELECT ") && strings.Contains(q.sql, entriesTable) && strings.HasSuffix(strings.TrimSpace(q.sql), "FOR UPDATE") {
+				lockIdx = i
+			}
+			if q.inTx && strings.HasPrefix(q.sql, "UPDATE "+entriesTable) {
+				entryUpdateIdx = i
+			}
+			if q.inTx && strings.HasPrefix(q.sql, "UPDATE databases") {
+				dbUpdateIdx = i
+			}
+		}
+		if lockIdx == -1 || entryUpdateIdx == -1 || dbUpdateIdx == -1 {
+			t.Fatalf("missing expected queries (lockIdx=%d, entryUpdateIdx=%d, dbUpdateIdx=%d), got: %+v", lockIdx, entryUpdateIdx, dbUpdateIdx, rec.queries)
+		}
+		if !(lockIdx < entryUpdateIdx && entryUpdateIdx < dbUpdateIdx) {
+			t.Fatalf("expected lock (%d) -> update %s (%d) -> update databases (%d), got queries: %+v", lockIdx, entriesTable, entryUpdateIdx, dbUpdateIdx, rec.queries)
+		}
+	})
+
+	t.Run("UpdateEntriesStatus acquires row locks with FOR UPDATE", func(t *testing.T) {
+		r, rec := newRecordingPostgresRepo(t)
+		err := r.UpdateEntriesStatus(ctx, dbID, []int64{1, 2}, repo.EntryStatusReady)
+		if err != nil {
+			t.Fatalf("UpdateEntriesStatus failed: %v", err)
+		}
+
+		foundLock := false
+		for _, q := range rec.queries {
+			if q.inTx && strings.HasPrefix(q.sql, "SELECT id, status") && strings.Contains(q.sql, entriesTable) && strings.HasSuffix(strings.TrimSpace(q.sql), "FOR UPDATE") {
+				foundLock = true
+				break
+			}
+		}
+		if !foundLock {
+			t.Fatalf("expected SELECT id, status ... FOR UPDATE on %s inside transaction, got queries: %+v", entriesTable, rec.queries)
+		}
+	})
+
+	t.Run("AddCustomField locks database row FOR UPDATE before querying custom fields", func(t *testing.T) {
+		r, rec := newRecordingPostgresRepo(t)
+		_, err := r.AddCustomField(ctx, dbID, repo.CustomFieldDef{
+			Name:      "artist",
+			Type:      repo.CustomFieldTypeText,
+			IsIndexed: true,
+		})
+		if err != nil {
+			t.Fatalf("AddCustomField failed: %v", err)
+		}
+
+		lockIdx, fieldsIdx := -1, -1
+		for i, q := range rec.queries {
+			if q.inTx && q.sql == "SELECT 1 FROM databases WHERE id = $1 FOR UPDATE" {
+				lockIdx = i
+			}
+			if q.inTx && strings.Contains(q.sql, "FROM database_custom_fields") {
+				fieldsIdx = i
+			}
+		}
+		if lockIdx == -1 || fieldsIdx == -1 {
+			t.Fatalf("missing expected queries (lockIdx=%d, fieldsIdx=%d), got: %+v", lockIdx, fieldsIdx, rec.queries)
+		}
+		if lockIdx >= fieldsIdx {
+			t.Fatalf("expected database FOR UPDATE lock (%d) before querying database_custom_fields (%d), got queries: %+v", lockIdx, fieldsIdx, rec.queries)
+		}
+	})
 }

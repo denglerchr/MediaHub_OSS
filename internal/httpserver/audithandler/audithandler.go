@@ -1,12 +1,12 @@
 package audithandler
 
 import (
-	"math"
 	"net/http"
 	"time"
 
 	"mediahub_oss/internal/httpserver/utils"
 	"mediahub_oss/internal/repository"
+	"mediahub_oss/internal/shared"
 )
 
 // @Summary Get audit logs
@@ -50,20 +50,20 @@ func (h *AuditHandler) GetLogs(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var tStart, tEnd time.Time
-	tStartInt, err := utils.ParseQueryInt64(r, "tstart", math.MinInt64)
+	tStartInt, err := utils.ParseQueryInt64(r, "tstart", shared.MissingTimestamp)
 	if err != nil {
 		utils.RespondWithError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if tStartInt != math.MinInt64 {
+	if tStartInt != shared.MissingTimestamp {
 		tStart = time.UnixMilli(tStartInt)
 	}
-	tEndInt, err := utils.ParseQueryInt64(r, "tend", math.MaxInt64)
+	tEndInt, err := utils.ParseQueryInt64(r, "tend", shared.MissingTimestamp)
 	if err != nil {
 		utils.RespondWithError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if tEndInt != math.MaxInt64 {
+	if tEndInt != shared.MissingTimestamp {
 		tEnd = time.UnixMilli(tEndInt)
 	}
 

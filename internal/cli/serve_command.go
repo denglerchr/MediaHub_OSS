@@ -8,7 +8,6 @@ import (
 	"mediahub_oss/docs" // to get the version
 	"mediahub_oss/internal/cli/config"
 	"mediahub_oss/internal/cli/initconfig"
-	"mediahub_oss/internal/housekeeping"
 	"mediahub_oss/internal/httpserver"
 	ah "mediahub_oss/internal/httpserver/audithandler"
 	"mediahub_oss/internal/httpserver/auth"
@@ -17,14 +16,10 @@ import (
 	ih "mediahub_oss/internal/httpserver/infohandler"
 	th "mediahub_oss/internal/httpserver/tokenhandler"
 	uh "mediahub_oss/internal/httpserver/userhandler"
-	"mediahub_oss/internal/logging/audit"
-	"mediahub_oss/internal/media/ffmpeg"
-	"mediahub_oss/internal/processing"
 	"mediahub_oss/internal/repository"
 	"mediahub_oss/internal/repository/migrations"
 	"mediahub_oss/internal/repository/postgres"
 	"mediahub_oss/internal/repository/sqlite"
-	"mediahub_oss/internal/shared"
 	"mediahub_oss/internal/storage"
 	"mediahub_oss/internal/storage/localstorage"
 	"mediahub_oss/internal/storage/s3storage"
@@ -158,15 +153,6 @@ func registerFlags(cmd *cobra.Command) {
 	}
 }
 
-// backgroundServices holds the initialized instances of all running background components.
-type backgroundServices struct {
-	houseKeeper    *housekeeping.HouseKeeper
-	mediaConverter *ffmpeg.FfmpegConverter
-	auditLogger    audit.AuditLogger
-	authMiddleware *auth.AuthMiddleware
-	processor      *processing.Processor
-}
-
 func serve(globalOptions *GlobalOptions, frontendFS fs.FS) error {
 	// Capture the start time for the InfoHandler's uptime calculation.
 	startTime := time.Now()
@@ -201,12 +187,12 @@ func serve(globalOptions *GlobalOptions, frontendFS fs.FS) error {
 	if err != nil {
 		return err
 	}
-	defer svcs.mediaConverter.Shutdown(context.Background())
+	defer svcs.closeServices()
 
 	// Cancel the context (stopping housekeeping scheduler and queue monitor)
-	// before the repository and converter are torn down. Defers run in reverse
-	// order, so this must be registered last: workers get the stop signal first,
-	// then the converter shuts down, then the repository closes.
+	// before the background services and repository are torn down. Defers run in
+	// reverse order, so this must be registered last: workers get the stop signal
+	// first, then services shut down, then the repository closes.
 	defer stop()
 
 	// 5. Build REST handlers.
@@ -240,41 +226,6 @@ func initDatabaseAndSchema(ctx context.Context, dbCfg config.DatabaseConfig, log
 	}
 
 	return repo, nil
-}
-
-// initServices configures and starts up background tasks and media converters.
-func initServices(ctx context.Context, cfg *config.Config, repo repository.Repository, storageProvider storage.StorageProvider, logger *slog.Logger) (*backgroundServices, error) {
-	auditRetention, err := shared.ParseDuration(cfg.Logging.Audit.Retention)
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse audit retention duration: %w", err)
-	}
-
-	hk := housekeeping.NewHouseKeeper(repo, storageProvider, logger, auditRetention)
-	go hk.StartScheduler(ctx)
-
-	converter, err := ffmpeg.NewFFMPEGConverter(cfg.Media.FFmpegPath, cfg.Media.FFprobePath, logger)
-	if err != nil {
-		return nil, fmt.Errorf("failed to start media converter: %w", err)
-	}
-
-	auditLogger := audit.NewAuditLogger(cfg.Logging.Audit.Enabled, cfg.Logging.Audit.Type, logger, repo)
-	authMiddleware := auth.NewAuthMiddleware(repo, cfg.Auth.JWT.Secret)
-
-	serverCfg, err := cfg.GetServerConfig()
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse server config: %w", err)
-	}
-
-	proc := processing.NewProcessor(repo, storageProvider, converter, serverCfg.NFfmpegAsync, serverCfg.NFfmpegTotal, logger)
-	go proc.StartQueueMonitor(ctx)
-
-	return &backgroundServices{
-		houseKeeper:    hk,
-		mediaConverter: converter,
-		auditLogger:    auditLogger,
-		authMiddleware: authMiddleware,
-		processor:      proc,
-	}, nil
 }
 
 // buildHandlers configures the Handler layer with dependency injection.

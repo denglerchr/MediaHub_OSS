@@ -11,6 +11,9 @@ type PermissionHolder interface {
 
 	GetUserULID() repository.ULID
 	GetAllPermissions(ctx context.Context) (map[repository.ULID]repository.AccessGrant, error)
+
+	HasGlobalScope(ag repository.AccessGrant) bool
+	EffectiveScope() repository.AccessGrant
 }
 
 // There are three types of permission holders:
@@ -20,6 +23,7 @@ type PermissionHolder interface {
 
 type GlobalAdmin struct {
 	UserULID repository.ULID
+	Scope    repository.AccessGrant
 }
 
 func (g *GlobalAdmin) IsGlobalAdmin() bool {
@@ -36,6 +40,17 @@ func (g *GlobalAdmin) GetUserULID() repository.ULID {
 
 func (g *GlobalAdmin) GetAllPermissions(ctx context.Context) (map[repository.ULID]repository.AccessGrant, error) {
 	return map[repository.ULID]repository.AccessGrant{}, nil // Global admin has implicit access to all databases
+}
+
+func (g *GlobalAdmin) HasGlobalScope(ag repository.AccessGrant) bool {
+	return g.EffectiveScope().HasAccess(ag)
+}
+
+func (g *GlobalAdmin) EffectiveScope() repository.AccessGrant {
+	if g.Scope == 0 {
+		return repository.NewAccessGrant(true, true, true, true, true)
+	}
+	return g.Scope
 }
 
 // An API key without admin scope of an admin user
@@ -87,6 +102,14 @@ func (a *APIKeyOfAdmin) GetAllPermissions(ctx context.Context) (map[repository.U
 		perms[dbID] = a.Scope
 	}
 	return perms, nil
+}
+
+func (a *APIKeyOfAdmin) HasGlobalScope(ag repository.AccessGrant) bool {
+	return a.Scope.HasAccess(ag)
+}
+
+func (a *APIKeyOfAdmin) EffectiveScope() repository.AccessGrant {
+	return a.Scope
 }
 
 // A non-admin user with specific database permissions
@@ -141,4 +164,12 @@ func (u *UserPermissions) GetAllPermissions(ctx context.Context) (map[repository
 		filtered[dbID] = perm & u.Scope
 	}
 	return filtered, nil
+}
+
+func (u *UserPermissions) HasGlobalScope(ag repository.AccessGrant) bool {
+	return u.Scope.HasAccess(ag)
+}
+
+func (u *UserPermissions) EffectiveScope() repository.AccessGrant {
+	return u.Scope
 }

@@ -1501,3 +1501,245 @@ func TestProcessIncomingEntry_AsyncPassthroughWithPreviewReservesSlot(t *testing
 	}
 }
 
+// ---------------------------------------------------------------------------
+// Issue 3.1: Queue Dispatcher scans past deferred entries (no HOL blocking)
+// ---------------------------------------------------------------------------
+
+func TestRunDispatchPass_ScansPastDeferredEntries(t *testing.T) {
+	conv := &testMockConverter{
+		canConvertCheck: media.ConversionCheck{CanConvert: true, NeedsConversion: true},
+	}
+	proc, r, db := setupTestProcessor(t, conv, nil)
+	defer r.Close()
+
+	// Disable async processing so queueing writes entries without auto-dispatching.
+	proc.NFfmpegAsync = 0
+	proc.NFfmpegTotal = 0
+	db.NMaxQueued = 10
+
+	e1, err := proc.queueIncomingFile(context.Background(), strings.NewReader("payload 1"), db,
+		EntryRequest{Timestamp: time.Now().UnixMilli(), FileName: "e1.jpg"}, conversionPlan())
+	if err != nil {
+		t.Fatalf("failed to queue e1: %v", err)
+	}
+	e2, err := proc.queueIncomingFile(context.Background(), strings.NewReader("payload 2"), db,
+		EntryRequest{Timestamp: time.Now().UnixMilli(), FileName: "e2.jpg"}, conversionPlan())
+	if err != nil {
+		t.Fatalf("failed to queue e2: %v", err)
+	}
+	e3, err := proc.queueIncomingFile(context.Background(), strings.NewReader("payload 3"), db,
+		EntryRequest{Timestamp: time.Now().UnixMilli(), FileName: "e3.jpg"}, conversionPlan())
+	if err != nil {
+		t.Fatalf("failed to queue e3: %v", err)
+	}
+
+	// Defer e1 and e2 by recording claim failures.
+	proc.retries.noteClaimFailure(db.ID, e1.ID)
+	proc.retries.noteClaimFailure(db.ID, e2.ID)
+
+	// Allow 1 worker slot.
+	proc.NFfmpegAsync = 1
+	proc.NFfmpegTotal = 1
+
+	// Run dispatch pass. e1 and e2 are deferred at the head of the queue, but dispatch
+	// must scan past both and claim e3.
+	proc.runDispatchPass(context.Background())
+
+	// Wait for e3 to become ready.
+	readyE3 := waitForStatus(t, r, db.ID, e3.ID, repo.EntryStatusReady)
+	if readyE3.Status != repo.EntryStatusReady {
+		t.Errorf("expected e3 to be ready, got %v", readyE3.Status)
+	}
+
+	// Verify e1 is still queued.
+	entry1, err := r.GetEntry(context.Background(), db.ID, e1.ID)
+	if err != nil {
+		t.Fatalf("failed to get e1: %v", err)
+	}
+	if entry1.Status != repo.EntryStatusQueued {
+		t.Errorf("expected e1 to remain queued, got %v", entry1.Status)
+	}
+
+	// Verify e2 is still queued.
+	entry2, err := r.GetEntry(context.Background(), db.ID, e2.ID)
+	if err != nil {
+		t.Fatalf("failed to get e2: %v", err)
+	}
+	if entry2.Status != repo.EntryStatusQueued {
+		t.Errorf("expected e2 to remain queued, got %v", entry2.Status)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Issue 3.2: Storage Orphan Cleanup on ErrNotFound
+// ---------------------------------------------------------------------------
+
+func TestFinalizeEntryFile_StorageCleanupOnErrNotFound(t *testing.T) {
+	conv := &testMockConverter{
+		canConvertCheck: media.ConversionCheck{CanConvert: true, NeedsConversion: false},
+	}
+	proc, r, db := setupTestProcessor(t, conv, nil)
+	defer r.Close()
+
+	ctx := context.Background()
+	plan := passthroughPlan()
+	plan.WantsPreview = true
+	plan.CanGenPreview = true
+
+	entry, err := proc.createPreliminaryEntry(ctx, db,
+		EntryRequest{Timestamp: time.Now().UnixMilli(), FileName: "test.jpg"}, plan, false)
+	if err != nil {
+		t.Fatalf("failed to create preliminary entry: %v", err)
+	}
+
+	tempPath := writeTempFile(t, "mh-finalize-orphan-*.jpg", []byte("file content"))
+
+	// Delete the entry from the database before finalizeEntryFile runs, simulating
+	// a concurrent DeleteSafe that removed the entry row while processing was finishing.
+	if _, err := r.DeleteEntry(ctx, db.ID, entry.ID); err != nil {
+		t.Fatalf("failed to delete entry: %v", err)
+	}
+
+	err = proc.finalizeEntryFile(ctx, db, entry, tempPath, plan)
+	if err == nil {
+		t.Fatal("expected finalizeEntryFile to fail with error")
+	}
+
+	// Verify that neither the main file nor preview file are orphaned in storage.
+	if _, statErr := proc.Storage.Stat(ctx, db.ID.String(), entry.ID); !errors.Is(statErr, customerrors.ErrNotFound) {
+		t.Errorf("expected main file to be deleted from storage on ErrNotFound, got err: %v", statErr)
+	}
+	if _, statErr := proc.Storage.StatPreview(ctx, db.ID.String(), entry.ID); !errors.Is(statErr, customerrors.ErrNotFound) {
+		t.Errorf("expected preview file to be deleted from storage on ErrNotFound, got err: %v", statErr)
+	}
+}
+
+func TestGeneratePreviewInBackground_StorageCleanupOnErrNotFound(t *testing.T) {
+	conv := &testMockConverter{
+		canConvertCheck: media.ConversionCheck{CanConvert: true, NeedsConversion: false},
+	}
+	proc, r, db := setupTestProcessor(t, conv, nil)
+	defer r.Close()
+
+	ctx := context.Background()
+	entry, err := proc.createPreliminaryEntry(ctx, db,
+		EntryRequest{Timestamp: time.Now().UnixMilli(), FileName: "preview_orphan.jpg"}, passthroughPlan(), false)
+	if err != nil {
+		t.Fatalf("failed to create preliminary entry: %v", err)
+	}
+
+	// Write main file to storage so preview generation can stream from it.
+	if _, err := proc.Storage.Write(ctx, db.ID.String(), entry.ID, strings.NewReader("dummy image data")); err != nil {
+		t.Fatalf("failed to write main file: %v", err)
+	}
+
+	// Concurrently delete entry from DB.
+	if _, err := r.DeleteEntry(ctx, db.ID, entry.ID); err != nil {
+		t.Fatalf("failed to delete entry: %v", err)
+	}
+
+	// Reserve sync slot so generatePreviewInBackground can release it.
+	proc.tryReserveSyncSlot()
+
+	proc.generatePreviewInBackground(db, entry, nil, "image/jpeg")
+
+	// Verify that the preview file was not orphaned in storage.
+	if _, statErr := proc.Storage.StatPreview(ctx, db.ID.String(), entry.ID); !errors.Is(statErr, customerrors.ErrNotFound) {
+		t.Errorf("expected preview to be deleted from storage when UpdateEntry fails, got err: %v", statErr)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Issue 3.3: Preserve Concurrent FileName Edits
+// ---------------------------------------------------------------------------
+
+func TestFinalizeEntryFile_PreservesConcurrentFileNameEdit(t *testing.T) {
+	conv := &testMockConverter{
+		canConvertCheck: media.ConversionCheck{CanConvert: true, NeedsConversion: true},
+	}
+	proc, r, db := setupTestProcessor(t, conv, nil)
+	defer r.Close()
+
+	ctx := context.Background()
+	plan := conversionPlan() // Init: "photo.jpg", Target: "photo.png", NeedsConversion: true
+
+	entry, err := proc.createPreliminaryEntry(ctx, db,
+		EntryRequest{Timestamp: time.Now().UnixMilli(), FileName: "photo.jpg"}, plan, false)
+	if err != nil {
+		t.Fatalf("failed to create preliminary entry: %v", err)
+	}
+
+	// Simulate user PATCH updating filename while queued/processing.
+	entry.FileName = "user_custom_title.jpg"
+	updatedMeta, err := r.UpdateEntryMetadata(ctx, db.ID, entry)
+	if err != nil {
+		t.Fatalf("failed to update metadata: %v", err)
+	}
+	if updatedMeta.FileName != "user_custom_title.jpg" {
+		t.Fatalf("expected updated filename in DB, got: %s", updatedMeta.FileName)
+	}
+
+	tempPath := writeTempFile(t, "mh-finalize-rename-*.jpg", []byte("file content"))
+
+	// finalizeEntryFile is passed the stale initial entry snapshot.
+	err = proc.finalizeEntryFile(ctx, db, entry, tempPath, plan)
+	if err != nil {
+		t.Fatalf("finalizeEntryFile failed: %v", err)
+	}
+
+	finalEntry, err := r.GetEntry(ctx, db.ID, entry.ID)
+	if err != nil {
+		t.Fatalf("failed to fetch final entry: %v", err)
+	}
+
+	// Since plan.NeedsConversion is true (target is image/png), the extension should be .png,
+	// but the base name should be the user-renamed "user_custom_title".
+	expectedName := "user_custom_title.png"
+	if finalEntry.FileName != expectedName {
+		t.Errorf("expected FileName = %q, got %q", expectedName, finalEntry.FileName)
+	}
+}
+
+func TestGeneratePreviewInBackground_PreservesConcurrentFileNameEdit(t *testing.T) {
+	conv := &testMockConverter{
+		canConvertCheck: media.ConversionCheck{CanConvert: true, NeedsConversion: false},
+	}
+	proc, r, db := setupTestProcessor(t, conv, nil)
+	defer r.Close()
+
+	ctx := context.Background()
+	entry, err := proc.createPreliminaryEntry(ctx, db,
+		EntryRequest{Timestamp: time.Now().UnixMilli(), FileName: "initial_preview.jpg"}, passthroughPlan(), false)
+	if err != nil {
+		t.Fatalf("failed to create preliminary entry: %v", err)
+	}
+
+	if _, err := proc.Storage.Write(ctx, db.ID.String(), entry.ID, strings.NewReader("dummy image data")); err != nil {
+		t.Fatalf("failed to write main file: %v", err)
+	}
+
+	// User updates filename concurrently while preview is generating.
+	entry.FileName = "renamed_during_preview.jpg"
+	if _, err := r.UpdateEntryMetadata(ctx, db.ID, entry); err != nil {
+		t.Fatalf("failed to update metadata: %v", err)
+	}
+
+	// Pass the stale entry struct to generatePreviewInBackground.
+	staleEntry := entry
+	staleEntry.FileName = "initial_preview.jpg"
+
+	proc.tryReserveSyncSlot()
+	proc.generatePreviewInBackground(db, staleEntry, nil, "image/jpeg")
+
+	finalEntry, err := r.GetEntry(ctx, db.ID, entry.ID)
+	if err != nil {
+		t.Fatalf("failed to fetch final entry: %v", err)
+	}
+
+	if finalEntry.FileName != "renamed_during_preview.jpg" {
+		t.Errorf("expected FileName = %q, got %q", "renamed_during_preview.jpg", finalEntry.FileName)
+	}
+	if finalEntry.Status != repo.EntryStatusReady {
+		t.Errorf("expected Status = Ready, got %v", finalEntry.Status)
+	}
+}

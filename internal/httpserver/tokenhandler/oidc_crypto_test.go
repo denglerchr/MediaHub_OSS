@@ -332,7 +332,7 @@ func TestHTTPOIDCProvider_ExchangeCode_MismatchedAudienceRejected(t *testing.T) 
 	}
 }
 
-func TestHTTPOIDCProvider_ExchangeCode_UserinfoFallback(t *testing.T) {
+func TestHTTPOIDCProvider_ExchangeCode_MissingIDToken_Rejected(t *testing.T) {
 	var serverURL string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -381,16 +381,9 @@ func TestHTTPOIDCProvider_ExchangeCode_UserinfoFallback(t *testing.T) {
 	}
 	provider := tokenhandler.NewHTTPOIDCProvider(cfg, nil)
 
-	claims, err := provider.ExchangeCode(context.Background(), "auth_code", "http://localhost/callback", "")
-	if err != nil {
-		t.Fatalf("expected successful userinfo fallback when id_token is absent, got error: %v", err)
-	}
-
-	if claims.Subject != "userinfo-sub-999" {
-		t.Errorf("expected subject 'userinfo-sub-999', got '%s'", claims.Subject)
-	}
-	if claims.PreferredUsername != "userinfo_guy" {
-		t.Errorf("expected preferred_username 'userinfo_guy', got '%s'", claims.PreferredUsername)
+	_, err := provider.ExchangeCode(context.Background(), "auth_code", "http://localhost/callback", "")
+	if err == nil {
+		t.Fatal("expected missing id_token to be rejected, but exchange succeeded")
 	}
 }
 
@@ -426,4 +419,250 @@ func TestHTTPOIDCProvider_GetAuthEndpoint(t *testing.T) {
 	if authEndpoint != serverURL+"/oauth2/authorize" {
 		t.Errorf("expected auth endpoint '%s', got '%s'", serverURL+"/oauth2/authorize", authEndpoint)
 	}
+}
+
+func TestHTTPOIDCProvider_ExchangeCode_MissingExpRejected(t *testing.T) {
+	privKey, _ := rsa.GenerateKey(rand.Reader, 2048)
+	kid := "rsa-no-exp"
+	nStr := base64.RawURLEncoding.EncodeToString(privKey.N.Bytes())
+	eBytes := big.NewInt(int64(privKey.E)).Bytes()
+	eStr := base64.RawURLEncoding.EncodeToString(eBytes)
+
+	var serverURL string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/.well-known/openid-configuration":
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]string{
+				"issuer":         serverURL,
+				"token_endpoint": serverURL + "/token",
+				"jwks_uri":       serverURL + "/jwks",
+			})
+		case "/jwks":
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"keys": []map[string]any{
+					{
+						"kty": "RSA",
+						"kid": kid,
+						"n":   nStr,
+						"e":   eStr,
+					},
+				},
+			})
+		case "/token":
+			token := jwt.NewWithClaims(jwt.SigningMethodRS256, jwt.MapClaims{
+				"iss": serverURL,
+				"sub": "user-without-exp",
+				"aud": "test-client-id",
+			})
+			token.Header["kid"] = kid
+			signedIDToken, _ := token.SignedString(privKey)
+
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]string{
+				"access_token": "dummy_access_token",
+				"id_token":     signedIDToken,
+				"token_type":   "Bearer",
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	serverURL = server.URL
+
+	cfg := tokenhandler.OIDCConfig{
+		Enabled:   true,
+		IssuerURL: serverURL,
+		ClientID:  "test-client-id",
+	}
+	provider := tokenhandler.NewHTTPOIDCProvider(cfg, nil)
+
+	_, err := provider.ExchangeCode(context.Background(), "auth_code", "http://localhost/callback", "")
+	if err == nil {
+		t.Fatal("expected token without exp claim to be rejected, but exchange succeeded")
+	}
+}
+
+func TestHTTPOIDCProvider_ExchangeCode_UserinfoSubVerification(t *testing.T) {
+	privKey, _ := rsa.GenerateKey(rand.Reader, 2048)
+	kid := "rsa-userinfo-sub"
+	nStr := base64.RawURLEncoding.EncodeToString(privKey.N.Bytes())
+	eBytes := big.NewInt(int64(privKey.E)).Bytes()
+	eStr := base64.RawURLEncoding.EncodeToString(eBytes)
+
+	t.Run("matching sub in userinfo succeeds", func(t *testing.T) {
+		var serverURL string
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Path {
+			case "/.well-known/openid-configuration":
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(map[string]string{
+					"issuer":            serverURL,
+					"token_endpoint":    serverURL + "/token",
+					"jwks_uri":          serverURL + "/jwks",
+					"userinfo_endpoint": serverURL + "/userinfo",
+				})
+			case "/jwks":
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"keys": []map[string]any{
+						{"kty": "RSA", "kid": kid, "n": nStr, "e": eStr},
+					},
+				})
+			case "/token":
+				token := jwt.NewWithClaims(jwt.SigningMethodRS256, jwt.MapClaims{
+					"iss": serverURL,
+					"sub": "subject-123",
+					"aud": "test-client-id",
+					"exp": time.Now().Add(1 * time.Hour).Unix(),
+				})
+				token.Header["kid"] = kid
+				signedIDToken, _ := token.SignedString(privKey)
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(map[string]string{
+					"access_token": "valid_access_token",
+					"id_token":     signedIDToken,
+					"token_type":   "Bearer",
+				})
+			case "/userinfo":
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"sub":                "subject-123",
+					"preferred_username": "verified_user",
+					"email":              "verified@example.com",
+				})
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		defer server.Close()
+		serverURL = server.URL
+
+		cfg := tokenhandler.OIDCConfig{Enabled: true, IssuerURL: serverURL, ClientID: "test-client-id"}
+		provider := tokenhandler.NewHTTPOIDCProvider(cfg, nil)
+
+		claims, err := provider.ExchangeCode(context.Background(), "auth_code", "http://localhost/callback", "")
+		if err != nil {
+			t.Fatalf("expected successful exchange with matching userinfo sub, got: %v", err)
+		}
+		if claims.Subject != "subject-123" {
+			t.Errorf("expected subject 'subject-123', got '%s'", claims.Subject)
+		}
+		if claims.PreferredUsername != "verified_user" {
+			t.Errorf("expected preferred_username 'verified_user', got '%s'", claims.PreferredUsername)
+		}
+	})
+
+	t.Run("mismatched sub in userinfo is rejected", func(t *testing.T) {
+		var serverURL string
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Path {
+			case "/.well-known/openid-configuration":
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(map[string]string{
+					"issuer":            serverURL,
+					"token_endpoint":    serverURL + "/token",
+					"jwks_uri":          serverURL + "/jwks",
+					"userinfo_endpoint": serverURL + "/userinfo",
+				})
+			case "/jwks":
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"keys": []map[string]any{
+						{"kty": "RSA", "kid": kid, "n": nStr, "e": eStr},
+					},
+				})
+			case "/token":
+				token := jwt.NewWithClaims(jwt.SigningMethodRS256, jwt.MapClaims{
+					"iss": serverURL,
+					"sub": "subject-123",
+					"aud": "test-client-id",
+					"exp": time.Now().Add(1 * time.Hour).Unix(),
+				})
+				token.Header["kid"] = kid
+				signedIDToken, _ := token.SignedString(privKey)
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(map[string]string{
+					"access_token": "valid_access_token",
+					"id_token":     signedIDToken,
+					"token_type":   "Bearer",
+				})
+			case "/userinfo":
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"sub":                "different-subject-456",
+					"preferred_username": "impersonator",
+				})
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		defer server.Close()
+		serverURL = server.URL
+
+		cfg := tokenhandler.OIDCConfig{Enabled: true, IssuerURL: serverURL, ClientID: "test-client-id"}
+		provider := tokenhandler.NewHTTPOIDCProvider(cfg, nil)
+
+		_, err := provider.ExchangeCode(context.Background(), "auth_code", "http://localhost/callback", "")
+		if err == nil {
+			t.Fatal("expected mismatched userinfo sub to be rejected, but exchange succeeded")
+		}
+	})
+
+	t.Run("empty sub in userinfo is rejected", func(t *testing.T) {
+		var serverURL string
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Path {
+			case "/.well-known/openid-configuration":
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(map[string]string{
+					"issuer":            serverURL,
+					"token_endpoint":    serverURL + "/token",
+					"jwks_uri":          serverURL + "/jwks",
+					"userinfo_endpoint": serverURL + "/userinfo",
+				})
+			case "/jwks":
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"keys": []map[string]any{
+						{"kty": "RSA", "kid": kid, "n": nStr, "e": eStr},
+					},
+				})
+			case "/token":
+				token := jwt.NewWithClaims(jwt.SigningMethodRS256, jwt.MapClaims{
+					"iss": serverURL,
+					"sub": "subject-123",
+					"aud": "test-client-id",
+					"exp": time.Now().Add(1 * time.Hour).Unix(),
+				})
+				token.Header["kid"] = kid
+				signedIDToken, _ := token.SignedString(privKey)
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(map[string]string{
+					"access_token": "valid_access_token",
+					"id_token":     signedIDToken,
+					"token_type":   "Bearer",
+				})
+			case "/userinfo":
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"preferred_username": "no_sub_user",
+				})
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		defer server.Close()
+		serverURL = server.URL
+
+		cfg := tokenhandler.OIDCConfig{Enabled: true, IssuerURL: serverURL, ClientID: "test-client-id"}
+		provider := tokenhandler.NewHTTPOIDCProvider(cfg, nil)
+
+		_, err := provider.ExchangeCode(context.Background(), "auth_code", "http://localhost/callback", "")
+		if err == nil {
+			t.Fatal("expected empty userinfo sub to be rejected, but exchange succeeded")
+		}
+	})
 }

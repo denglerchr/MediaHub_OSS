@@ -207,7 +207,11 @@ func (h *EntryHandler) processImportRow(ctx context.Context, db repo.Database, r
 		entry.MediaFields = mediaFields
 	}
 
-	// 6. Write to Database
+	// 6. Write to Database initially in processing state with zero sizes
+	finalStatus := entry.Status
+	entry.Status = repo.EntryStatusProcessing
+	entry.Size = 0
+	entry.PreviewSize = 0
 	savedEntry, err := h.Repo.CreateEntry(ctx, db, entry)
 	if err != nil {
 		tempMediaFile.Close()
@@ -217,26 +221,41 @@ func (h *EntryHandler) processImportRow(ctx context.Context, db repo.Database, r
 	// 7. Write Main File to Storage
 	// Rewind the temp file so we can stream it to the final storage location
 	tempMediaFile.Seek(0, io.SeekStart)
-	_, err = h.Storage.Write(ctx, db.ID.String(), savedEntry.ID, tempMediaFile)
+	writtenSize, err := h.Storage.Write(ctx, db.ID.String(), savedEntry.ID, tempMediaFile)
 	tempMediaFile.Close() // Close the handle now that storage has consumed it
 
 	if err != nil {
-		h.Repo.DeleteEntry(ctx, db.ID, savedEntry.ID) // Rollback DB on storage failure
+		_ = h.Storage.Delete(ctx, db.ID.String(), savedEntry.ID)
+		_, _ = h.Repo.DeleteEntry(ctx, db.ID, savedEntry.ID) // Rollback DB on storage failure
 		return false, fmt.Errorf("failed to write main file to storage: %w", err)
 	}
 
 	// 8. Write Preview to Storage (if it exists in the archive)
+	var writtenPreviewSize int64 = 0
 	if previewZipped, exists := zipFiles[previewZipPath]; exists {
 		pSrcFile, err := previewZipped.Open()
 		if err != nil {
 			h.Logger.Warn("Import warning: Failed to open preview zip entry", "row", rowNum, "path", previewZipPath, "error", err)
 		} else {
-			_, err = h.Storage.WritePreview(ctx, db.ID.String(), savedEntry.ID, pSrcFile)
+			pWritten, err := h.Storage.WritePreview(ctx, db.ID.String(), savedEntry.ID, pSrcFile)
 			pSrcFile.Close()
 			if err != nil {
 				h.Logger.Warn("Import warning: Failed to write preview file to storage", "row", rowNum, "error", err)
+			} else {
+				writtenPreviewSize = pWritten
 			}
 		}
+	}
+
+	// 9. Finalize Entry in Database with Actual Written Sizes and Final Status
+	savedEntry.Status = finalStatus
+	savedEntry.Size = uint64(writtenSize)
+	savedEntry.PreviewSize = uint64(writtenPreviewSize)
+	if _, err := h.Repo.UpdateEntry(ctx, db.ID, savedEntry); err != nil {
+		_ = h.Storage.Delete(ctx, db.ID.String(), savedEntry.ID)
+		_ = h.Storage.DeletePreview(ctx, db.ID.String(), savedEntry.ID)
+		_, _ = h.Repo.DeleteEntry(ctx, db.ID, savedEntry.ID)
+		return false, fmt.Errorf("failed to finalize entry in database: %w", err)
 	}
 
 	return false, nil // Success, not skipped
@@ -256,12 +275,11 @@ func (h *EntryHandler) parseStandardFields(row []string) (repo.Entry, error) {
 	if entry.Timestamp, err = time.Parse(time.RFC3339, row[2]); err != nil {
 		return entry, fmt.Errorf("invalid timestamp: %s", row[2])
 	}
-	if entry.Size, err = strconv.ParseUint(row[3], 10, 64); err != nil {
-		return entry, fmt.Errorf("invalid filesize: %s", row[3])
-	}
-	if entry.PreviewSize, err = strconv.ParseUint(row[4], 10, 64); err != nil {
-		return entry, fmt.Errorf("invalid previewsize: %s", row[4])
-	}
+
+	// Columns 3 (filesize) and 4 (previewsize) are intentionally ignored: CSV sizes
+	// are untrusted, and actual physical sizes are measured from storage writes.
+	entry.Size = 0
+	entry.PreviewSize = 0
 
 	entry.MimeType = row[5]
 
@@ -269,7 +287,15 @@ func (h *EntryHandler) parseStandardFields(row []string) (repo.Entry, error) {
 	if err != nil {
 		return entry, fmt.Errorf("invalid status: %s", row[6])
 	}
-	entry.Status = repo.EntryStatus(statusVal)
+	status := repo.EntryStatus(statusVal)
+	switch status {
+	case repo.EntryStatusReady, repo.EntryStatusError:
+		entry.Status = status
+	case repo.EntryStatusQueued, repo.EntryStatusProcessing, repo.EntryStatusDeleting:
+		entry.Status = repo.EntryStatusReady
+	default:
+		return entry, fmt.Errorf("invalid status: %d", statusVal)
+	}
 
 	return entry, nil
 }

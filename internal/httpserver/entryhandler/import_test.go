@@ -89,3 +89,103 @@ func TestMapCustomFields_EmptyAndInvalidCells(t *testing.T) {
 		t.Errorf("expected valid text field to be preserved, got %v", mappedInvalid["notes"])
 	}
 }
+
+func TestParseStandardFields_UntrustedSizesAndStatusNormalization(t *testing.T) {
+	h := &EntryHandler{}
+
+	tests := []struct {
+		name           string
+		row            []string
+		expectedStatus repo.EntryStatus
+		expectErr      bool
+	}{
+		{
+			name:           "ready status preserved, sizes set to 0",
+			row:            []string{"1", "test.jpg", "2026-01-01T00:00:00Z", "999999", "88888", "image/jpeg", "0"},
+			expectedStatus: repo.EntryStatusReady,
+			expectErr:      false,
+		},
+		{
+			name:           "processing status normalized to ready",
+			row:            []string{"2", "test.jpg", "2026-01-01T00:00:00Z", "123", "456", "image/jpeg", "1"},
+			expectedStatus: repo.EntryStatusReady,
+			expectErr:      false,
+		},
+		{
+			name:           "deleting status normalized to ready",
+			row:            []string{"3", "test.jpg", "2026-01-01T00:00:00Z", "123", "456", "image/jpeg", "3"},
+			expectedStatus: repo.EntryStatusReady,
+			expectErr:      false,
+		},
+		{
+			name:           "queued status normalized to ready",
+			row:            []string{"4", "test.jpg", "2026-01-01T00:00:00Z", "123", "456", "image/jpeg", "4"},
+			expectedStatus: repo.EntryStatusReady,
+			expectErr:      false,
+		},
+		{
+			name:           "error status preserved",
+			row:            []string{"5", "test.jpg", "2026-01-01T00:00:00Z", "123", "456", "image/jpeg", "2"},
+			expectedStatus: repo.EntryStatusError,
+			expectErr:      false,
+		},
+		{
+			name:      "invalid status rejected",
+			row:       []string{"6", "test.jpg", "2026-01-01T00:00:00Z", "123", "456", "image/jpeg", "99"},
+			expectErr: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			entry, err := h.parseStandardFields(tc.row)
+			if tc.expectErr {
+				if err == nil {
+					t.Fatalf("expected error, got nil")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if entry.Size != 0 {
+				t.Errorf("expected Size=0, got %d", entry.Size)
+			}
+			if entry.PreviewSize != 0 {
+				t.Errorf("expected PreviewSize=0, got %d", entry.PreviewSize)
+			}
+			if entry.Status != tc.expectedStatus {
+				t.Errorf("expected Status=%v, got %v", tc.expectedStatus, entry.Status)
+			}
+		})
+	}
+}
+
+func TestValidateCustomFields_NullScalarsAllowed(t *testing.T) {
+	defs := []repo.CustomFieldDef{
+		{Name: "title", Type: repo.CustomFieldTypeText},
+		{Name: "rating", Type: repo.CustomFieldTypeInteger},
+		{Name: "score", Type: repo.CustomFieldTypeReal},
+		{Name: "archived", Type: repo.CustomFieldTypeBoolean},
+		{Name: "location", Type: repo.CustomFieldTypeCoordinate},
+	}
+
+	provided := map[string]any{
+		"title":    nil,
+		"rating":   nil,
+		"score":    nil,
+		"archived": nil,
+		"location": nil,
+	}
+
+	err := validateCustomFields(provided, defs)
+	if err != nil {
+		t.Fatalf("expected nil error when setting custom fields to nil, got: %v", err)
+	}
+
+	// Unknown field should still fail
+	err = validateCustomFields(map[string]any{"unknown_field": nil}, defs)
+	if err == nil {
+		t.Fatalf("expected error for unknown field with nil value, got nil")
+	}
+}

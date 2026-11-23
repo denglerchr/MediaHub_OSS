@@ -214,4 +214,46 @@ describe('EditEntryModalComponent — FE-003/FE-004/FE-005 regressions', () => {
       .toBe('saved value');
     expect(field('rating')?.value).toBe(2);
   });
+
+  it('populates a 1950-... datetime string and preserves pre-1970 timestamps on edit', () => {
+    const PRE_1970_TIMESTAMP = Date.UTC(1950, 5, 15, 10, 30, 45);
+    const entry: Entry = {
+      id: 77,
+      timestamp: PRE_1970_TIMESTAMP,
+      created_at: PRE_1970_TIMESTAMP,
+      updated_at: PRE_1970_TIMESTAMP,
+      status: 'ready',
+      filename: 'vintage-1950.mp3',
+      custom_fields: {},
+    };
+
+    entrySubject.next(entry);
+
+    const formValue = String(component.editForm.get('timestamp')?.value);
+    expect(formValue.startsWith('1950-'))
+      .withContext(`expected a 1950-... datetime string, got ${formValue}`)
+      .toBeTrue();
+    expect(formValue.startsWith('0001-'))
+      .withContext('pre-1970 timestamp must never become year 0001')
+      .toBeFalse();
+    expect(formValue).toContain(':45');
+
+    // Unrelated edit omits/preserves the pre-1970 timestamp
+    component.editForm.get('filename')?.setValue('vintage-renamed.mp3');
+    component.onSubmit();
+
+    expect(updateEntrySpy).toHaveBeenCalledTimes(1);
+    const firstPayload = updateEntrySpy.calls.mostRecent().args[2] as Partial<Entry>;
+    const effectiveTimestamp =
+      firstPayload.timestamp === undefined ? entry.timestamp : firstPayload.timestamp;
+    expect(effectiveTimestamp).toBe(PRE_1970_TIMESTAMP);
+
+    // Dirty timestamp also round-trips back to the exact pre-1970 epoch ms
+    component.editForm.get('timestamp')?.markAsDirty();
+    component.onSubmit();
+
+    expect(updateEntrySpy).toHaveBeenCalledTimes(2);
+    const secondPayload = updateEntrySpy.calls.mostRecent().args[2] as Partial<Entry>;
+    expect(secondPayload.timestamp).toBe(PRE_1970_TIMESTAMP);
+  });
 });

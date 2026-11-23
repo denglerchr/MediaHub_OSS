@@ -55,6 +55,20 @@ func (m *mockExportRepo) CreateEntry(ctx context.Context, db repo.Database, entr
 	return entry, nil
 }
 
+func (m *mockExportRepo) UpdateEntry(ctx context.Context, dbID repo.ULID, entry repo.Entry) (repo.Entry, error) {
+	if m.entries != nil {
+		m.entries[entry.ID] = entry
+	}
+	return entry, nil
+}
+
+func (m *mockExportRepo) DeleteEntry(ctx context.Context, dbID repo.ULID, id int64) (repo.DeletedEntryMeta, error) {
+	if m.entries != nil {
+		delete(m.entries, id)
+	}
+	return repo.DeletedEntryMeta{ID: id}, nil
+}
+
 type mockStorage struct {
 	storage.StorageProvider
 }
@@ -73,6 +87,14 @@ func (m *mockStorage) Write(ctx context.Context, dbID string, id int64, r io.Rea
 
 func (m *mockStorage) WritePreview(ctx context.Context, dbID string, id int64, r io.Reader) (int64, error) {
 	return io.Copy(io.Discard, r)
+}
+
+func (m *mockStorage) Delete(ctx context.Context, dbID string, id int64) error {
+	return nil
+}
+
+func (m *mockStorage) DeletePreview(ctx context.Context, dbID string, id int64) error {
+	return nil
 }
 
 type mockImportMediaConverter struct {

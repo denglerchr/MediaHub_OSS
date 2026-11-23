@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"fmt"
 	repo "mediahub_oss/internal/repository"
+	"mediahub_oss/internal/shared"
 	"mediahub_oss/internal/shared/customerrors"
 	"strconv"
 	"strings"
@@ -84,18 +85,15 @@ func (s entryScanner) scan(rows *sql.Rows) (repo.Entry, error) {
 		case "id":
 			entry.ID = asInt64(val)
 		case "timestamp":
-			tsMs := asInt64(val)
-			if tsMs > 0 {
+			if tsMs := asInt64(val); tsMs != shared.MissingTimestamp {
 				entry.Timestamp = time.UnixMilli(tsMs)
 			}
 		case "created_at":
-			tsMs := asInt64(val)
-			if tsMs > 0 {
+			if tsMs := asInt64(val); tsMs != shared.MissingTimestamp {
 				entry.CreatedAt = time.UnixMilli(tsMs)
 			}
 		case "updated_at":
-			tsMs := asInt64(val)
-			if tsMs > 0 {
+			if tsMs := asInt64(val); tsMs != shared.MissingTimestamp {
 				entry.UpdatedAt = time.UnixMilli(tsMs)
 			}
 		case "filesize":

@@ -2,12 +2,14 @@ package processing
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 
 	"mediahub_oss/internal/media"
 	repo "mediahub_oss/internal/repository"
+	"mediahub_oss/internal/shared/customerrors"
 )
 
 // finalizeEntryFile runs the finalization pipeline for a background-processed
@@ -111,13 +113,35 @@ func (p *Processor) finalizeEntryFile(
 	entry.Status = repo.EntryStatusReady
 	entry.Size = uint64(fileSize)
 	entry.MimeType = plan.ResultMimeType
-	entry.FileName = plan.FinalFileName
+	entry.FileName = p.resolveFinalFileName(ctx, db.ID, entry, plan)
 
 	if _, err := p.Repo.UpdateEntry(ctx, db.ID, entry); err != nil {
+		if errors.Is(err, customerrors.ErrNotFound) {
+			_ = p.Storage.Delete(ctx, db.ID.String(), entry.ID)
+			_ = p.Storage.DeletePreview(ctx, db.ID.String(), entry.ID)
+		}
 		processErr = fmt.Errorf("failed to update final database stats: %w", err)
 		return
 	}
 
 	p.Logger.Info("Worker: Successfully processed entry", "entry", entry.ID)
 	return
+}
+
+func (p *Processor) resolveFinalFileName(ctx context.Context, dbID repo.ULID, entry repo.Entry, plan ProcessingPlan) string {
+	currentFileName := entry.FileName
+	if currentEntry, getErr := p.Repo.GetEntry(ctx, dbID, entry.ID); getErr == nil && currentEntry.FileName != "" {
+		currentFileName = currentEntry.FileName
+	}
+	if currentFileName == "" {
+		currentFileName = plan.FinalFileName
+	}
+	if plan.NeedsConversion && plan.CanConvert {
+		targetExt := GetExtensionForMimeType(plan.ResultMimeType)
+		if targetExt == "" {
+			targetExt = GetExtensionForMimeType(plan.TargetMimeType)
+		}
+		return ReplaceExtension(currentFileName, targetExt)
+	}
+	return currentFileName
 }

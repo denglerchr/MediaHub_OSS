@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"math"
 	"mediahub_oss/internal/httpserver/utils"
 	"mediahub_oss/internal/media"
 	"mediahub_oss/internal/processing"
@@ -344,7 +343,7 @@ func (h *EntryHandler) PatchEntry(w http.ResponseWriter, r *http.Request) {
 
 	var req = PostPatchEntryRequest{
 		FileName:     "",
-		Timestamp:    math.MinInt64,
+		Timestamp:    shared.MissingTimestamp,
 		CustomFields: nil,
 	}
 
@@ -369,7 +368,7 @@ func (h *EntryHandler) PatchEntry(w http.ResponseWriter, r *http.Request) {
 		existingEntry.FileName = req.FileName
 	}
 
-	if req.Timestamp != math.MinInt64 {
+	if req.Timestamp != shared.MissingTimestamp {
 		existingEntry.Timestamp = time.UnixMilli(req.Timestamp)
 	}
 
@@ -513,20 +512,20 @@ func (h *EntryHandler) QueryEntries(w http.ResponseWriter, r *http.Request) {
 	timeField := r.URL.Query().Get("time_field")
 
 	var tStart, tEnd time.Time
-	tStartQuery, err := utils.ParseQueryInt64(r, "tstart", math.MinInt64)
+	tStartQuery, err := utils.ParseQueryInt64(r, "tstart", shared.MissingTimestamp)
 	if err != nil {
 		utils.RespondWithError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if tStartQuery != math.MinInt64 {
+	if tStartQuery != shared.MissingTimestamp {
 		tStart = time.UnixMilli(tStartQuery)
 	}
-	tEndQuery, err := utils.ParseQueryInt64(r, "tend", math.MaxInt64)
+	tEndQuery, err := utils.ParseQueryInt64(r, "tend", shared.MissingTimestamp)
 	if err != nil {
 		utils.RespondWithError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if tEndQuery != math.MaxInt64 {
+	if tEndQuery != shared.MissingTimestamp {
 		tEnd = time.UnixMilli(tEndQuery)
 	}
 

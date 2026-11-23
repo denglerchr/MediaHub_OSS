@@ -4,11 +4,11 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"math"
 	"time"
 
 	"mediahub_oss/internal/media"
 	repo "mediahub_oss/internal/repository"
+	"mediahub_oss/internal/shared"
 )
 
 // createPreliminaryEntry creates the database entry for an incoming upload before
@@ -29,7 +29,7 @@ func (p *Processor) createPreliminaryEntry(
 		CustomFields: req.CustomFields,
 	}
 
-	if req.Timestamp == math.MinInt64 {
+	if req.Timestamp == shared.MissingTimestamp {
 		entry.Timestamp = time.Time{}
 	} else {
 		entry.Timestamp = time.UnixMilli(req.Timestamp)

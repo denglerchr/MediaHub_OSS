@@ -10,6 +10,7 @@ import (
 	"mediahub_oss/internal/repository/migrations"
 	_ "mediahub_oss/internal/repository/migrations/sqlite"
 	"mediahub_oss/internal/repository/sqlite"
+	"mediahub_oss/internal/shared"
 	"mediahub_oss/internal/shared/customerrors"
 
 	"github.com/pressly/goose/v3"
@@ -170,6 +171,31 @@ func TestGetEntries_TimeFilterEpochAndHistorical(t *testing.T) {
 		t.Fatalf("expected 2 entries for range [1940, 1970], got %d", len(results))
 	}
 
+	byName := make(map[string]repo.Entry, len(results))
+	for _, entry := range results {
+		if entry.Timestamp.IsZero() {
+			t.Fatalf("expected non-zero timestamp for %s, got zero time (Year 1)", entry.FileName)
+		}
+		if entry.Timestamp.Year() == 1 {
+			t.Fatalf("expected non-Year-1 timestamp for %s, got %v", entry.FileName, entry.Timestamp)
+		}
+		byName[entry.FileName] = entry
+	}
+	e1950, ok := byName["photo_1950.jpg"]
+	if !ok {
+		t.Fatalf("expected photo_1950.jpg in range [1940, 1970], got %v", results)
+	}
+	if !e1950.Timestamp.Equal(t1950) {
+		t.Errorf("expected photo_1950.jpg timestamp %v, got %v", t1950, e1950.Timestamp)
+	}
+	e1970, ok := byName["photo_1970.jpg"]
+	if !ok {
+		t.Fatalf("expected photo_1970.jpg in range [1940, 1970], got %v", results)
+	}
+	if !e1970.Timestamp.Equal(t1970) {
+		t.Errorf("expected photo_1970.jpg timestamp %v, got %v", t1970, e1970.Timestamp)
+	}
+
 	// 2. Filter with exact epoch timestamp TStart = 1970, TEnd = 1970 -> Should return only 1970 entry
 	resultsEpoch, err := r.GetEntries(ctx, createdDB.ID, repo.QueryOptions{
 		TStart: t1970,
@@ -180,6 +206,171 @@ func TestGetEntries_TimeFilterEpochAndHistorical(t *testing.T) {
 	}
 	if len(resultsEpoch) != 1 || resultsEpoch[0].FileName != "photo_1970.jpg" {
 		t.Fatalf("expected only photo_1970.jpg, got %v", resultsEpoch)
+	}
+	if resultsEpoch[0].Timestamp.IsZero() || resultsEpoch[0].Timestamp.Year() == 1 {
+		t.Fatalf("expected non-Year-1 timestamp for photo_1970.jpg, got %v", resultsEpoch[0].Timestamp)
+	}
+	if !resultsEpoch[0].Timestamp.Equal(t1970) {
+		t.Errorf("expected photo_1970.jpg timestamp %v, got %v", t1970, resultsEpoch[0].Timestamp)
+	}
+}
+
+func TestEntryTimestamps_Pre1970AndEpochRoundTrip(t *testing.T) {
+	ctx := context.Background()
+
+	r, err := sqlite.NewRepository(":memory:")
+	if err != nil {
+		t.Fatalf("failed to create repo: %v", err)
+	}
+	defer r.Close()
+
+	if err := goose.SetDialect("sqlite3"); err != nil {
+		t.Fatalf("failed to set goose dialect: %v", err)
+	}
+	goose.SetBaseFS(migrations.EmbedFS)
+	if err := goose.Up(r.DB, "sqlite"); err != nil {
+		t.Fatalf("failed to run migrations: %v", err)
+	}
+
+	db, err := r.CreateDatabase(ctx, repo.Database{
+		Name:        "timestamp_roundtrip_db",
+		ContentType: "image",
+	})
+	if err != nil {
+		t.Fatalf("failed to create database: %v", err)
+	}
+
+	t1950 := time.Date(1950, 1, 1, 12, 0, 0, 0, time.UTC)
+	t1920 := time.Date(1920, 6, 15, 8, 30, 45, 0, time.UTC)
+	t1970 := time.Unix(0, 0).UTC()
+
+	// 1. CreateEntry -> GetEntry with pre-1970 timestamp
+	created, err := r.CreateEntry(ctx, db, repo.Entry{
+		FileName:    "vintage_1950.jpg",
+		MimeType:    "image/jpeg",
+		Size:        1024,
+		Status:      repo.EntryStatusReady,
+		Timestamp:   t1950,
+		MediaFields: map[string]any{"width": 800, "height": 600},
+	})
+	if err != nil {
+		t.Fatalf("CreateEntry failed: %v", err)
+	}
+	if !created.Timestamp.Equal(t1950) {
+		t.Fatalf("expected created.Timestamp == %v, got %v", t1950, created.Timestamp)
+	}
+
+	fetched, err := r.GetEntry(ctx, db.ID, created.ID)
+	if err != nil {
+		t.Fatalf("GetEntry failed: %v", err)
+	}
+	if fetched.Timestamp.IsZero() || fetched.Timestamp.Year() == 1 {
+		t.Fatalf("expected non-Year-1 timestamp from GetEntry, got %v", fetched.Timestamp)
+	}
+	if !fetched.Timestamp.Equal(t1950) {
+		t.Fatalf("expected fetched.Timestamp == %v, got %v", t1950, fetched.Timestamp)
+	}
+
+	// 2. UpdateEntryMetadata updating filename while preserving pre-1970 timestamp
+	fetched.FileName = "renamed_1950.jpg"
+	if _, err := r.UpdateEntryMetadata(ctx, db.ID, fetched); err != nil {
+		t.Fatalf("UpdateEntryMetadata (filename) failed: %v", err)
+	}
+	afterRename, err := r.GetEntry(ctx, db.ID, created.ID)
+	if err != nil {
+		t.Fatalf("GetEntry after rename failed: %v", err)
+	}
+	if afterRename.FileName != "renamed_1950.jpg" {
+		t.Errorf("expected FileName renamed_1950.jpg, got %s", afterRename.FileName)
+	}
+	if !afterRename.Timestamp.Equal(t1950) {
+		t.Errorf("expected preserved timestamp %v after rename, got %v", t1950, afterRename.Timestamp)
+	}
+
+	// 3. UpdateEntryMetadata with zero time.Time{} must leave pre-1970 timestamp intact
+	if _, err := r.UpdateEntryMetadata(ctx, db.ID, repo.Entry{
+		ID:       created.ID,
+		FileName: "zero_ts_edit.jpg",
+	}); err != nil {
+		t.Fatalf("UpdateEntryMetadata (zero timestamp) failed: %v", err)
+	}
+	afterZeroEdit, err := r.GetEntry(ctx, db.ID, created.ID)
+	if err != nil {
+		t.Fatalf("GetEntry after zero-timestamp edit failed: %v", err)
+	}
+	if afterZeroEdit.FileName != "zero_ts_edit.jpg" {
+		t.Errorf("expected FileName zero_ts_edit.jpg, got %s", afterZeroEdit.FileName)
+	}
+	if !afterZeroEdit.Timestamp.Equal(t1950) {
+		t.Errorf("expected pre-1970 timestamp %v to remain intact when UpdateEntryMetadata receives zero Time, got %v", t1950, afterZeroEdit.Timestamp)
+	}
+
+	// 4. UpdateEntryMetadata updating timestamp to another pre-1970 date
+	afterZeroEdit.Timestamp = t1920
+	if _, err := r.UpdateEntryMetadata(ctx, db.ID, afterZeroEdit); err != nil {
+		t.Fatalf("UpdateEntryMetadata (1920) failed: %v", err)
+	}
+	after1920, err := r.GetEntry(ctx, db.ID, created.ID)
+	if err != nil {
+		t.Fatalf("GetEntry after 1920 update failed: %v", err)
+	}
+	if after1920.Timestamp.IsZero() || after1920.Timestamp.Year() == 1 || !after1920.Timestamp.Equal(t1920) {
+		t.Errorf("expected timestamp %v, got %v", t1920, after1920.Timestamp)
+	}
+
+	// 5. UpdateEntryMetadata updating timestamp to exact Unix epoch (1970-01-01T00:00:00Z)
+	after1920.Timestamp = t1970
+	if _, err := r.UpdateEntryMetadata(ctx, db.ID, after1920); err != nil {
+		t.Fatalf("UpdateEntryMetadata (1970 epoch) failed: %v", err)
+	}
+	afterEpoch, err := r.GetEntry(ctx, db.ID, created.ID)
+	if err != nil {
+		t.Fatalf("GetEntry after epoch update failed: %v", err)
+	}
+	if afterEpoch.Timestamp.IsZero() || afterEpoch.Timestamp.Year() == 1 || !afterEpoch.Timestamp.Equal(t1970) {
+		t.Errorf("expected epoch timestamp %v, got %v", t1970, afterEpoch.Timestamp)
+	}
+
+	// 6. CreateEntry -> GetEntry with exact Unix epoch (0 ms)
+	createdEpoch, err := r.CreateEntry(ctx, db, repo.Entry{
+		FileName:    "epoch_1970.jpg",
+		MimeType:    "image/jpeg",
+		Size:        512,
+		Status:      repo.EntryStatusReady,
+		Timestamp:   t1970,
+		MediaFields: map[string]any{"width": 100, "height": 100},
+	})
+	if err != nil {
+		t.Fatalf("CreateEntry (epoch) failed: %v", err)
+	}
+	fetchedEpoch, err := r.GetEntry(ctx, db.ID, createdEpoch.ID)
+	if err != nil {
+		t.Fatalf("GetEntry (epoch) failed: %v", err)
+	}
+	if fetchedEpoch.Timestamp.IsZero() || fetchedEpoch.Timestamp.Year() == 1 || !fetchedEpoch.Timestamp.Equal(t1970) {
+		t.Errorf("expected epoch timestamp %v, got %v", t1970, fetchedEpoch.Timestamp)
+	}
+
+	// 7. Row stored with shared.MissingTimestamp sentinel scans back as zero time.Time{}
+	if _, err := r.DB.ExecContext(ctx,
+		`INSERT INTO "entries_`+db.ID.String()+`" (timestamp, created_at, updated_at, filesize, preview_filesize, filename, status, mime_type, width, height) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		shared.MissingTimestamp, shared.MissingTimestamp, shared.MissingTimestamp, 128, 0, "missing_ts.jpg", repo.EntryStatusReady, "image/jpeg", 10, 10,
+	); err != nil {
+		t.Fatalf("failed to insert MissingTimestamp row: %v", err)
+	}
+	var missingID int64
+	if err := r.DB.QueryRowContext(ctx, `SELECT id FROM "entries_`+db.ID.String()+`" WHERE filename = ?`, "missing_ts.jpg").Scan(&missingID); err != nil {
+		t.Fatalf("failed to query missing_ts.jpg id: %v", err)
+	}
+	fetchedMissing, err := r.GetEntry(ctx, db.ID, missingID)
+	if err != nil {
+		t.Fatalf("GetEntry (MissingTimestamp) failed: %v", err)
+	}
+	if !fetchedMissing.Timestamp.IsZero() {
+		t.Errorf("expected IsZero() == true for MissingTimestamp row, got %v", fetchedMissing.Timestamp)
+	}
+	if !fetchedMissing.CreatedAt.IsZero() || !fetchedMissing.UpdatedAt.IsZero() {
+		t.Errorf("expected CreatedAt and UpdatedAt to be zero for MissingTimestamp row, got created=%v updated=%v", fetchedMissing.CreatedAt, fetchedMissing.UpdatedAt)
 	}
 }
 
@@ -1017,5 +1208,134 @@ func TestSearchEntries_ILIKEOperator(t *testing.T) {
 	}
 	if len(results) != 1 || results[0].FileName != "VacationPhoto.JPG" {
 		t.Fatalf("expected 1 matching entry for ILIKE search, got: %+v", results)
+	}
+}
+
+func TestUpdateEntry_DeletingStatusReturnsNotFound(t *testing.T) {
+	ctx := context.Background()
+
+	r, err := sqlite.NewRepository(":memory:")
+	if err != nil {
+		t.Fatalf("failed to create repo: %v", err)
+	}
+	defer r.Close()
+
+	if err := goose.SetDialect("sqlite3"); err != nil {
+		t.Fatalf("failed to set goose dialect: %v", err)
+	}
+	goose.SetBaseFS(migrations.EmbedFS)
+	if err := goose.Up(r.DB, "sqlite"); err != nil {
+		t.Fatalf("failed to run migrations: %v", err)
+	}
+
+	db, err := r.CreateDatabase(ctx, repo.Database{
+		Name:        "deleting_test_db",
+		ContentType: "image",
+	})
+	if err != nil {
+		t.Fatalf("failed to create database: %v", err)
+	}
+
+	createdEntry, err := r.CreateEntry(ctx, db, repo.Entry{
+		FileName:    "image.jpg",
+		MimeType:    "image/jpeg",
+		Size:        2048,
+		Status:      repo.EntryStatusReady,
+		MediaFields: map[string]any{"width": 800, "height": 600},
+	})
+	if err != nil {
+		t.Fatalf("failed to create entry: %v", err)
+	}
+
+	// Mark entry as deleting
+	err = r.UpdateEntriesStatus(ctx, db.ID, []int64{createdEntry.ID}, repo.EntryStatusDeleting)
+	if err != nil {
+		t.Fatalf("failed to set status to deleting: %v", err)
+	}
+
+	// Attempt to update processing fields of deleting entry -> should fail with ErrNotFound
+	updateAttempt := createdEntry
+	updateAttempt.Size = 4096
+	_, err = r.UpdateEntry(ctx, db.ID, updateAttempt)
+	if !errors.Is(err, customerrors.ErrNotFound) {
+		t.Fatalf("expected ErrNotFound when updating deleting entry, got: %v", err)
+	}
+
+	// Attempt to enqueue deleting entry -> should also fail with ErrNotFound
+	_, err = r.EnqueueEntry(ctx, db.ID, updateAttempt, 10)
+	if !errors.Is(err, customerrors.ErrNotFound) {
+		t.Fatalf("expected ErrNotFound when enqueuing deleting entry, got: %v", err)
+	}
+}
+
+func TestUpdateEntriesStatus_QueuedCountTracking(t *testing.T) {
+	ctx := context.Background()
+
+	r, err := sqlite.NewRepository(":memory:")
+	if err != nil {
+		t.Fatalf("failed to create repo: %v", err)
+	}
+	defer r.Close()
+
+	if err := goose.SetDialect("sqlite3"); err != nil {
+		t.Fatalf("failed to set goose dialect: %v", err)
+	}
+	goose.SetBaseFS(migrations.EmbedFS)
+	if err := goose.Up(r.DB, "sqlite"); err != nil {
+		t.Fatalf("failed to run migrations: %v", err)
+	}
+
+	db, err := r.CreateDatabase(ctx, repo.Database{
+		Name:        "queued_tracking_db",
+		ContentType: "image",
+	})
+	if err != nil {
+		t.Fatalf("failed to create database: %v", err)
+	}
+
+	e1, err := r.CreateEntry(ctx, db, repo.Entry{
+		FileName: "1.jpg", MimeType: "image/jpeg", Size: 100, Status: repo.EntryStatusReady,
+		MediaFields: map[string]any{"width": 10, "height": 10},
+	})
+	if err != nil {
+		t.Fatalf("create e1: %v", err)
+	}
+	e2, err := r.CreateEntry(ctx, db, repo.Entry{
+		FileName: "2.jpg", MimeType: "image/jpeg", Size: 100, Status: repo.EntryStatusReady,
+		MediaFields: map[string]any{"width": 10, "height": 10},
+	})
+	if err != nil {
+		t.Fatalf("create e2: %v", err)
+	}
+
+	// Transition both to Queued
+	if err := r.UpdateEntriesStatus(ctx, db.ID, []int64{e1.ID, e2.ID}, repo.EntryStatusQueued); err != nil {
+		t.Fatalf("UpdateEntriesStatus to Queued: %v", err)
+	}
+
+	stats, err := r.GetDatabaseStats(ctx, db.ID)
+	if err != nil {
+		t.Fatalf("GetDatabaseStats: %v", err)
+	}
+	if stats.QueuedCount != 2 {
+		t.Fatalf("expected QueuedCount == 2, got %d", stats.QueuedCount)
+	}
+
+	// Transition 1 to Processing
+	if err := r.UpdateEntriesStatus(ctx, db.ID, []int64{e1.ID}, repo.EntryStatusProcessing); err != nil {
+		t.Fatalf("UpdateEntriesStatus to Processing: %v", err)
+	}
+
+	stats, err = r.GetDatabaseStats(ctx, db.ID)
+	if err != nil {
+		t.Fatalf("GetDatabaseStats: %v", err)
+	}
+	if stats.QueuedCount != 1 {
+		t.Fatalf("expected QueuedCount == 1, got %d", stats.QueuedCount)
+	}
+
+	// Transition non-existent ID -> should return ErrNotFound
+	if err := r.UpdateEntriesStatus(ctx, db.ID, []int64{999999}, repo.EntryStatusReady); !errors.Is(err, customerrors.ErrNotFound) {
+		t.Fatalf("expected ErrNotFound for non-existent IDs, got: %v", err)
 	}
 }

@@ -177,6 +177,9 @@ func (r *PostgresRepository) GetEntries(ctx context.Context, dbID repo.ULID, opt
 	if len(opts.Statuses) > 0 {
 		builder = builder.Where(squirrel.Eq{"status": opts.Statuses})
 	}
+	if opts.AfterID > 0 {
+		builder = builder.Where(squirrel.Gt{"id": opts.AfterID})
+	}
 
 	builder = builder.OrderBy(fmt.Sprintf("%s %s", opts.SortBy, strings.ToUpper(opts.Order)))
 
@@ -233,6 +236,7 @@ func (r *PostgresRepository) UpdateEntry(ctx context.Context, dbID repo.ULID, en
 	queryOld, argsOld, err := r.Builder.Select("filesize", "preview_filesize", "status").
 		From(tableName).
 		Where(squirrel.Eq{"id": entry.ID}).
+		Suffix("FOR UPDATE").
 		ToSql()
 	if err != nil {
 		return repo.Entry{}, fmt.Errorf("failed to build select old sizes query: %w", err)
@@ -244,6 +248,10 @@ func (r *PostgresRepository) UpdateEntry(ctx context.Context, dbID repo.ULID, en
 			return repo.Entry{}, customerrors.ErrNotFound
 		}
 		return repo.Entry{}, fmt.Errorf("failed to query old sizes and status: %w", err)
+	}
+
+	if oldStatus == repo.EntryStatusDeleting {
+		return repo.Entry{}, customerrors.ErrNotFound
 	}
 
 	updateData := map[string]any{
@@ -335,16 +343,12 @@ func (r *PostgresRepository) UpdateEntryMetadata(ctx context.Context, dbID repo.
 		return repo.Entry{}, err
 	}
 
-	// A zero timestamp means "missing"; store it as 0 instead of a year-1 epoch.
-	var tsMillis int64
-	if !entry.Timestamp.IsZero() {
-		tsMillis = entry.Timestamp.UnixMilli()
-	}
-
 	updateData := map[string]any{
-		"timestamp":  tsMillis,
 		"updated_at": squirrel.Expr("(EXTRACT(EPOCH FROM clock_timestamp()) * 1000)::BIGINT"),
 		"filename":   entry.FileName,
+	}
+	if !entry.Timestamp.IsZero() {
+		updateData["timestamp"] = entry.Timestamp.UnixMilli()
 	}
 	if err := mapCustomFieldsToPostgresColumns(customFields, entry.CustomFields, updateData); err != nil {
 		return repo.Entry{}, err
@@ -404,6 +408,7 @@ func (r *PostgresRepository) EnqueueEntry(ctx context.Context, dbID repo.ULID, e
 	queryOld, argsOld, err := r.Builder.Select("filesize", "preview_filesize", "status").
 		From(tableName).
 		Where(squirrel.Eq{"id": entry.ID}).
+		Suffix("FOR UPDATE").
 		ToSql()
 	if err != nil {
 		return repo.Entry{}, fmt.Errorf("failed to build select old sizes query: %w", err)
@@ -417,7 +422,41 @@ func (r *PostgresRepository) EnqueueEntry(ctx context.Context, dbID repo.ULID, e
 		return repo.Entry{}, fmt.Errorf("failed to query old sizes and status: %w", err)
 	}
 
+	if oldStatus == repo.EntryStatusDeleting {
+		return repo.Entry{}, customerrors.ErrNotFound
+	}
+
 	delta := (int64(entry.Size) + int64(entry.PreviewSize)) - (int64(oldSize) + int64(oldPreviewSize))
+
+	updateData := map[string]any{
+		"updated_at":       squirrel.Expr("(EXTRACT(EPOCH FROM clock_timestamp()) * 1000)::BIGINT"),
+		"filesize":         entry.Size,
+		"preview_filesize": entry.PreviewSize,
+		"filename":         entry.FileName,
+		"status":           repo.EntryStatusQueued,
+		"mime_type":        entry.MimeType,
+	}
+
+	for key, value := range entry.MediaFields {
+		updateData[key] = value
+	}
+
+	updateQuery, argsUpdate, err := r.Builder.Update(tableName).
+		SetMap(updateData).
+		Where(squirrel.Eq{"id": entry.ID}).
+		Suffix("RETURNING updated_at").
+		ToSql()
+	if err != nil {
+		return repo.Entry{}, fmt.Errorf("failed to build update query: %w", err)
+	}
+
+	var updatedMillis int64
+	if err = tx.QueryRowContext(ctx, updateQuery, argsUpdate...).Scan(&updatedMillis); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return repo.Entry{}, customerrors.ErrNotFound
+		}
+		return repo.Entry{}, fmt.Errorf("failed to update entry: %w", err)
+	}
 
 	if oldStatus != repo.EntryStatusQueued {
 		statsBuilder := r.Builder.Update("databases").
@@ -457,36 +496,6 @@ func (r *PostgresRepository) EnqueueEntry(ctx context.Context, dbID repo.ULID, e
 		}
 	}
 
-	updateData := map[string]any{
-		"updated_at":       squirrel.Expr("(EXTRACT(EPOCH FROM clock_timestamp()) * 1000)::BIGINT"),
-		"filesize":         entry.Size,
-		"preview_filesize": entry.PreviewSize,
-		"filename":         entry.FileName,
-		"status":           repo.EntryStatusQueued,
-		"mime_type":        entry.MimeType,
-	}
-
-	for key, value := range entry.MediaFields {
-		updateData[key] = value
-	}
-
-	updateQuery, argsUpdate, err := r.Builder.Update(tableName).
-		SetMap(updateData).
-		Where(squirrel.Eq{"id": entry.ID}).
-		Suffix("RETURNING updated_at").
-		ToSql()
-	if err != nil {
-		return repo.Entry{}, fmt.Errorf("failed to build update query: %w", err)
-	}
-
-	var updatedMillis int64
-	if err = tx.QueryRowContext(ctx, updateQuery, argsUpdate...).Scan(&updatedMillis); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return repo.Entry{}, customerrors.ErrNotFound
-		}
-		return repo.Entry{}, fmt.Errorf("failed to update entry: %w", err)
-	}
-
 	if err := tx.Commit(); err != nil {
 		return repo.Entry{}, fmt.Errorf("failed to commit enqueue transaction: %w", err)
 	}
@@ -514,16 +523,13 @@ func (r *PostgresRepository) UpdateEntriesStatus(ctx context.Context, dbID repo.
 	}
 	defer tx.Rollback()
 
-	var currentlyQueued int64
-	countQuery, countArgs, err := r.Builder.Select("COUNT(*)").
-		From(tableName).
-		Where(squirrel.Eq{"id": entryIDs, "status": repo.EntryStatusQueued}).
-		ToSql()
+	foundCount, currentlyQueued, err := r.lockAndCountQueuedEntries(ctx, tx, tableName, entryIDs)
 	if err != nil {
-		return fmt.Errorf("failed to build count query: %w", err)
+		return err
 	}
-	if err := tx.QueryRowContext(ctx, countQuery, countArgs...).Scan(&currentlyQueued); err != nil {
-		return fmt.Errorf("failed to count currently queued entries: %w", err)
+
+	if foundCount == 0 {
+		return customerrors.ErrNotFound
 	}
 
 	query, args, err := r.Builder.Update(tableName).
@@ -575,6 +581,40 @@ func (r *PostgresRepository) UpdateEntriesStatus(ctx context.Context, dbID repo.
 	}
 
 	return nil
+}
+
+func (r *PostgresRepository) lockAndCountQueuedEntries(ctx context.Context, tx *sql.Tx, tableName string, entryIDs []int64) (foundCount, currentlyQueued int64, err error) {
+	lockQuery, lockArgs, err := r.Builder.Select("id", "status").
+		From(tableName).
+		Where(squirrel.Eq{"id": entryIDs}).
+		Suffix("FOR UPDATE").
+		ToSql()
+	if err != nil {
+		return 0, 0, fmt.Errorf("failed to build lock query: %w", err)
+	}
+
+	rows, err := tx.QueryContext(ctx, lockQuery, lockArgs...)
+	if err != nil {
+		return 0, 0, fmt.Errorf("failed to lock entries: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var id int64
+		var s repo.EntryStatus
+		if err := rows.Scan(&id, &s); err != nil {
+			return 0, 0, fmt.Errorf("failed to scan entry status: %w", err)
+		}
+		foundCount++
+		if s == repo.EntryStatusQueued {
+			currentlyQueued++
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return 0, 0, fmt.Errorf("failed to iterate locked entries: %w", err)
+	}
+
+	return foundCount, currentlyQueued, nil
 }
 
 // DeleteEntry removes a single entry and atomically decrements parent database stats.

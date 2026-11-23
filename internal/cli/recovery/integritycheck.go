@@ -145,17 +145,18 @@ func (s *RecoveryService) checkMissingFiles(ctx context.Context, db repository.D
 		}
 
 		for _, entry := range entries {
-			existingIDs = append(existingIDs, entry.ID)
 			processedDB++
 			percent := (processedDB * 100) / expectedEntryCount
 			fmt.Printf("\r- Step 2: Integrity check: %d%% (Scanning DB->Disk...)", percent)
 
+			isMissing := false
 			// Only verify "ready" files, as Step 1 already handled "processing" and "deleting"
 			if entry.Status == repository.EntryStatusReady {
 				info, err := s.storage.Stat(ctx, db.ID.String(), entry.ID)
 
 				if errors.Is(err, customerrors.ErrNotFound) {
 					missingFileIDs = append(missingFileIDs, entry.ID)
+					isMissing = true
 				} else if err != nil {
 					fmt.Println() // Break the \r progress line
 					s.logger.Error("Storage stat failed", "database_id", db.ID.String(), "database_name", db.Name, "id", entry.ID, "error", err)
@@ -172,6 +173,10 @@ func (s *RecoveryService) checkMissingFiles(ctx context.Context, db repository.D
 						)
 					}
 				}
+			}
+
+			if !isMissing {
+				existingIDs = append(existingIDs, entry.ID)
 			}
 		}
 	}

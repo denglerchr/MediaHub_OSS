@@ -36,6 +36,17 @@ func (m *mockPermHolder) GetAllPermissions(ctx context.Context) (map[repo.ULID]r
 	return map[repo.ULID]repo.AccessGrant{}, nil
 }
 
+func (m *mockPermHolder) HasGlobalScope(ag repo.AccessGrant) bool {
+	return m.isGlobalAdmin
+}
+
+func (m *mockPermHolder) EffectiveScope() repo.AccessGrant {
+	if m.isGlobalAdmin {
+		return repo.NewAccessGrant(true, true, true, true, true)
+	}
+	return 0
+}
+
 func TestAuthMiddleware_JSONErrorResponses(t *testing.T) {
 	am := auth.NewAuthMiddleware(nil, "test_jwt_secret_key_123456789012")
 
@@ -330,4 +341,137 @@ func TestAPIKeyWorker_CloseFlushesUpdates(t *testing.T) {
 	if mockRepo.updatedAPIKeyID != keyID {
 		t.Fatalf("expected keyID %s, got %s", keyID, mockRepo.updatedAPIKeyID)
 	}
+}
+
+func TestRequireSelfOrAdmin(t *testing.T) {
+	am := auth.NewAuthMiddleware(nil, "secret")
+	protected := am.RequireSelfOrAdmin()(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	user1ID := repo.ULID("01HGFB9Z5W7ABCDEFGHJKMNPQR")
+	user2ID := repo.ULID("01HGFB9Z5W7ABCDEFGHJKMNXYZ")
+
+	t.Run("global admin caller can manage any user", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/api/user/"+string(user2ID)+"/keys", nil)
+		req.SetPathValue("user_ulid", string(user2ID))
+
+		ctx := context.WithValue(req.Context(), utils.UserKey, &repo.User{ID: user1ID, IsAdmin: true})
+		ctx = context.WithValue(ctx, utils.PermissionHolderKey, &utils.GlobalAdmin{UserULID: user1ID})
+
+		protected.ServeHTTP(rec, req.WithContext(ctx))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d", rec.Code)
+		}
+	})
+
+	t.Run("regular session user can manage own keys", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/api/user/"+string(user1ID)+"/keys", nil)
+		req.SetPathValue("user_ulid", string(user1ID))
+
+		ctx := context.WithValue(req.Context(), utils.UserKey, &repo.User{ID: user1ID, IsAdmin: false})
+		ctx = context.WithValue(ctx, utils.PermissionHolderKey, &utils.UserPermissions{
+			UserULID: user1ID,
+			Scope:    repo.NewAccessGrant(true, true, true, true, true),
+		})
+
+		protected.ServeHTTP(rec, req.WithContext(ctx))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d", rec.Code)
+		}
+	})
+
+	t.Run("regular session user cannot manage other user keys", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/api/user/"+string(user2ID)+"/keys", nil)
+		req.SetPathValue("user_ulid", string(user2ID))
+
+		ctx := context.WithValue(req.Context(), utils.UserKey, &repo.User{ID: user1ID, IsAdmin: false})
+		ctx = context.WithValue(ctx, utils.PermissionHolderKey, &utils.UserPermissions{
+			UserULID: user1ID,
+			Scope:    repo.NewAccessGrant(true, true, true, true, true),
+		})
+
+		protected.ServeHTTP(rec, req.WithContext(ctx))
+		if rec.Code != http.StatusForbidden {
+			t.Fatalf("expected 403, got %d", rec.Code)
+		}
+	})
+
+	t.Run("API key caller without admin scope rejected on self", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/api/user/"+string(user1ID)+"/keys", nil)
+		req.SetPathValue("user_ulid", string(user1ID))
+
+		apiKey := &repo.APIKey{
+			ID:        "01HKEY123",
+			UserID:    user1ID,
+			Scope:     repo.AccessView | repo.AccessEdit, // No AccessAdmin
+			CreatedAt: time.Now(),
+		}
+
+		ctx := context.WithValue(req.Context(), utils.UserKey, &repo.User{ID: user1ID, IsAdmin: false})
+		ctx = context.WithValue(ctx, utils.APIKeyKey, apiKey)
+		ctx = context.WithValue(ctx, utils.PermissionHolderKey, &utils.UserPermissions{
+			UserULID: user1ID,
+			Scope:    apiKey.Scope,
+		})
+
+		protected.ServeHTTP(rec, req.WithContext(ctx))
+		if rec.Code != http.StatusForbidden {
+			t.Fatalf("expected 403, got %d", rec.Code)
+		}
+	})
+
+	t.Run("API key caller with admin scope allowed on self", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/api/user/"+string(user1ID)+"/keys", nil)
+		req.SetPathValue("user_ulid", string(user1ID))
+
+		apiKey := &repo.APIKey{
+			ID:        "01HKEY456",
+			UserID:    user1ID,
+			Scope:     repo.AccessView | repo.AccessAdmin,
+			CreatedAt: time.Now(),
+		}
+
+		ctx := context.WithValue(req.Context(), utils.UserKey, &repo.User{ID: user1ID, IsAdmin: false})
+		ctx = context.WithValue(ctx, utils.APIKeyKey, apiKey)
+		ctx = context.WithValue(ctx, utils.PermissionHolderKey, &utils.UserPermissions{
+			UserULID: user1ID,
+			Scope:    apiKey.Scope,
+		})
+
+		protected.ServeHTTP(rec, req.WithContext(ctx))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d", rec.Code)
+		}
+	})
+
+	t.Run("APIKeyOfAdmin without AccessAdmin rejected", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/api/user/"+string(user1ID)+"/keys", nil)
+		req.SetPathValue("user_ulid", string(user1ID))
+
+		apiKey := &repo.APIKey{
+			ID:        "01HKEY789",
+			UserID:    user1ID,
+			Scope:     repo.AccessView | repo.AccessCreate, // Admin user's key, but no AccessAdmin
+			CreatedAt: time.Now(),
+		}
+
+		ctx := context.WithValue(req.Context(), utils.UserKey, &repo.User{ID: user1ID, IsAdmin: true})
+		ctx = context.WithValue(ctx, utils.APIKeyKey, apiKey)
+		ctx = context.WithValue(ctx, utils.PermissionHolderKey, &utils.APIKeyOfAdmin{
+			UserULID: user1ID,
+			Scope:    apiKey.Scope,
+		})
+
+		protected.ServeHTTP(rec, req.WithContext(ctx))
+		if rec.Code != http.StatusForbidden {
+			t.Fatalf("expected 403, got %d", rec.Code)
+		}
+	})
 }

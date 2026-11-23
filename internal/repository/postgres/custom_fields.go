@@ -2,6 +2,8 @@ package postgres
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -64,21 +66,23 @@ func (r *PostgresRepository) getCustomFields(ctx context.Context, q Queryer, dbI
 	return fields, nil
 }
 
+func (r *PostgresRepository) lockDatabaseForUpdate(ctx context.Context, tx *sql.Tx, dbID repo.ULID) error {
+	var dummy int
+	err := tx.QueryRowContext(ctx, "SELECT 1 FROM databases WHERE id = $1 FOR UPDATE", dbID.String()).Scan(&dummy)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return customerrors.ErrNotFound
+		}
+		return fmt.Errorf("failed to lock database: %w", err)
+	}
+	return nil
+}
+
 // AddCustomField adds a new custom field to an existing database.
 func (r *PostgresRepository) AddCustomField(ctx context.Context, dbID repo.ULID, field repo.CustomFieldDef) (repo.CustomFieldDef, error) {
 	if !shared.IsValidULID(dbID.String()) {
 		return repo.CustomFieldDef{}, fmt.Errorf("%w: invalid database id", customerrors.ErrValidation)
 	}
-
-	var exists bool
-	err := r.DB.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM databases WHERE id = $1)", dbID.String()).Scan(&exists)
-	if err != nil {
-		return repo.CustomFieldDef{}, fmt.Errorf("failed to check database existence: %w", err)
-	}
-	if !exists {
-		return repo.CustomFieldDef{}, customerrors.ErrNotFound
-	}
-
 	if field.Name == "" {
 		return repo.CustomFieldDef{}, fmt.Errorf("%w: field name cannot be empty", customerrors.ErrValidation)
 	}
@@ -92,7 +96,17 @@ func (r *PostgresRepository) AddCustomField(ctx context.Context, dbID repo.ULID,
 		return repo.CustomFieldDef{}, fmt.Errorf("%w: unsupported custom field type '%s'", customerrors.ErrValidation, field.Type)
 	}
 
-	existingFields, err := r.getCustomFields(ctx, r.DB, dbID)
+	tx, err := r.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return repo.CustomFieldDef{}, err
+	}
+	defer tx.Rollback()
+
+	if err := r.lockDatabaseForUpdate(ctx, tx, dbID); err != nil {
+		return repo.CustomFieldDef{}, err
+	}
+
+	existingFields, err := r.getCustomFields(ctx, tx, dbID)
 	if err != nil {
 		return repo.CustomFieldDef{}, err
 	}
@@ -118,12 +132,6 @@ func (r *PostgresRepository) AddCustomField(ctx context.Context, dbID repo.ULID,
 		return repo.CustomFieldDef{}, fmt.Errorf("Cannot add field: The maximum limit of 255 custom fields has been reached.")
 	}
 	field.ID = nextID
-
-	tx, err := r.DB.BeginTx(ctx, nil)
-	if err != nil {
-		return repo.CustomFieldDef{}, err
-	}
-	defer tx.Rollback()
 
 	query, args, err := r.Builder.Insert("database_custom_fields").
 		Columns("database_id", "field_id", "name", "type", "is_indexed").
@@ -165,17 +173,17 @@ func (r *PostgresRepository) UpdateCustomField(ctx context.Context, dbID repo.UL
 	if !shared.IsValidULID(dbID.String()) {
 		return repo.CustomFieldDef{}, fmt.Errorf("%w: invalid database id", customerrors.ErrValidation)
 	}
-
-	var exists bool
-	err := r.DB.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM databases WHERE id = $1)", dbID.String()).Scan(&exists)
+	tx, err := r.DB.BeginTx(ctx, nil)
 	if err != nil {
-		return repo.CustomFieldDef{}, fmt.Errorf("failed to check database existence: %w", err)
+		return repo.CustomFieldDef{}, err
 	}
-	if !exists {
-		return repo.CustomFieldDef{}, customerrors.ErrNotFound
+	defer tx.Rollback()
+
+	if err := r.lockDatabaseForUpdate(ctx, tx, dbID); err != nil {
+		return repo.CustomFieldDef{}, err
 	}
 
-	existingFields, err := r.getCustomFields(ctx, r.DB, dbID)
+	existingFields, err := r.getCustomFields(ctx, tx, dbID)
 	if err != nil {
 		return repo.CustomFieldDef{}, err
 	}
@@ -214,12 +222,6 @@ func (r *PostgresRepository) UpdateCustomField(ctx context.Context, dbID repo.UL
 	if newName == targetField.Name && newIsIndexed == targetField.IsIndexed {
 		return *targetField, nil
 	}
-
-	tx, err := r.DB.BeginTx(ctx, nil)
-	if err != nil {
-		return repo.CustomFieldDef{}, err
-	}
-	defer tx.Rollback()
 
 	if newIsIndexed != targetField.IsIndexed {
 		if newIsIndexed {
@@ -271,17 +273,17 @@ func (r *PostgresRepository) DeleteCustomField(ctx context.Context, dbID repo.UL
 	if !shared.IsValidULID(dbID.String()) {
 		return fmt.Errorf("%w: invalid database id", customerrors.ErrValidation)
 	}
-
-	var exists bool
-	err := r.DB.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM databases WHERE id = $1)", dbID.String()).Scan(&exists)
+	tx, err := r.DB.BeginTx(ctx, nil)
 	if err != nil {
-		return fmt.Errorf("failed to check database existence: %w", err)
+		return err
 	}
-	if !exists {
-		return customerrors.ErrNotFound
+	defer tx.Rollback()
+
+	if err := r.lockDatabaseForUpdate(ctx, tx, dbID); err != nil {
+		return err
 	}
 
-	existingFields, err := r.getCustomFields(ctx, r.DB, dbID)
+	existingFields, err := r.getCustomFields(ctx, tx, dbID)
 	if err != nil {
 		return err
 	}
@@ -296,12 +298,6 @@ func (r *PostgresRepository) DeleteCustomField(ctx context.Context, dbID repo.UL
 	if !found {
 		return customerrors.ErrNotFound
 	}
-
-	tx, err := r.DB.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
 
 	dropIndexSQL := BuildCustomFieldDropIndexSQL(dbID.String(), fieldID)
 	if _, err := tx.ExecContext(ctx, dropIndexSQL); err != nil {

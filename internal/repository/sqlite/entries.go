@@ -184,6 +184,9 @@ func (r *SQLiteRepository) GetEntries(ctx context.Context, dbID repo.ULID, opts 
 	if len(opts.Statuses) > 0 {
 		builder = builder.Where(squirrel.Eq{"status": opts.Statuses})
 	}
+	if opts.AfterID > 0 {
+		builder = builder.Where(squirrel.Gt{"id": opts.AfterID})
+	}
 
 	builder = builder.OrderBy(fmt.Sprintf("%s %s", opts.SortBy, strings.ToUpper(opts.Order)))
 
@@ -253,6 +256,10 @@ func (r *SQLiteRepository) UpdateEntry(ctx context.Context, dbID repo.ULID, entr
 			return repo.Entry{}, customerrors.ErrNotFound
 		}
 		return repo.Entry{}, fmt.Errorf("failed to query old sizes and status: %w", err)
+	}
+
+	if oldStatus == repo.EntryStatusDeleting {
+		return repo.Entry{}, customerrors.ErrNotFound
 	}
 
 	// 3. Update the entry row with new data
@@ -338,17 +345,14 @@ func (r *SQLiteRepository) UpdateEntryMetadata(ctx context.Context, dbID repo.UL
 		return repo.Entry{}, err
 	}
 
-	// A zero timestamp means "missing"; store it as 0 instead of a year-1 epoch.
-	var tsMs int64
-	if !entry.Timestamp.IsZero() {
-		tsMs = entry.Timestamp.UnixMilli()
-	}
 	now := time.Now().UnixMilli()
 
 	updateData := map[string]any{
-		"timestamp":  tsMs,
 		"updated_at": now,
 		"filename":   entry.FileName,
+	}
+	if !entry.Timestamp.IsZero() {
+		updateData["timestamp"] = entry.Timestamp.UnixMilli()
 	}
 	if err := mapCustomFieldsToSQLiteColumns(customFields, entry.CustomFields, updateData); err != nil {
 		return repo.Entry{}, err
@@ -412,7 +416,37 @@ func (r *SQLiteRepository) EnqueueEntry(ctx context.Context, dbID repo.ULID, ent
 		return repo.Entry{}, fmt.Errorf("failed to query old sizes and status: %w", err)
 	}
 
+	if oldStatus == repo.EntryStatusDeleting {
+		return repo.Entry{}, customerrors.ErrNotFound
+	}
+
 	delta := (int64(entry.Size) + int64(entry.PreviewSize)) - (int64(oldSize) + int64(oldPreviewSize))
+
+	now := time.Now().UnixMilli()
+	updateData := map[string]any{
+		"updated_at":       now,
+		"filesize":         entry.Size,
+		"preview_filesize": entry.PreviewSize,
+		"filename":         entry.FileName,
+		"status":           repo.EntryStatusQueued,
+		"mime_type":        entry.MimeType,
+	}
+
+	for key, value := range entry.MediaFields {
+		updateData[key] = value
+	}
+
+	updateQuery, argsUpdate, err := r.Builder.Update(tableName).
+		SetMap(updateData).
+		Where(squirrel.Eq{"id": entry.ID}).
+		ToSql()
+	if err != nil {
+		return repo.Entry{}, fmt.Errorf("failed to build update query: %w", err)
+	}
+
+	if _, err = tx.ExecContext(ctx, updateQuery, argsUpdate...); err != nil {
+		return repo.Entry{}, fmt.Errorf("failed to update entry: %w", err)
+	}
 
 	if oldStatus != repo.EntryStatusQueued {
 		statsBuilder := r.Builder.Update("databases").
@@ -450,32 +484,6 @@ func (r *SQLiteRepository) EnqueueEntry(ctx context.Context, dbID repo.ULID, ent
 		if _, err := tx.ExecContext(ctx, statsQuery, statsArgs...); err != nil {
 			return repo.Entry{}, fmt.Errorf("failed to update database stats: %w", err)
 		}
-	}
-
-	now := time.Now().UnixMilli()
-	updateData := map[string]any{
-		"updated_at":       now,
-		"filesize":         entry.Size,
-		"preview_filesize": entry.PreviewSize,
-		"filename":         entry.FileName,
-		"status":           repo.EntryStatusQueued,
-		"mime_type":        entry.MimeType,
-	}
-
-	for key, value := range entry.MediaFields {
-		updateData[key] = value
-	}
-
-	updateQuery, argsUpdate, err := r.Builder.Update(tableName).
-		SetMap(updateData).
-		Where(squirrel.Eq{"id": entry.ID}).
-		ToSql()
-	if err != nil {
-		return repo.Entry{}, fmt.Errorf("failed to build update query: %w", err)
-	}
-
-	if _, err = tx.ExecContext(ctx, updateQuery, argsUpdate...); err != nil {
-		return repo.Entry{}, fmt.Errorf("failed to update entry: %w", err)
 	}
 
 	if err := tx.Commit(); err != nil {

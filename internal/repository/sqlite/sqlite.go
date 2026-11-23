@@ -9,6 +9,7 @@ import (
 	sqlitemigrations "mediahub_oss/internal/repository/migrations/sqlite"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Masterminds/squirrel"
@@ -22,6 +23,11 @@ const customFieldsPrefix = "cf_"
 // to validate the name of provided databases
 var safeNameRegex = regexp.MustCompile("^[a-zA-Z_][a-zA-Z0-9_]*$")
 
+type lockEntry struct {
+	ownerID   string
+	expiresAt time.Time
+}
+
 type SQLiteRepository struct {
 	DB      *sql.DB
 	Cache   *cache.Cache
@@ -29,6 +35,9 @@ type SQLiteRepository struct {
 
 	AllowedStatuses []repository.EntryStatus
 	MediaFields     map[string][]MediaField // Added MediaFields
+
+	locksMu sync.Mutex
+	locks   map[string]lockEntry
 }
 
 type MediaField struct {
@@ -107,6 +116,7 @@ func NewRepository(path string) (*SQLiteRepository, error) {
 		Builder:         builder,
 		AllowedStatuses: repository.GetAllEntryStatuses(),
 		MediaFields:     mediaFields, // TODO create map from media interface methods
+		locks:           make(map[string]lockEntry),
 	}, nil
 }
 
