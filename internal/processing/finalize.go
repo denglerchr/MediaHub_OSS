@@ -86,7 +86,7 @@ func (p *Processor) finalizeEntryFile(
 
 	// 3. Generate preview
 	if plan.WantsPreview && plan.CanGenPreview {
-		previewSize, err := p.generateAndStorePreview(ctx, db, entry.ID, plan.ResultMimeType, func(ctx context.Context, w io.Writer) error {
+		previewSize, err := p.generateAndStorePreview(ctx, db, entry.ID, func(ctx context.Context, w io.Writer) error {
 			return p.MediaConverter.CreatePreviewFromFile(ctx, currentPath, w, plan.ResultMimeType)
 		})
 		if err != nil {
@@ -102,7 +102,7 @@ func (p *Processor) finalizeEntryFile(
 		processErr = fmt.Errorf("failed to open final file for storage: %w", err)
 		return
 	}
-	fileSize, err := p.Storage.Write(ctx, db.ID.String(), entry.ID, finalFile)
+	fileSize, err := p.Storage.Write(ctx, db.ID, entry.ID, finalFile)
 	finalFile.Close()
 	if err != nil {
 		processErr = fmt.Errorf("failed to stream file to storage: %w", err)
@@ -117,8 +117,8 @@ func (p *Processor) finalizeEntryFile(
 
 	if _, err := p.Repo.UpdateEntry(ctx, db.ID, entry); err != nil {
 		if errors.Is(err, customerrors.ErrNotFound) {
-			_ = p.Storage.Delete(ctx, db.ID.String(), entry.ID)
-			_ = p.Storage.DeletePreview(ctx, db.ID.String(), entry.ID)
+			_ = p.Storage.Delete(ctx, db.ID, entry.ID)
+			_ = p.Storage.DeletePreview(ctx, db.ID, entry.ID)
 		}
 		processErr = fmt.Errorf("failed to update final database stats: %w", err)
 		return

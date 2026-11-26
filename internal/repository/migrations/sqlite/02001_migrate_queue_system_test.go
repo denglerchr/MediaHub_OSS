@@ -11,9 +11,6 @@ import (
 	"strings"
 	"testing"
 
-	"mediahub_oss/internal/repository/migrations"
-
-	"github.com/pressly/goose/v3"
 	_ "modernc.org/sqlite"
 )
 
@@ -27,15 +24,14 @@ func TestMigration02001_CustomFieldsAndTableRebuild(t *testing.T) {
 	}
 	defer db.Close()
 
-	// 2. Set Goose dialect and filesystem
-	if err := goose.SetDialect("sqlite3"); err != nil {
-		t.Fatalf("failed to set goose dialect: %v", err)
+	// 2. Create isolated Goose migration provider
+	provider, err := NewProvider(db)
+	if err != nil {
+		t.Fatalf("failed to create migration provider: %v", err)
 	}
-	goose.SetBaseFS(migrations.EmbedFS)
-	Register()
 
 	// 3. Migrate UP to version 2000 (pre-02001 state)
-	if err := goose.UpTo(db, "sqlite", 2000); err != nil {
+	if _, err := provider.UpTo(ctx, 2000); err != nil {
 		t.Fatalf("failed to migrate to version 2000: %v", err)
 	}
 
@@ -81,7 +77,7 @@ func TestMigration02001_CustomFieldsAndTableRebuild(t *testing.T) {
 	}
 
 	// 6. Run migration 02001
-	if err := goose.UpTo(db, "sqlite", 2001); err != nil {
+	if _, err := provider.UpTo(ctx, 2001); err != nil {
 		t.Fatalf("failed to migrate to version 2001: %v", err)
 	}
 

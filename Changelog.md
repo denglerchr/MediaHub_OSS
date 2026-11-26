@@ -1,3 +1,12 @@
+# v3.2.1
+
+Features:
+- add `idstart` and `idend` query parameters to `GET /api/database/{database_id}/entries`
+
+Bug fixes:
+- fix regression for display of timestamps <1970
+- LLM analysis and bug fixes, multitude of bugs.
+
 # v3.2
 
 Features

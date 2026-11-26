@@ -77,7 +77,3 @@ func (u User) IsServiceAccount() bool {
 func (u User) IsOIDC() bool {
 	return u.AccountType == AccountTypeOIDC
 }
-
-func (u User) IsLocal() bool {
-	return u.AccountType == AccountTypeLocal
-}

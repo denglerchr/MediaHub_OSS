@@ -5,7 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"mediahub_oss/internal/repository"
-	"mediahub_oss/internal/shared"
+	"mediahub_oss/internal/shared/ulid"
 )
 
 func up03001(ctx context.Context, tx *sql.Tx) error {
@@ -60,7 +60,7 @@ func up03001(ctx context.Context, tx *sql.Tx) error {
 	// 3. Generate mapping: Old Integer ID -> New ULID
 	idMap := make(map[int64]repository.ULID)
 	for _, u := range oldUsers {
-		idMap[u.id] = repository.ULID(shared.GenerateULID())
+		idMap[u.id] = ulid.New()
 	}
 
 	// 4. Rename old tables to temporary names

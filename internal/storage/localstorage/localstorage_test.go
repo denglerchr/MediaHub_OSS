@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"mediahub_oss/internal/shared/customerrors"
+	"mediahub_oss/internal/shared/ulid"
 	"mediahub_oss/internal/storage/localstorage"
 )
 
@@ -38,16 +39,17 @@ func TestLocalStorage_Read_NotFound(t *testing.T) {
 	tmpDir := t.TempDir()
 	store := &localstorage.LocalStorage{RootPath: tmpDir}
 	ctx := context.Background()
+	dbID := ulid.MustParse("01HGFB9Z5W7ABCDEFGHJKMNPQR")
 
 	t.Run("Read non-existent file returns ErrNotFound", func(t *testing.T) {
-		_, err := store.Read(ctx, "01HGFB9Z5W7ABCDEFGHJKMNPQR", 99999, 0, -1)
+		_, err := store.Read(ctx, dbID, 99999, 0, -1)
 		if !errors.Is(err, customerrors.ErrNotFound) {
 			t.Fatalf("expected customerrors.ErrNotFound, got: %v", err)
 		}
 	})
 
 	t.Run("ReadPreview non-existent file returns ErrNotFound", func(t *testing.T) {
-		_, err := store.ReadPreview(ctx, "01HGFB9Z5W7ABCDEFGHJKMNPQR", 99999)
+		_, err := store.ReadPreview(ctx, dbID, 99999)
 		if !errors.Is(err, customerrors.ErrNotFound) {
 			t.Fatalf("expected customerrors.ErrNotFound, got: %v", err)
 		}
@@ -58,7 +60,7 @@ func TestLocalStorage_Write_AtomicCleanupOnError(t *testing.T) {
 	tmpDir := t.TempDir()
 	store := &localstorage.LocalStorage{RootPath: tmpDir}
 	ctx := context.Background()
-	dbID := "01HGFB9Z5W7ABCDEFGHJKMNPQR"
+	dbID := ulid.MustParse("01HGFB9Z5W7ABCDEFGHJKMNPQR")
 	var entryID int64 = 10232
 
 	// Writer fails midway
@@ -73,7 +75,7 @@ func TestLocalStorage_Write_AtomicCleanupOnError(t *testing.T) {
 	}
 
 	// Verify that no partial file or temporary file is left on disk
-	expectedDir := filepath.Join(tmpDir, dbID, "10")
+	expectedDir := filepath.Join(tmpDir, dbID.String(), "10")
 	expectedPath := filepath.Join(expectedDir, "10232")
 
 	if _, err := os.Stat(expectedPath); !errors.Is(err, os.ErrNotExist) {
@@ -93,7 +95,7 @@ func TestLocalStorage_WriteAndReadOperations(t *testing.T) {
 	tmpDir := t.TempDir()
 	store := &localstorage.LocalStorage{RootPath: tmpDir}
 	ctx := context.Background()
-	dbID := "01HGFB9Z5W7ABCDEFGHJKMNPQR"
+	dbID := ulid.MustParse("01HGFB9Z5W7ABCDEFGHJKMNPQR")
 	var entryID int64 = 10232
 
 	content := []byte("hello mediahub local storage byte range test")
@@ -173,5 +175,48 @@ func TestLocalStorage_WriteAndReadOperations(t *testing.T) {
 	}
 	if !bytes.Equal(pRead, previewContent) {
 		t.Fatalf("ReadPreview mismatch: got %s, want %s", string(pRead), string(previewContent))
+	}
+}
+
+func TestLocalStorage_ZeroULIDDeleteDatabaseLeavesSiblingsUntouched(t *testing.T) {
+	tmpDir := t.TempDir()
+	store := &localstorage.LocalStorage{RootPath: tmpDir}
+	ctx := context.Background()
+
+	validDB := ulid.MustParse("01HGFB9Z5W7ABCDEFGHJKMNPQR")
+	var entryID int64 = 10232
+	mainContent := []byte("valid main file")
+	previewContent := []byte("valid preview file")
+
+	if _, err := store.Write(ctx, validDB, entryID, bytes.NewReader(mainContent)); err != nil {
+		t.Fatalf("setup Write failed: %v", err)
+	}
+	if _, err := store.WritePreview(ctx, validDB, entryID, bytes.NewReader(previewContent)); err != nil {
+		t.Fatalf("setup WritePreview failed: %v", err)
+	}
+
+	if err := store.DeleteDatabase(ctx, ulid.ULID{}); err != nil {
+		t.Fatalf("DeleteDatabase(zero ULID) failed: %v", err)
+	}
+
+	// Verify sibling files in previews/<valid-ulid>/... and <valid-ulid>/... are untouched
+	rc, err := store.Read(ctx, validDB, entryID, 0, -1)
+	if err != nil {
+		t.Fatalf("expected valid main file to remain readable, got %v", err)
+	}
+	gotMain, _ := io.ReadAll(rc)
+	rc.Close()
+	if !bytes.Equal(gotMain, mainContent) {
+		t.Fatalf("valid main file corrupted: got %q", string(gotMain))
+	}
+
+	prc, err := store.ReadPreview(ctx, validDB, entryID)
+	if err != nil {
+		t.Fatalf("expected valid preview file to remain readable, got %v", err)
+	}
+	gotPreview, _ := io.ReadAll(prc)
+	prc.Close()
+	if !bytes.Equal(gotPreview, previewContent) {
+		t.Fatalf("valid preview file corrupted: got %q", string(gotPreview))
 	}
 }

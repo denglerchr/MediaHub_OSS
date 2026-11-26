@@ -6,6 +6,9 @@ import (
 	"time"
 )
 
+// MaxQueryLimit caps the number of records returned by a single paginated query.
+const MaxQueryLimit = 1000
+
 // QueryOptions defines generic parameters for pagination, sorting, and time-based filtering.
 type QueryOptions struct {
 	Limit     int
@@ -16,16 +19,25 @@ type QueryOptions struct {
 	TStart    time.Time
 	TEnd      time.Time
 	Statuses  []EntryStatus // Optional status filter (e.g. ready, error)
-	AfterID   int64         // Filter entries with id > AfterID
+	IDStart   int64         // Inclusive lower ID bound (id >= IDStart); 0 means unset
+	IDEnd     int64         // Inclusive upper ID bound (id <= IDEnd); 0 means unset
 }
 
 // Validate checks query options, assigns defaults for missing values, and returns an error if any parameter is invalid.
 func (o *QueryOptions) Validate() error {
-	if o.AfterID < 0 {
-		o.AfterID = 0
+	if o.IDStart < 0 {
+		return fmt.Errorf("idstart cannot be negative")
+	}
+	if o.IDEnd < 0 {
+		return fmt.Errorf("idend cannot be negative")
+	}
+	if o.IDStart > 0 && o.IDEnd > 0 && o.IDStart > o.IDEnd {
+		return fmt.Errorf("idstart (%d) cannot be greater than idend (%d)", o.IDStart, o.IDEnd)
 	}
 	if o.Limit <= 0 {
 		o.Limit = 30
+	} else if o.Limit > MaxQueryLimit {
+		return fmt.Errorf("limit cannot exceed %d", MaxQueryLimit)
 	}
 	if o.Offset < 0 {
 		o.Offset = 0

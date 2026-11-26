@@ -61,6 +61,12 @@ func (r *SQLiteRepository) GetLogs(ctx context.Context, opts repository.QueryOpt
 	if !opts.TEnd.IsZero() {
 		builder = builder.Where(squirrel.LtOrEq{"timestamp": opts.TEnd.UnixMilli()})
 	}
+	if opts.IDStart > 0 {
+		builder = builder.Where(squirrel.GtOrEq{"id": opts.IDStart})
+	}
+	if opts.IDEnd > 0 {
+		builder = builder.Where(squirrel.LtOrEq{"id": opts.IDEnd})
+	}
 
 	// Apply sorting
 	if strings.ToLower(opts.Order) == "asc" {

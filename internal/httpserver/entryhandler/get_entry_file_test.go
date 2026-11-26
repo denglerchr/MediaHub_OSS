@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"mime"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -20,12 +21,8 @@ import (
 	"mediahub_oss/internal/media"
 	"mediahub_oss/internal/processing"
 	repo "mediahub_oss/internal/repository"
-	"mediahub_oss/internal/repository/migrations"
-	_ "mediahub_oss/internal/repository/migrations/sqlite"
 	"mediahub_oss/internal/repository/sqlite"
 	"mediahub_oss/internal/storage/localstorage"
-
-	"github.com/pressly/goose/v3"
 )
 
 func setupFileTestEnvironment(t *testing.T, contentType string, conv *mockMediaConverter) (*sqlite.SQLiteRepository, *localstorage.LocalStorage, *entryhandler.EntryHandler, repo.Database, repo.Entry) {
@@ -38,11 +35,7 @@ func setupFileTestEnvironment(t *testing.T, contentType string, conv *mockMediaC
 		t.Fatalf("failed to create repo: %v", err)
 	}
 
-	if err := goose.SetDialect("sqlite3"); err != nil {
-		t.Fatalf("failed to set goose dialect: %v", err)
-	}
-	goose.SetBaseFS(migrations.EmbedFS)
-	if err := goose.Up(r.DB, "sqlite"); err != nil {
+	if err := r.MigrateUp(ctx); err != nil {
 		t.Fatalf("failed to run migrations: %v", err)
 	}
 
@@ -109,7 +102,7 @@ func setupFileTestEnvironment(t *testing.T, contentType string, conv *mockMediaC
 		t.Fatalf("failed to create entry: %v", err)
 	}
 
-	_, err = store.Write(ctx, db.ID.String(), entry.ID, bytes.NewReader(entryData))
+	_, err = store.Write(ctx, db.ID, entry.ID, bytes.NewReader(entryData))
 	if err != nil {
 		t.Fatalf("failed to write test entry data: %v", err)
 	}
@@ -455,4 +448,170 @@ func TestGetEntryFile_CapacityExhausted(t *testing.T) {
 	if w.Code != http.StatusServiceUnavailable {
 		t.Errorf("expected 503 Service Unavailable when capacity full, got %d", w.Code)
 	}
+}
+
+func TestGetEntryFile_XSSHardeningAndContentDisposition(t *testing.T) {
+	ctx := context.Background()
+	r, store, handler, db, _ := setupFileTestEnvironment(t, "file", nil)
+	defer r.Close()
+
+	createAndStore := func(filename, mimeType, payload string) repo.Entry {
+		entry, err := r.CreateEntry(ctx, db, repo.Entry{
+			Timestamp: time.Now(),
+			MimeType:  mimeType,
+			FileName:  filename,
+			Size:      uint64(len(payload)),
+			Status:    repo.EntryStatusReady,
+		})
+		if err != nil {
+			t.Fatalf("CreateEntry failed: %v", err)
+		}
+		if _, err := store.Write(ctx, db.ID, entry.ID, strings.NewReader(payload)); err != nil {
+			t.Fatalf("store.Write failed: %v", err)
+		}
+		return entry
+	}
+
+	t.Run("Range requests force attachment on dangerous MIME types and allow inline on safe media", func(t *testing.T) {
+		cases := []struct {
+			name            string
+			filename        string
+			mimeType        string
+			wantDisposition string
+		}{
+			{"text/html forced attachment", "page.html", "text/html", "attachment"},
+			{"image/svg+xml forced attachment", "icon.svg", "image/svg+xml", "attachment"},
+			{"application/javascript forced attachment", "app.js", "application/javascript", "attachment"},
+			{"application/pdf forced attachment", "doc.pdf", "application/pdf", "attachment"},
+			{"video/mp4 allowed inline", "clip.mp4", "video/mp4", "inline"},
+			{"audio/mpeg allowed inline", "song.mp3", "audio/mpeg", "inline"},
+			{"image/jpeg allowed inline", "pic.jpg", "image/jpeg", "inline"},
+		}
+
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				entry := createAndStore(tc.filename, tc.mimeType, "0123456789abcdef")
+
+				req := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/api/database/%s/entry/%d/file", db.ID, entry.ID), nil)
+				req.Header.Set("Range", "bytes=0-3")
+				req.SetPathValue("database_id", db.ID.String())
+				req.SetPathValue("id", fmt.Sprintf("%d", entry.ID))
+				req = req.WithContext(context.WithValue(req.Context(), utils.UserKey, &repo.User{Username: "admin", IsAdmin: true}))
+				w := httptest.NewRecorder()
+
+				handler.GetEntryFile(w, req)
+
+				if w.Code != http.StatusPartialContent {
+					t.Fatalf("expected 206 Partial Content, got %d: %s", w.Code, w.Body.String())
+				}
+				if got := w.Header().Get("X-Content-Type-Options"); got != "nosniff" {
+					t.Errorf("expected X-Content-Type-Options=nosniff, got %q", got)
+				}
+				if got := w.Header().Get("Content-Security-Policy"); got != "sandbox" {
+					t.Errorf("expected Content-Security-Policy=sandbox, got %q", got)
+				}
+				cd := w.Header().Get("Content-Disposition")
+				mediaType, params, err := mime.ParseMediaType(cd)
+				if err != nil {
+					t.Fatalf("failed to parse Content-Disposition %q: %v", cd, err)
+				}
+				if mediaType != tc.wantDisposition {
+					t.Errorf("expected disposition %q, got %q (header: %q)", tc.wantDisposition, mediaType, cd)
+				}
+				if params["filename"] != tc.filename {
+					t.Errorf("expected filename %q, got %q", tc.filename, params["filename"])
+				}
+			})
+		}
+	})
+
+	t.Run("CRLF and quotes in filename are sanitized and empty filename emits fallback Content-Disposition", func(t *testing.T) {
+		evilEntry := createAndStore("bad\r\nX-Injected: yes\"name.html", "text/html", "payload-bytes")
+		req := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/api/database/%s/entry/%d/file", db.ID, evilEntry.ID), nil)
+		req.SetPathValue("database_id", db.ID.String())
+		req.SetPathValue("id", fmt.Sprintf("%d", evilEntry.ID))
+		req = req.WithContext(context.WithValue(req.Context(), utils.UserKey, &repo.User{Username: "admin", IsAdmin: true}))
+		w := httptest.NewRecorder()
+
+		handler.GetEntryFile(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected 200 OK, got %d", w.Code)
+		}
+		cd := w.Header().Get("Content-Disposition")
+		if strings.ContainsAny(cd, "\r\n") {
+			t.Fatalf("Content-Disposition contains CR/LF: %q", cd)
+		}
+		mediaType, params, err := mime.ParseMediaType(cd)
+		if err != nil {
+			t.Fatalf("failed to parse Content-Disposition %q: %v", cd, err)
+		}
+		if mediaType != "attachment" {
+			t.Errorf("expected attachment disposition, got %q", mediaType)
+		}
+		if strings.ContainsAny(params["filename"], "\r\n") || !strings.Contains(params["filename"], "bad") {
+			t.Errorf("unexpected sanitized filename: %q", params["filename"])
+		}
+
+		emptyNameEntry := createAndStore("", "application/octet-stream", "abc")
+		req2 := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/api/database/%s/entry/%d/file", db.ID, emptyNameEntry.ID), nil)
+		req2.SetPathValue("database_id", db.ID.String())
+		req2.SetPathValue("id", fmt.Sprintf("%d", emptyNameEntry.ID))
+		req2 = req2.WithContext(context.WithValue(req2.Context(), utils.UserKey, &repo.User{Username: "admin", IsAdmin: true}))
+		w2 := httptest.NewRecorder()
+
+		handler.GetEntryFile(w2, req2)
+		if w2.Code != http.StatusOK {
+			t.Fatalf("expected 200 OK, got %d", w2.Code)
+		}
+		cd2 := w2.Header().Get("Content-Disposition")
+		if cd2 == "" {
+			t.Fatal("expected Content-Disposition even when entry.FileName is empty")
+		}
+		_, params2, err := mime.ParseMediaType(cd2)
+		if err != nil {
+			t.Fatalf("failed to parse fallback Content-Disposition %q: %v", cd2, err)
+		}
+		if params2["filename"] != fmt.Sprintf("%d", emptyNameEntry.ID) {
+			t.Errorf("expected fallback filename %d, got %q", emptyNameEntry.ID, params2["filename"])
+		}
+	})
+
+	t.Run("Converted file and preview emit security headers", func(t *testing.T) {
+		rImg, storeImg, handlerImg, dbImg, entryImg := setupFileTestEnvironment(t, "image", nil)
+		defer rImg.Close()
+
+		// Transformed image response headers
+		req := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/api/database/%s/entry/%d/file?format=webp", dbImg.ID, entryImg.ID), nil)
+		req.SetPathValue("database_id", dbImg.ID.String())
+		req.SetPathValue("id", fmt.Sprintf("%d", entryImg.ID))
+		req = req.WithContext(context.WithValue(req.Context(), utils.UserKey, &repo.User{Username: "admin", IsAdmin: true}))
+		w := httptest.NewRecorder()
+		handlerImg.GetEntryFile(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected 200 OK, got %d: %s", w.Code, w.Body.String())
+		}
+		if got := w.Header().Get("X-Content-Type-Options"); got != "nosniff" {
+			t.Errorf("transformed response expected nosniff, got %q", got)
+		}
+		if got := w.Header().Get("Content-Security-Policy"); got != "sandbox" {
+			t.Errorf("transformed response expected CSP sandbox, got %q", got)
+		}
+
+		// Preview response header
+		if _, err := storeImg.WritePreview(ctx, dbImg.ID, entryImg.ID, strings.NewReader("webp-preview-bytes")); err != nil {
+			t.Fatalf("WritePreview failed: %v", err)
+		}
+		reqPrev := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/api/database/%s/entry/%d/preview", dbImg.ID, entryImg.ID), nil)
+		reqPrev.SetPathValue("database_id", dbImg.ID.String())
+		reqPrev.SetPathValue("id", fmt.Sprintf("%d", entryImg.ID))
+		wPrev := httptest.NewRecorder()
+		handlerImg.GetEntryPreview(wPrev, reqPrev)
+		if wPrev.Code != http.StatusOK {
+			t.Fatalf("expected 200 OK for preview, got %d", wPrev.Code)
+		}
+		if got := wPrev.Header().Get("X-Content-Type-Options"); got != "nosniff" {
+			t.Errorf("preview response expected nosniff, got %q", got)
+		}
+	})
 }

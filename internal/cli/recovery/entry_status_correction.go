@@ -91,6 +91,56 @@ func (s *RecoveryService) EntryStatusCorrection(ctx context.Context) error {
 	return nil
 }
 
+type processingAction int
+
+const (
+	processingSkip processingAction = iota
+	processingMarkReady
+	processingRequeue
+	processingDeleteZombie
+)
+
+func (s *RecoveryService) inspectProcessingEntry(ctx context.Context, db repository.Database, entry repository.Entry) (repository.Entry, processingAction) {
+	stat, err := s.storage.Stat(ctx, db.ID, entry.ID)
+	if errors.Is(err, customerrors.ErrNotFound) {
+		return entry, processingDeleteZombie
+	}
+	if err != nil {
+		fmt.Println() // Break the \r progress line so the log prints cleanly
+		s.logger.Error("Storage stat failed", "database_id", db.ID.String(), "database_name", db.Name, "id", entry.ID, "error", err)
+		return entry, processingSkip
+	}
+
+	// File exists in storage! Reconcile file size
+	entry.Size = uint64(stat.Size)
+
+	needsConversion := db.Config.AutoConversion != "" &&
+		media.NormalizeMimeType(entry.MimeType) != media.NormalizeMimeType(db.Config.AutoConversion)
+
+	needsPreview := false
+	if db.Config.CreatePreview && (db.ContentType == "image" || db.ContentType == "video") {
+		pStat, pErr := s.storage.StatPreview(ctx, db.ID, entry.ID)
+		if pErr == nil {
+			entry.PreviewSize = uint64(pStat.Size)
+		} else if errors.Is(pErr, customerrors.ErrNotFound) {
+			needsPreview = true
+			entry.PreviewSize = 0
+		} else {
+			fmt.Println() // Break the \r progress line so the log prints cleanly
+			s.logger.Error("Storage preview stat failed", "database_id", db.ID.String(), "database_name", db.Name, "id", entry.ID, "error", pErr)
+			return entry, processingSkip
+		}
+	}
+
+	if needsConversion || needsPreview || isMediaMetaMissing(db.ContentType, entry.MediaFields) {
+		entry.Status = repository.EntryStatusQueued
+		return entry, processingRequeue
+	}
+
+	entry.Status = repository.EntryStatusReady
+	return entry, processingMarkReady
+}
+
 func (s *RecoveryService) correctDatabaseEntryStatuses(ctx context.Context, db repository.Database) error {
 	fmt.Printf("Database %q\n", db.Name)
 
@@ -140,25 +190,15 @@ func (s *RecoveryService) correctDatabaseEntryStatuses(ctx context.Context, db r
 			fmt.Printf("\r- Step 1: Entry Status Corrections: %d%% (Scanning...)", percent)
 
 			if entry.Status == repository.EntryStatusProcessing {
-				stat, err := s.storage.Stat(ctx, db.ID.String(), entry.ID)
-				if errors.Is(err, customerrors.ErrNotFound) {
-					// File missing -> mark DB entry for deletion
+				updated, action := s.inspectProcessingEntry(ctx, db, entry)
+				switch action {
+				case processingDeleteZombie:
 					deleteZombiesIDs = append(deleteZombiesIDs, entry.ID)
-				} else if err == nil {
-					// File exists in storage! Reconcile file size
-					entry.Size = uint64(stat.Size)
-
-					needsConversion := db.Config.AutoConversion != "" && entry.MimeType != db.Config.AutoConversion
-					if needsConversion || isMediaMetaMissing(db.ContentType, entry.MediaFields) {
-						entry.Status = repository.EntryStatusQueued
-						requeueEntries = append(requeueEntries, entry)
-					} else {
-						entry.Status = repository.EntryStatusReady
-						markReadyEntries = append(markReadyEntries, entry)
-					}
-				} else {
-					fmt.Println() // Break the \r progress line so the log prints cleanly
-					s.logger.Error("Storage stat failed", "database_id", db.ID.String(), "database_name", db.Name, "id", entry.ID, "error", err)
+				case processingRequeue:
+					requeueEntries = append(requeueEntries, updated)
+				case processingMarkReady:
+					markReadyEntries = append(markReadyEntries, updated)
+				case processingSkip:
 				}
 			} else if entry.Status == repository.EntryStatusDeleting {
 				// Entry stuck deleting -> mark for full cleanup
@@ -171,29 +211,38 @@ func (s *RecoveryService) correctDatabaseEntryStatuses(ctx context.Context, db r
 	fmt.Printf("\r- Step 1: Entry Status Corrections: 100%% (Applying fixes)    \n")
 
 	// --- PHASE 2: Action & Summarize ---
+	var actionErrs []error
 	if !s.dryRun {
 		// 1. Mark valid processing files as ready (and reconcile sizes/stats)
 		for _, entry := range markReadyEntries {
 			if _, err := s.repo.UpdateEntry(ctx, db.ID, entry); err != nil {
 				s.logger.Error("Failed to update entry to ready", "database_id", db.ID.String(), "id", entry.ID, "error", err)
+				actionErrs = append(actionErrs, fmt.Errorf("mark ready entry %d (%s): %w", entry.ID, db.Name, err))
 			}
 		}
 
-		// 2. Requeue entries needing conversion or metadata extraction
+		// 2. Requeue entries needing conversion, preview generation, or metadata extraction
 		for _, entry := range requeueEntries {
 			if _, err := s.repo.UpdateEntry(ctx, db.ID, entry); err != nil {
 				s.logger.Error("Failed to requeue entry", "database_id", db.ID.String(), "id", entry.ID, "error", err)
+				actionErrs = append(actionErrs, fmt.Errorf("requeue entry %d (%s): %w", entry.ID, db.Name, err))
 			}
 		}
 
-		// 3. Delete entries where the file was never uploaded (Zombies)
-		if len(deleteZombiesIDs) > 0 {
-			_, _ = s.repo.DeleteEntries(ctx, db.ID, deleteZombiesIDs)
+		// 3. Delete entries where the file was never uploaded (Zombies) in bounded batches
+		for _, batch := range chunkIDs(deleteZombiesIDs, recoveryDeleteBatchSize) {
+			if _, err := s.repo.DeleteEntries(ctx, db.ID, batch); err != nil {
+				s.logger.Error("Failed to delete zombie entries", "database_id", db.ID.String(), "database_name", db.Name, "batch_size", len(batch), "error", err)
+				actionErrs = append(actionErrs, fmt.Errorf("delete zombie entries (%s): %w", db.Name, err))
+			}
 		}
 
-		// 4. Fix stuck deleting (Attempt storage cleanup, then remove DB entry)
-		if len(deleteStuckIDs) > 0 {
-			_, _ = shared.DeleteMultipleSafe(ctx, s.repo, s.storage, db.ID, deleteStuckIDs)
+		// 4. Fix stuck deleting in bounded batches (Attempt storage cleanup, then remove DB entry)
+		for _, batch := range chunkIDs(deleteStuckIDs, recoveryDeleteBatchSize) {
+			if _, err := shared.DeleteMultipleSafe(ctx, s.repo, s.storage, db.ID, batch); err != nil {
+				s.logger.Error("Failed to delete stuck deleting entries", "database_id", db.ID.String(), "database_name", db.Name, "batch_size", len(batch), "error", err)
+				actionErrs = append(actionErrs, fmt.Errorf("delete stuck entries (%s): %w", db.Name, err))
+			}
 		}
 	}
 
@@ -213,5 +262,5 @@ func (s *RecoveryService) correctDatabaseEntryStatuses(ctx context.Context, db r
 		)
 	}
 
-	return nil
+	return errors.Join(actionErrs...)
 }

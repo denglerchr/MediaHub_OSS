@@ -12,16 +12,12 @@ import (
 
 	"mediahub_oss/internal/media"
 	repo "mediahub_oss/internal/repository"
-	"mediahub_oss/internal/shared"
+	"mediahub_oss/internal/repository/sqlutil"
 	"mediahub_oss/internal/shared/customerrors"
 )
 
 // CreateEntry inserts a new entry into the database's specific table and updates global stats.
 func (r *PostgresRepository) CreateEntry(ctx context.Context, db repo.Database, entry repo.Entry) (repo.Entry, error) {
-	if !shared.IsValidULID(db.ID.String()) {
-		return repo.Entry{}, fmt.Errorf("%w: invalid database id", customerrors.ErrValidation)
-	}
-
 	isValidMime, err := media.IsMimeOfType(db.ContentType, entry.MimeType)
 	if err != nil {
 		return repo.Entry{}, err
@@ -107,7 +103,7 @@ func (r *PostgresRepository) CreateEntry(ctx context.Context, db repo.Database, 
 		statsBuilder = statsBuilder.Set("queued_count", squirrel.Expr("queued_count + 1"))
 	}
 	statsQuery, statsArgs, err := statsBuilder.
-		Where(squirrel.Eq{"id": db.ID.String()}).
+		Where(squirrel.Eq{"id": db.ID}).
 		ToSql()
 	if err != nil {
 		return repo.Entry{}, fmt.Errorf("failed to build stats update query: %w", err)
@@ -126,10 +122,6 @@ func (r *PostgresRepository) CreateEntry(ctx context.Context, db repo.Database, 
 
 // GetEntry retrieves a single entry by its ID using a dynamic row scanner.
 func (r *PostgresRepository) GetEntry(ctx context.Context, dbID repo.ULID, id int64) (repo.Entry, error) {
-	if !shared.IsValidULID(dbID.String()) {
-		return repo.Entry{}, fmt.Errorf("%w: invalid database id", customerrors.ErrValidation)
-	}
-
 	customFields, err := r.getCustomFields(ctx, r.DB, dbID)
 	if err != nil {
 		return repo.Entry{}, err
@@ -157,10 +149,6 @@ func (r *PostgresRepository) GetEntry(ctx context.Context, dbID repo.ULID, id in
 
 // GetEntries retrieves a paginated list of entries, optionally filtered by a time range.
 func (r *PostgresRepository) GetEntries(ctx context.Context, dbID repo.ULID, opts repo.QueryOptions) ([]repo.Entry, error) {
-	if !shared.IsValidULID(dbID.String()) {
-		return nil, fmt.Errorf("%w: invalid database id", customerrors.ErrValidation)
-	}
-
 	if err := opts.Validate(); err != nil {
 		return nil, err
 	}
@@ -177,8 +165,11 @@ func (r *PostgresRepository) GetEntries(ctx context.Context, dbID repo.ULID, opt
 	if len(opts.Statuses) > 0 {
 		builder = builder.Where(squirrel.Eq{"status": opts.Statuses})
 	}
-	if opts.AfterID > 0 {
-		builder = builder.Where(squirrel.Gt{"id": opts.AfterID})
+	if opts.IDStart > 0 {
+		builder = builder.Where(squirrel.GtOrEq{"id": opts.IDStart})
+	}
+	if opts.IDEnd > 0 {
+		builder = builder.Where(squirrel.LtOrEq{"id": opts.IDEnd})
 	}
 
 	builder = builder.OrderBy(fmt.Sprintf("%s %s", opts.SortBy, strings.ToUpper(opts.Order)))
@@ -219,10 +210,6 @@ func (r *PostgresRepository) GetEntries(ctx context.Context, dbID repo.ULID, opt
 // database's size statistics. It intentionally leaves timestamp and custom
 // fields untouched; use UpdateEntryMetadata for those.
 func (r *PostgresRepository) UpdateEntry(ctx context.Context, dbID repo.ULID, entry repo.Entry) (repo.Entry, error) {
-	if !shared.IsValidULID(dbID.String()) {
-		return repo.Entry{}, fmt.Errorf("%w: invalid database id", customerrors.ErrValidation)
-	}
-
 	tableName := fmt.Sprintf(`"entries_%s"`, dbID.String())
 
 	tx, err := r.DB.BeginTx(ctx, nil)
@@ -304,7 +291,7 @@ func (r *PostgresRepository) UpdateEntry(ctx context.Context, dbID repo.ULID, en
 		}
 
 		statsQuery, statsArgs, err := statsBuilder.
-			Where(squirrel.Eq{"id": dbID.String()}).
+			Where(squirrel.Eq{"id": dbID}).
 			ToSql()
 		if err != nil {
 			return repo.Entry{}, fmt.Errorf("failed to build stats update query: %w", err)
@@ -328,10 +315,6 @@ func (r *PostgresRepository) UpdateEntry(ctx context.Context, dbID repo.ULID, en
 // columns (status, sizes, mime type, media fields), so a metadata edit cannot
 // revert a concurrent background processing update (and vice versa).
 func (r *PostgresRepository) UpdateEntryMetadata(ctx context.Context, dbID repo.ULID, entry repo.Entry) (repo.Entry, error) {
-	if !shared.IsValidULID(dbID.String()) {
-		return repo.Entry{}, fmt.Errorf("%w: invalid database id", customerrors.ErrValidation)
-	}
-
 	tx, err := r.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return repo.Entry{}, fmt.Errorf("failed to begin transaction: %w", err)
@@ -388,9 +371,6 @@ func (r *PostgresRepository) UpdateEntryMetadata(ctx context.Context, dbID repo.
 // queued_count < $2 after any concurrent transaction commits, serializing concurrent enqueue
 // attempts across all pods.
 func (r *PostgresRepository) EnqueueEntry(ctx context.Context, dbID repo.ULID, entry repo.Entry, maxQueued int) (repo.Entry, error) {
-	if !shared.IsValidULID(dbID.String()) {
-		return repo.Entry{}, fmt.Errorf("%w: invalid database id", customerrors.ErrValidation)
-	}
 	if maxQueued <= 0 {
 		return repo.Entry{}, customerrors.ErrUnavailable
 	}
@@ -461,7 +441,7 @@ func (r *PostgresRepository) EnqueueEntry(ctx context.Context, dbID repo.ULID, e
 	if oldStatus != repo.EntryStatusQueued {
 		statsBuilder := r.Builder.Update("databases").
 			Set("queued_count", squirrel.Expr("queued_count + 1")).
-			Where(squirrel.Eq{"id": dbID.String()}).
+			Where(squirrel.Eq{"id": dbID}).
 			Where(squirrel.Lt{"queued_count": maxQueued})
 		if delta != 0 {
 			statsBuilder = statsBuilder.Set("total_disk_space_bytes", squirrel.Expr("GREATEST(0, total_disk_space_bytes + ?)", delta))
@@ -486,7 +466,7 @@ func (r *PostgresRepository) EnqueueEntry(ctx context.Context, dbID repo.ULID, e
 	} else if delta != 0 {
 		statsQuery, statsArgs, err := r.Builder.Update("databases").
 			Set("total_disk_space_bytes", squirrel.Expr("GREATEST(0, total_disk_space_bytes + ?)", delta)).
-			Where(squirrel.Eq{"id": dbID.String()}).
+			Where(squirrel.Eq{"id": dbID}).
 			ToSql()
 		if err != nil {
 			return repo.Entry{}, fmt.Errorf("failed to build stats update query: %w", err)
@@ -507,10 +487,6 @@ func (r *PostgresRepository) EnqueueEntry(ctx context.Context, dbID repo.ULID, e
 
 // UpdateEntriesStatus modifies the status of multiple entries at once using ANY($1).
 func (r *PostgresRepository) UpdateEntriesStatus(ctx context.Context, dbID repo.ULID, entryIDs []int64, status repo.EntryStatus) error {
-	if !shared.IsValidULID(dbID.String()) {
-		return fmt.Errorf("%w: invalid database id", customerrors.ErrValidation)
-	}
-
 	if len(entryIDs) == 0 {
 		return nil
 	}
@@ -566,7 +542,7 @@ func (r *PostgresRepository) UpdateEntriesStatus(ctx context.Context, dbID repo.
 			statsBuilder = statsBuilder.Set("queued_count", squirrel.Expr("GREATEST(0, queued_count - ?)", -queuedDelta))
 		}
 		statsQuery, statsArgs, err := statsBuilder.
-			Where(squirrel.Eq{"id": dbID.String()}).
+			Where(squirrel.Eq{"id": dbID}).
 			ToSql()
 		if err != nil {
 			return fmt.Errorf("failed to build stats update query: %w", err)
@@ -619,10 +595,6 @@ func (r *PostgresRepository) lockAndCountQueuedEntries(ctx context.Context, tx *
 
 // DeleteEntry removes a single entry and atomically decrements parent database stats.
 func (r *PostgresRepository) DeleteEntry(ctx context.Context, dbID repo.ULID, id int64) (repo.DeletedEntryMeta, error) {
-	if !shared.IsValidULID(dbID.String()) {
-		return repo.DeletedEntryMeta{}, fmt.Errorf("%w: invalid database id", customerrors.ErrValidation)
-	}
-
 	tableName := fmt.Sprintf(`"entries_%s"`, dbID.String())
 
 	tx, err := r.DB.BeginTx(ctx, nil)
@@ -657,7 +629,7 @@ func (r *PostgresRepository) DeleteEntry(ctx context.Context, dbID repo.ULID, id
 		statsBuilder = statsBuilder.Set("queued_count", squirrel.Expr("GREATEST(0, queued_count - 1)"))
 	}
 	statsQuery, statsArgs, err := statsBuilder.
-		Where(squirrel.Eq{"id": dbID.String()}).
+		Where(squirrel.Eq{"id": dbID}).
 		ToSql()
 	if err != nil {
 		return repo.DeletedEntryMeta{}, fmt.Errorf("failed to build stats update query: %w", err)
@@ -676,10 +648,6 @@ func (r *PostgresRepository) DeleteEntry(ctx context.Context, dbID repo.ULID, id
 
 // DeleteEntries removes multiple entries in a single transaction and updates stats once.
 func (r *PostgresRepository) DeleteEntries(ctx context.Context, dbID repo.ULID, entryIDs []int64) ([]repo.DeletedEntryMeta, error) {
-	if !shared.IsValidULID(dbID.String()) {
-		return nil, fmt.Errorf("%w: invalid database id", customerrors.ErrValidation)
-	}
-
 	if len(entryIDs) == 0 {
 		return nil, customerrors.ErrNotFound
 	}
@@ -744,7 +712,7 @@ func (r *PostgresRepository) DeleteEntries(ctx context.Context, dbID repo.ULID, 
 		statsBuilder = statsBuilder.Set("queued_count", squirrel.Expr("GREATEST(0, queued_count - ?)", deletedQueuedCount))
 	}
 	statsQuery, statsArgs, err := statsBuilder.
-		Where(squirrel.Eq{"id": dbID.String()}).
+		Where(squirrel.Eq{"id": dbID}).
 		ToSql()
 	if err != nil {
 		return nil, fmt.Errorf("failed to build stats update query: %w", err)
@@ -763,112 +731,24 @@ func (r *PostgresRepository) DeleteEntries(ctx context.Context, dbID repo.ULID, 
 
 // SearchEntries retrieves entries matching complex nested filter criteria.
 func (r *PostgresRepository) SearchEntries(ctx context.Context, dbID repo.ULID, req repo.SearchRequest, customFields []repo.CustomFieldDef) ([]repo.Entry, error) {
-	if !shared.IsValidULID(dbID.String()) {
-		return nil, fmt.Errorf("%w: invalid database id", customerrors.ErrValidation)
-	}
-
-	tableName := fmt.Sprintf(`"entries_%s"`, dbID.String())
-	builder := r.Builder.Select("*").From(tableName)
-
-	if req.Filter != nil && len(req.Filter.Conditions) > 0 {
-		var andExpr squirrel.And
-		var orExpr squirrel.Or
-		isOr := strings.ToLower(req.Filter.Operator) == "or"
-
-		for _, cond := range req.Filter.Conditions {
-			var cf *repo.CustomFieldDef
-			for i := range customFields {
-				if customFields[i].Name == cond.Field {
-					cf = &customFields[i]
-					break
-				}
+	query, args, err := sqlutil.BuildSearchQuery(r.Builder, dbID, req, customFields, sqlutil.SearchDialect{
+		CustomFieldsPrefix: customFieldsPrefix,
+		MediaFieldAllowed:  r.isAllowedMediaField,
+		CoordBoxExpr: func(cf repo.CustomFieldDef, box repo.BoundingBox) squirrel.Sqlizer {
+			if box.MinLng <= box.MaxLng {
+				return squirrel.Expr(
+					fmt.Sprintf(`"%s%d" <@ box(point(?, ?), point(?, ?))`, customFieldsPrefix, cf.ID),
+					box.MinLng, box.MinLat, box.MaxLng, box.MaxLat,
+				)
 			}
-
-			if cf != nil && cf.Type.IsCoordinate() {
-				if strings.ToLower(cond.Operator) != "in_box" {
-					return nil, fmt.Errorf("%w: operator '%s' is not supported on coordinate fields; only 'in_box' is allowed", customerrors.ErrValidation, cond.Operator)
-				}
-				box, err := repo.ParseBoundingBox(cond.Value)
-				if err != nil {
-					return nil, fmt.Errorf("%w: %v", customerrors.ErrValidation, err)
-				}
-				var expr squirrel.Sqlizer
-				if box.MinLng <= box.MaxLng {
-					expr = squirrel.Expr(
-						fmt.Sprintf(`"%s%d" <@ box(point(?, ?), point(?, ?))`, customFieldsPrefix, cf.ID),
-						box.MinLng, box.MinLat, box.MaxLng, box.MaxLat,
-					)
-				} else {
-					expr = squirrel.Expr(
-						fmt.Sprintf(`("%s%d" <@ box(point(?, ?), point(?, ?)) OR "%s%d" <@ box(point(?, ?), point(?, ?)))`, customFieldsPrefix, cf.ID, customFieldsPrefix, cf.ID),
-						box.MinLng, box.MinLat, 180.0, box.MaxLat, -180.0, box.MinLat, box.MaxLng, box.MaxLat,
-					)
-				}
-				if isOr {
-					orExpr = append(orExpr, expr)
-				} else {
-					andExpr = append(andExpr, expr)
-				}
-			} else {
-				if strings.ToLower(cond.Operator) == "in_box" {
-					return nil, fmt.Errorf("%w: 'in_box' operator is only supported on coordinate fields", customerrors.ErrValidation)
-				}
-				safeField, err := r.validateAndFormatSearchField(cond.Field, customFields)
-				if err != nil {
-					return nil, fmt.Errorf("%w: %v", customerrors.ErrValidation, err)
-				}
-
-				if !isValidOperator(cond.Operator) {
-					return nil, fmt.Errorf("%w: invalid operator '%s'", customerrors.ErrValidation, cond.Operator)
-				}
-
-				expr := squirrel.Expr(fmt.Sprintf("%s %s ?", safeField, cond.Operator), cond.Value)
-				if isOr {
-					orExpr = append(orExpr, expr)
-				} else {
-					andExpr = append(andExpr, expr)
-				}
-			}
-		}
-
-		if isOr {
-			builder = builder.Where(orExpr)
-		} else {
-			builder = builder.Where(andExpr)
-		}
-	}
-
-	if req.Sort != nil && req.Sort.Field != "" {
-		for _, cf := range customFields {
-			if cf.Name == req.Sort.Field && cf.Type.IsCoordinate() {
-				return nil, fmt.Errorf("%w: sorting by coordinate fields is not supported", customerrors.ErrValidation)
-			}
-		}
-
-		safeField, err := r.validateAndFormatSearchField(req.Sort.Field, customFields)
-		if err != nil {
-			return nil, fmt.Errorf("%w: %v", customerrors.ErrValidation, err)
-		}
-
-		dir := "DESC"
-		if strings.ToLower(req.Sort.Direction) == "asc" {
-			dir = "ASC"
-		}
-		builder = builder.OrderBy(fmt.Sprintf("%s %s", safeField, dir))
-	} else {
-		builder = builder.OrderBy("timestamp DESC")
-	}
-
-	if req.Pagination.Limit > 0 {
-		builder = builder.Limit(uint64(req.Pagination.Limit))
-	}
-	if req.Pagination.Offset > 0 {
-		builder = builder.Offset(uint64(req.Pagination.Offset))
-	}
-
-	query, args, err := builder.ToSql()
+			return squirrel.Expr(
+				fmt.Sprintf(`("%s%d" <@ box(point(?, ?), point(?, ?)) OR "%s%d" <@ box(point(?, ?), point(?, ?)))`, customFieldsPrefix, cf.ID, customFieldsPrefix, cf.ID),
+				box.MinLng, box.MinLat, 180.0, box.MaxLat, -180.0, box.MinLat, box.MaxLng, box.MaxLat,
+			)
+		},
+	})
 	if err != nil {
-		return nil, fmt.Errorf("failed to build search query: %w", err)
+		return nil, err
 	}
 
 	rows, err := r.DB.QueryContext(ctx, query, args...)
@@ -890,10 +770,6 @@ func (r *PostgresRepository) SearchEntries(ctx context.Context, dbID repo.ULID, 
 // In a multi-node / multi-pod deployment, if multiple background worker routines attempt to claim the same queued file simultaneously,
 // only the worker receiving RowsAffected == 1 claims the task; other workers silently back off.
 func (r *PostgresRepository) ClaimQueuedEntry(ctx context.Context, dbID repo.ULID, entryID int64) (bool, error) {
-	if !shared.IsValidULID(dbID.String()) {
-		return false, fmt.Errorf("%w: invalid database id", customerrors.ErrValidation)
-	}
-
 	tx, err := r.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return false, fmt.Errorf("failed to begin claim transaction: %w", err)
@@ -922,7 +798,7 @@ func (r *PostgresRepository) ClaimQueuedEntry(ctx context.Context, dbID repo.ULI
 	if rows == 1 {
 		statsQuery, statsArgs, err := r.Builder.Update("databases").
 			Set("queued_count", squirrel.Expr("GREATEST(0, queued_count - 1)")).
-			Where(squirrel.Eq{"id": dbID.String()}).
+			Where(squirrel.Eq{"id": dbID}).
 			ToSql()
 		if err != nil {
 			return false, fmt.Errorf("failed to build stats update query: %w", err)
@@ -939,47 +815,8 @@ func (r *PostgresRepository) ClaimQueuedEntry(ctx context.Context, dbID repo.ULI
 	return rows == 1, nil
 }
 
-// GetEntriesByStatus retrieves entries matching a status, ordered by ID ascending (oldest first).
-func (r *PostgresRepository) GetEntriesByStatus(ctx context.Context, dbID repo.ULID, status repo.EntryStatus, limit uint64) ([]repo.Entry, error) {
-	if !shared.IsValidULID(dbID.String()) {
-		return nil, fmt.Errorf("%w: invalid database id", customerrors.ErrValidation)
-	}
-
-	customFields, err := r.getCustomFields(ctx, r.DB, dbID)
-	if err != nil {
-		return nil, err
-	}
-
-	tableName := fmt.Sprintf(`"entries_%s"`, dbID.String())
-	b := r.Builder.Select("*").From(tableName).Where(squirrel.Eq{"status": status}).OrderBy("id ASC")
-	if limit > 0 {
-		b = b.Limit(limit)
-	}
-	query, args, err := b.ToSql()
-	if err != nil {
-		return nil, fmt.Errorf("failed to build get-by-status query: %w", err)
-	}
-
-	rows, err := r.DB.QueryContext(ctx, query, args...)
-	if err != nil {
-		return nil, fmt.Errorf("failed to query entries by status: %w", err)
-	}
-	defer rows.Close()
-
-	entries, err := r.scanEntryRows(rows, customFields)
-	if err != nil {
-		return nil, fmt.Errorf("failed to scan entries by status: %w", err)
-	}
-
-	return entries, nil
-}
-
 // CountEntriesByStatus counts the number of entries with the specified status.
 func (r *PostgresRepository) CountEntriesByStatus(ctx context.Context, dbID repo.ULID, status repo.EntryStatus) (int64, error) {
-	if !shared.IsValidULID(dbID.String()) {
-		return 0, fmt.Errorf("%w: invalid database id", customerrors.ErrValidation)
-	}
-
 	tableName := fmt.Sprintf(`"entries_%s"`, dbID.String())
 	query, args, err := r.Builder.Select("COUNT(*)").From(tableName).Where(squirrel.Eq{"status": status}).ToSql()
 	if err != nil {

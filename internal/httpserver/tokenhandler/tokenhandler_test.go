@@ -1,27 +1,33 @@
 package tokenhandler_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
 	"mediahub_oss/internal/httpserver/tokenhandler"
+	"mediahub_oss/internal/httpserver/utils"
 	"mediahub_oss/internal/logging/audit"
 	repo "mediahub_oss/internal/repository"
 	"mediahub_oss/internal/shared/customerrors"
-	"strings"
+	"mediahub_oss/internal/shared/ulid"
 
 	"golang.org/x/crypto/bcrypt"
 )
 
 type mockTokenRepo struct {
 	repo.Repository
-	user repo.User
+	user          repo.User
+	refreshTokens map[string]repo.ULID
 }
 
 func (m *mockTokenRepo) GetUserByUsername(ctx context.Context, username string) (repo.User, error) {
@@ -32,6 +38,29 @@ func (m *mockTokenRepo) GetUserByUsername(ctx context.Context, username string) 
 }
 
 func (m *mockTokenRepo) StoreRefreshToken(ctx context.Context, userID repo.ULID, tokenHash string, duration time.Duration) error {
+	if m.refreshTokens == nil {
+		m.refreshTokens = make(map[string]repo.ULID)
+	}
+	m.refreshTokens[tokenHash] = userID
+	return nil
+}
+
+func (m *mockTokenRepo) ConsumeRefreshToken(ctx context.Context, tokenHash string) (repo.ULID, error) {
+	if m.refreshTokens == nil {
+		return repo.ULID{}, customerrors.ErrNotFound
+	}
+	userID, ok := m.refreshTokens[tokenHash]
+	if !ok {
+		return repo.ULID{}, customerrors.ErrNotFound
+	}
+	delete(m.refreshTokens, tokenHash)
+	return userID, nil
+}
+
+func (m *mockTokenRepo) DeleteRefreshToken(ctx context.Context, tokenHash string) error {
+	if m.refreshTokens != nil {
+		delete(m.refreshTokens, tokenHash)
+	}
 	return nil
 }
 
@@ -44,7 +73,7 @@ func TestGetToken_ServiceAccountBasicAuthRejected(t *testing.T) {
 
 	mockRepo := &mockTokenRepo{
 		user: repo.User{
-			ID:           "01HGFB9Z5W7ABCDEFGHJKMNPQR",
+			ID:           ulid.MustParse("01HGFB9Z5W7ABCDEFGHJKMNPQR"),
 			Username:     "service_worker",
 			PasswordHash: string(hash),
 			AccountType:  repo.AccountTypeService,
@@ -84,7 +113,7 @@ func TestGetToken_RegularUserBasicAuthAccepted(t *testing.T) {
 
 	mockRepo := &mockTokenRepo{
 		user: repo.User{
-			ID:           "01HGFB9Z5W7ABCDEFGHJKMNPQR",
+			ID:           ulid.MustParse("01HGFB9Z5W7ABCDEFGHJKMNPQR"),
 			Username:     "regular_user",
 			PasswordHash: string(hash),
 			AccountType:  repo.AccountTypeLocal,
@@ -136,10 +165,12 @@ func (m *mockOIDCProvider) GetAuthEndpoint(ctx context.Context) (string, error) 
 
 type mockOIDCTokenRepo struct {
 	repo.Repository
-	users      map[string]repo.User
-	identities map[string]repo.User // key: issuer+":"+subject
-	clonedFrom string
-	clonedTo   repo.ULID
+	users           map[string]repo.User
+	identities      map[string]repo.User // key: issuer+":"+subject
+	createErr       error
+	createRaceUser  *repo.User
+	clonedFrom      string
+	clonedTo        repo.ULID
 }
 
 func newMockOIDCTokenRepo() *mockOIDCTokenRepo {
@@ -158,6 +189,14 @@ func (m *mockOIDCTokenRepo) GetUserByOIDCIdentity(ctx context.Context, issuer, s
 }
 
 func (m *mockOIDCTokenRepo) CreateOIDCUser(ctx context.Context, params repo.CreateOIDCUserParams) (repo.User, error) {
+	if m.createErr != nil {
+		if m.createRaceUser != nil {
+			key := params.Issuer + ":" + params.Subject
+			m.identities[key] = *m.createRaceUser
+			m.users[m.createRaceUser.Username] = *m.createRaceUser
+		}
+		return repo.User{}, m.createErr
+	}
 	baseUsername := repo.ExtractUsernameBase(params.PreferredUsername, params.Email)
 	var colliding []string
 	for name := range m.users {
@@ -168,7 +207,7 @@ func (m *mockOIDCTokenRepo) CreateOIDCUser(ctx context.Context, params repo.Crea
 	uniqueUsername := repo.ResolveUniqueUsername(baseUsername, colliding)
 
 	u := repo.User{
-		ID:          "01HGFB9Z5W7ABCDEFGHJKMNPQQ",
+		ID:          ulid.MustParse("01HGFB9Z5W7ABCDEFGHJKMNPQQ"),
 		Username:    uniqueUsername,
 		AccountType: repo.AccountTypeOIDC,
 	}
@@ -230,7 +269,7 @@ func TestGetTokenOIDC_ProviderNotConfigured(t *testing.T) {
 func TestGetTokenOIDC_ExistingUser(t *testing.T) {
 	repoMock := newMockOIDCTokenRepo()
 	existingUser := repo.User{
-		ID:          "01HGFB9Z5W7ABCDEFGHJKMNPQR",
+		ID:          ulid.MustParse("01HGFB9Z5W7ABCDEFGHJKMNPQR"),
 		Username:    "existing_oidc_user",
 		AccountType: repo.AccountTypeOIDC,
 	}
@@ -277,7 +316,7 @@ func TestGetTokenOIDC_JITProvisioning_CollisionResolution(t *testing.T) {
 	repoMock := newMockOIDCTokenRepo()
 	// Simulate existing user "john.doe"
 	repoMock.users["john.doe"] = repo.User{
-		ID:          "01HGFB9Z5W7ABCDEFGHJKMN001",
+		ID:          ulid.MustParse("01HGFB9Z5W7ABCDEFGHJKMN001"),
 		Username:    "john.doe",
 		AccountType: repo.AccountTypeLocal,
 	}
@@ -417,5 +456,228 @@ func TestGetTokenOIDC_JITProvisioning_FullFallback(t *testing.T) {
 	if _, ok := repoMock.users["user"]; !ok {
 		t.Fatalf("expected user 'user' to be provisioned as full fallback, got %v", repoMock.users)
 	}
+}
+
+func TestRefreshToken_AtomicRotationAndOversizedBody(t *testing.T) {
+	password := "user_secret_pass"
+	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	if err != nil {
+		t.Fatalf("failed to hash password: %v", err)
+	}
+
+	mockRepo := &mockTokenRepo{
+		user: repo.User{
+			ID:           ulid.MustParse("01HGFB9Z5W7ABCDEFGHJKMNPQR"),
+			Username:     "regular_user",
+			PasswordHash: string(hash),
+			AccountType:  repo.AccountTypeLocal,
+		},
+	}
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	auditor := audit.NewAuditLogger(false, "stdio", logger, mockRepo)
+	handler := tokenhandler.TokenHandler{
+		Logger:          logger,
+		Auditor:         auditor,
+		Repo:            mockRepo,
+		JWTSecret:       []byte("test_secret_12345678901234567890"),
+		AccessDuration:  5 * time.Minute,
+		RefreshDuration: 24 * time.Hour,
+	}
+
+	// Obtain initial token pair
+	authHeader := "Basic " + base64.StdEncoding.EncodeToString([]byte("regular_user:"+password))
+	loginReq := httptest.NewRequest(http.MethodPost, "/api/token", nil)
+	loginReq.Header.Set("Authorization", authHeader)
+	loginRec := httptest.NewRecorder()
+	handler.GetToken(loginRec, loginReq)
+	if loginRec.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK from GetToken, got %d", loginRec.Code)
+	}
+
+	var loginResp tokenhandler.TokenResponse
+	if err := json.Unmarshal(loginRec.Body.Bytes(), &loginResp); err != nil {
+		t.Fatalf("failed to decode login response: %v", err)
+	}
+
+	// First refresh consumes old refresh token and returns new pair
+	refreshBody, _ := json.Marshal(tokenhandler.TokenRequest{RefreshToken: loginResp.RefreshToken})
+	req1 := httptest.NewRequest(http.MethodPost, "/api/token/refresh", bytes.NewReader(refreshBody))
+	rec1 := httptest.NewRecorder()
+	handler.RefreshToken(rec1, req1)
+	if rec1.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK on first refresh, got %d: %s", rec1.Code, rec1.Body.String())
+	}
+
+	// Replaying the same refresh token must fail with 401
+	req2 := httptest.NewRequest(http.MethodPost, "/api/token/refresh", bytes.NewReader(refreshBody))
+	rec2 := httptest.NewRecorder()
+	handler.RefreshToken(rec2, req2)
+	if rec2.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 Unauthorized on replayed refresh token, got %d: %s", rec2.Code, rec2.Body.String())
+	}
+
+	// Oversized JSON body returns 413 on RefreshToken and Logout
+	oversized := bytes.Repeat([]byte("a"), int(utils.MaxJSONBodyBytes)+16)
+	bigPayload := append(append([]byte(`{"refresh_token":"`), oversized...), []byte(`"}`)...)
+
+	bigRefreshReq := httptest.NewRequest(http.MethodPost, "/api/token/refresh", bytes.NewReader(bigPayload))
+	bigRefreshRec := httptest.NewRecorder()
+	handler.RefreshToken(bigRefreshRec, bigRefreshReq)
+	if bigRefreshRec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("expected 413 on oversized RefreshToken body, got %d", bigRefreshRec.Code)
+	}
+
+	bigLogoutReq := httptest.NewRequest(http.MethodPost, "/api/logout", bytes.NewReader(bigPayload))
+	bigLogoutReq = bigLogoutReq.WithContext(context.WithValue(bigLogoutReq.Context(), utils.UserKey, &mockRepo.user))
+	bigLogoutRec := httptest.NewRecorder()
+	handler.Logout(bigLogoutRec, bigLogoutReq)
+	if bigLogoutRec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("expected 413 on oversized Logout body, got %d", bigLogoutRec.Code)
+	}
+}
+
+func TestGetTokenOIDC_GenericErrorAndNonceAndConflictFallback(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	t.Run("provider error returns generic 401 without reflecting internal details", func(t *testing.T) {
+		repoMock := newMockOIDCTokenRepo()
+		auditor := audit.NewAuditLogger(false, "stdio", logger, repoMock)
+		handler := tokenhandler.TokenHandler{
+			Logger:  logger,
+			Auditor: auditor,
+			Repo:    repoMock,
+			OIDCConfig: tokenhandler.OIDCConfig{
+				Enabled:   true,
+				IssuerURL: "http://localhost:8081/realms/mediahub",
+			},
+			OIDCProvider: &mockOIDCProvider{
+				err: errors.New("sensitive internal idp secret leak xyz"),
+			},
+		}
+
+		req := httptest.NewRequest(http.MethodPost, "/api/token/oidc", strings.NewReader(`{"code":"bad"}`))
+		rec := httptest.NewRecorder()
+		handler.GetTokenOIDC(rec, req)
+
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("expected 401, got %d", rec.Code)
+		}
+		var errResp utils.ErrorResponse
+		if err := json.Unmarshal(rec.Body.Bytes(), &errResp); err != nil {
+			t.Fatalf("decode error: %v", err)
+		}
+		if errResp.Error != "OIDC authentication failed" {
+			t.Fatalf("expected generic error 'OIDC authentication failed', got %q", errResp.Error)
+		}
+		if strings.Contains(rec.Body.String(), "sensitive internal") {
+			t.Fatalf("response leaked raw internal error: %s", rec.Body.String())
+		}
+	})
+
+	t.Run("nonce mismatch returns 401 and matching nonce succeeds", func(t *testing.T) {
+		repoMock := newMockOIDCTokenRepo()
+		existingUser := repo.User{
+			ID:          ulid.MustParse("01HGFB9Z5W7ABCDEFGHJKMNPQR"),
+			Username:    "nonce_user",
+			AccountType: repo.AccountTypeOIDC,
+		}
+		repoMock.identities["http://localhost:8081/realms/mediahub:sub-nonce"] = existingUser
+		auditor := audit.NewAuditLogger(false, "stdio", logger, repoMock)
+
+		handler := tokenhandler.TokenHandler{
+			Logger:          logger,
+			Auditor:         auditor,
+			Repo:            repoMock,
+			JWTSecret:       []byte("test_secret_12345678901234567890"),
+			AccessDuration:  5 * time.Minute,
+			RefreshDuration: 24 * time.Hour,
+			OIDCConfig: tokenhandler.OIDCConfig{
+				Enabled:   true,
+				IssuerURL: "http://localhost:8081/realms/mediahub",
+			},
+			OIDCProvider: &mockOIDCProvider{
+				claims: &tokenhandler.OIDCClaims{
+					Issuer:  "http://localhost:8081/realms/mediahub",
+					Subject: "sub-nonce",
+					Nonce:   "actual-nonce",
+				},
+			},
+		}
+
+		reqBad := httptest.NewRequest(http.MethodPost, "/api/token/oidc", strings.NewReader(`{"code":"ok","nonce":"different-nonce"}`))
+		recBad := httptest.NewRecorder()
+		handler.GetTokenOIDC(recBad, reqBad)
+		if recBad.Code != http.StatusUnauthorized {
+			t.Fatalf("expected 401 on nonce mismatch, got %d", recBad.Code)
+		}
+
+		reqGood := httptest.NewRequest(http.MethodPost, "/api/token/oidc", strings.NewReader(`{"code":"ok","nonce":"actual-nonce"}`))
+		recGood := httptest.NewRecorder()
+		handler.GetTokenOIDC(recGood, reqGood)
+		if recGood.Code != http.StatusOK {
+			t.Fatalf("expected 200 on matching nonce, got %d: %s", recGood.Code, recGood.Body.String())
+		}
+	})
+
+	t.Run("multi-pod JIT conflict falls back to GetUserByOIDCIdentity", func(t *testing.T) {
+		for _, conflictErr := range []error{customerrors.ErrConflict, customerrors.ErrUserExists} {
+			repoMock := newMockOIDCTokenRepo()
+			raceWinner := repo.User{
+				ID:          ulid.MustParse("01HGFB9Z5W7ABCDEFGHJKMNPQ9"),
+				Username:    "raced_user",
+				AccountType: repo.AccountTypeOIDC,
+			}
+			repoMock.createErr = conflictErr
+			repoMock.createRaceUser = &raceWinner
+
+			auditor := audit.NewAuditLogger(false, "stdio", logger, repoMock)
+			handler := tokenhandler.TokenHandler{
+				Logger:          logger,
+				Auditor:         auditor,
+				Repo:            repoMock,
+				JWTSecret:       []byte("test_secret_12345678901234567890"),
+				AccessDuration:  5 * time.Minute,
+				RefreshDuration: 24 * time.Hour,
+				OIDCConfig: tokenhandler.OIDCConfig{
+					Enabled:   true,
+					IssuerURL: "http://localhost:8081/realms/mediahub",
+				},
+				OIDCProvider: &mockOIDCProvider{
+					claims: &tokenhandler.OIDCClaims{
+						Issuer:  "http://localhost:8081/realms/mediahub",
+						Subject: "sub-race",
+					},
+				},
+			}
+
+			req := httptest.NewRequest(http.MethodPost, "/api/token/oidc", strings.NewReader(`{"code":"race"}`))
+			rec := httptest.NewRecorder()
+			handler.GetTokenOIDC(rec, req)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("expected 200 after JIT %v fallback, got %d: %s", conflictErr, rec.Code, rec.Body.String())
+			}
+		}
+	})
+
+	t.Run("oversized OIDC JSON body returns 413", func(t *testing.T) {
+		repoMock := newMockOIDCTokenRepo()
+		auditor := audit.NewAuditLogger(false, "stdio", logger, repoMock)
+		handler := tokenhandler.TokenHandler{
+			Logger:       logger,
+			Auditor:      auditor,
+			Repo:         repoMock,
+			OIDCConfig:   tokenhandler.OIDCConfig{Enabled: true},
+			OIDCProvider: &mockOIDCProvider{},
+		}
+		oversized := bytes.Repeat([]byte("x"), int(utils.MaxJSONBodyBytes)+16)
+		bigPayload := append(append([]byte(`{"code":"`), oversized...), []byte(`"}`)...)
+		req := httptest.NewRequest(http.MethodPost, "/api/token/oidc", bytes.NewReader(bigPayload))
+		rec := httptest.NewRecorder()
+		handler.GetTokenOIDC(rec, req)
+		if rec.Code != http.StatusRequestEntityTooLarge {
+			t.Fatalf("expected 413 on oversized OIDC request, got %d", rec.Code)
+		}
+	})
 }
 

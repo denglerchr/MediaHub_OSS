@@ -2,20 +2,34 @@ package audit
 
 import (
 	"context"
+	"io"
 	"log/slog"
+	"os"
 )
 
 // AlStdout enforces the structured audit schema.
 type AlStdout struct {
-	logger slog.Logger
+	logger *slog.Logger
 }
 
+// NewAlStdout constructs an audit logger writing Info-level JSON events to
+// os.Stdout, ignoring the application logger's level filter.
 func NewAlStdout(logger *slog.Logger) *AlStdout {
-	if logger == nil {
-		logger = slog.Default()
+	_ = logger
+	return NewAlStdoutWithWriter(os.Stdout)
+}
+
+// NewAlStdoutWithWriter constructs an AlStdout instance writing Info-level JSON
+// audit events to w.
+func NewAlStdoutWithWriter(w io.Writer) *AlStdout {
+	if w == nil {
+		w = os.Stdout
 	}
+	handler := slog.NewJSONHandler(w, &slog.HandlerOptions{
+		Level: slog.LevelInfo,
+	})
 	return &AlStdout{
-		logger: *logger,
+		logger: slog.New(handler),
 	}
 }
 

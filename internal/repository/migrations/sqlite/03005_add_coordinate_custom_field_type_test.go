@@ -5,9 +5,6 @@ import (
 	"database/sql"
 	"testing"
 
-	"mediahub_oss/internal/repository/migrations"
-
-	"github.com/pressly/goose/v3"
 	_ "modernc.org/sqlite"
 )
 
@@ -27,15 +24,14 @@ func TestMigration03005_ForeignKeySafety(t *testing.T) {
 		t.Fatalf("foreign_keys pragma is not enabled: %v (val=%d)", err, fkEnabled)
 	}
 
-	// 2. Set Goose dialect and filesystem
-	if err := goose.SetDialect("sqlite3"); err != nil {
-		t.Fatalf("failed to set goose dialect: %v", err)
+	// 2. Create isolated Goose migration provider
+	provider, err := NewProvider(db)
+	if err != nil {
+		t.Fatalf("failed to create migration provider: %v", err)
 	}
-	goose.SetBaseFS(migrations.EmbedFS)
-	Register()
 
 	// 3. Migrate UP to version 3004 (prior to 3005)
-	if err := goose.UpTo(db, "sqlite", 3004); err != nil {
+	if _, err := provider.UpTo(ctx, 3004); err != nil {
 		t.Fatalf("failed to migrate to version 3004: %v", err)
 	}
 
@@ -56,7 +52,7 @@ func TestMigration03005_ForeignKeySafety(t *testing.T) {
 	}
 
 	// 5. Run migration UP to 3005
-	if err := goose.UpTo(db, "sqlite", 3005); err != nil {
+	if _, err := provider.UpTo(ctx, 3005); err != nil {
 		t.Fatalf("failed to migrate to version 3005: %v", err)
 	}
 
@@ -119,7 +115,7 @@ func TestMigration03005_ForeignKeySafety(t *testing.T) {
 	}
 
 	// Migrate Down to 3004
-	if err := goose.DownTo(db, "sqlite", 3004); err != nil {
+	if _, err := provider.DownTo(ctx, 3004); err != nil {
 		t.Fatalf("failed to migrate down to 3004: %v", err)
 	}
 

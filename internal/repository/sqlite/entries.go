@@ -12,16 +12,12 @@ import (
 
 	"mediahub_oss/internal/media"
 	repo "mediahub_oss/internal/repository"
-	"mediahub_oss/internal/shared"
+	"mediahub_oss/internal/repository/sqlutil"
 	"mediahub_oss/internal/shared/customerrors"
 )
 
 // CreateEntry inserts a new entry into the database's specific table and updates global stats.
 func (r *SQLiteRepository) CreateEntry(ctx context.Context, db repo.Database, entry repo.Entry) (repo.Entry, error) {
-	if !shared.IsValidULID(db.ID.String()) {
-		return repo.Entry{}, fmt.Errorf("%w: invalid database id", customerrors.ErrValidation)
-	}
-
 	// Verify mime type matching DB's content type
 	isValidMime, err := media.IsMimeOfType(db.ContentType, entry.MimeType)
 	if err != nil {
@@ -132,10 +128,6 @@ func (r *SQLiteRepository) CreateEntry(ctx context.Context, db repo.Database, en
 
 // GetEntry retrieves a single entry by its ID using a dynamic row scanner.
 func (r *SQLiteRepository) GetEntry(ctx context.Context, dbID repo.ULID, id int64) (repo.Entry, error) {
-	if !shared.IsValidULID(dbID.String()) {
-		return repo.Entry{}, fmt.Errorf("%w: invalid database id", customerrors.ErrValidation)
-	}
-
 	customFields, err := r.getCustomFields(ctx, dbID)
 	if err != nil {
 		return repo.Entry{}, err
@@ -163,10 +155,6 @@ func (r *SQLiteRepository) GetEntry(ctx context.Context, dbID repo.ULID, id int6
 
 // GetEntries retrieves a paginated list of entries, optionally filtered by a time range.
 func (r *SQLiteRepository) GetEntries(ctx context.Context, dbID repo.ULID, opts repo.QueryOptions) ([]repo.Entry, error) {
-	if !shared.IsValidULID(dbID.String()) {
-		return nil, fmt.Errorf("%w: invalid database id", customerrors.ErrValidation)
-	}
-
 	if err := opts.Validate(); err != nil {
 		return nil, err
 	}
@@ -184,8 +172,11 @@ func (r *SQLiteRepository) GetEntries(ctx context.Context, dbID repo.ULID, opts 
 	if len(opts.Statuses) > 0 {
 		builder = builder.Where(squirrel.Eq{"status": opts.Statuses})
 	}
-	if opts.AfterID > 0 {
-		builder = builder.Where(squirrel.Gt{"id": opts.AfterID})
+	if opts.IDStart > 0 {
+		builder = builder.Where(squirrel.GtOrEq{"id": opts.IDStart})
+	}
+	if opts.IDEnd > 0 {
+		builder = builder.Where(squirrel.LtOrEq{"id": opts.IDEnd})
 	}
 
 	builder = builder.OrderBy(fmt.Sprintf("%s %s", opts.SortBy, strings.ToUpper(opts.Order)))
@@ -226,10 +217,6 @@ func (r *SQLiteRepository) GetEntries(ctx context.Context, dbID repo.ULID, opts 
 // database's size statistics. It intentionally leaves timestamp and custom
 // fields untouched; use UpdateEntryMetadata for those.
 func (r *SQLiteRepository) UpdateEntry(ctx context.Context, dbID repo.ULID, entry repo.Entry) (repo.Entry, error) {
-	if !shared.IsValidULID(dbID.String()) {
-		return repo.Entry{}, fmt.Errorf("%w: invalid database id", customerrors.ErrValidation)
-	}
-
 	tableName := fmt.Sprintf(`"entries_%s"`, dbID.String())
 
 	// 1. Begin SQL Transaction
@@ -310,7 +297,7 @@ func (r *SQLiteRepository) UpdateEntry(ctx context.Context, dbID repo.ULID, entr
 		}
 
 		statsQuery, statsArgs, err := statsBuilder.
-			Where(squirrel.Eq{"id": dbID.String()}).
+			Where(squirrel.Eq{"id": dbID}).
 			ToSql()
 		if err != nil {
 			return repo.Entry{}, fmt.Errorf("failed to build stats update query: %w", err)
@@ -336,10 +323,6 @@ func (r *SQLiteRepository) UpdateEntry(ctx context.Context, dbID repo.ULID, entr
 // columns (status, sizes, mime type, media fields), so a metadata edit cannot
 // revert a concurrent background processing update (and vice versa).
 func (r *SQLiteRepository) UpdateEntryMetadata(ctx context.Context, dbID repo.ULID, entry repo.Entry) (repo.Entry, error) {
-	if !shared.IsValidULID(dbID.String()) {
-		return repo.Entry{}, fmt.Errorf("%w: invalid database id", customerrors.ErrValidation)
-	}
-
 	customFields, err := r.getCustomFields(ctx, dbID)
 	if err != nil {
 		return repo.Entry{}, err
@@ -383,9 +366,6 @@ func (r *SQLiteRepository) UpdateEntryMetadata(ctx context.Context, dbID repo.UL
 // updates its processing-owned fields, and increments the parent database's
 // queued_count — but only if queued_count is strictly less than maxQueued.
 func (r *SQLiteRepository) EnqueueEntry(ctx context.Context, dbID repo.ULID, entry repo.Entry, maxQueued int) (repo.Entry, error) {
-	if !shared.IsValidULID(dbID.String()) {
-		return repo.Entry{}, fmt.Errorf("%w: invalid database id", customerrors.ErrValidation)
-	}
 	if maxQueued <= 0 {
 		return repo.Entry{}, customerrors.ErrUnavailable
 	}
@@ -451,7 +431,7 @@ func (r *SQLiteRepository) EnqueueEntry(ctx context.Context, dbID repo.ULID, ent
 	if oldStatus != repo.EntryStatusQueued {
 		statsBuilder := r.Builder.Update("databases").
 			Set("queued_count", squirrel.Expr("queued_count + 1")).
-			Where(squirrel.Eq{"id": dbID.String()}).
+			Where(squirrel.Eq{"id": dbID}).
 			Where(squirrel.Lt{"queued_count": maxQueued})
 		if delta != 0 {
 			statsBuilder = statsBuilder.Set("total_disk_space_bytes", squirrel.Expr("MAX(0, total_disk_space_bytes + ?)", delta))
@@ -476,7 +456,7 @@ func (r *SQLiteRepository) EnqueueEntry(ctx context.Context, dbID repo.ULID, ent
 	} else if delta != 0 {
 		statsQuery, statsArgs, err := r.Builder.Update("databases").
 			Set("total_disk_space_bytes", squirrel.Expr("MAX(0, total_disk_space_bytes + ?)", delta)).
-			Where(squirrel.Eq{"id": dbID.String()}).
+			Where(squirrel.Eq{"id": dbID}).
 			ToSql()
 		if err != nil {
 			return repo.Entry{}, fmt.Errorf("failed to build stats update query: %w", err)
@@ -497,10 +477,6 @@ func (r *SQLiteRepository) EnqueueEntry(ctx context.Context, dbID repo.ULID, ent
 
 // UpdateEntriesStatus efficiently modifies the async processing status of multiple entries at once.
 func (r *SQLiteRepository) UpdateEntriesStatus(ctx context.Context, dbID repo.ULID, entryIDs []int64, status repo.EntryStatus) error {
-	if !shared.IsValidULID(dbID.String()) {
-		return fmt.Errorf("%w: invalid database id", customerrors.ErrValidation)
-	}
-
 	if len(entryIDs) == 0 {
 		return nil
 	}
@@ -561,7 +537,7 @@ func (r *SQLiteRepository) UpdateEntriesStatus(ctx context.Context, dbID repo.UL
 			statsBuilder = statsBuilder.Set("queued_count", squirrel.Expr("MAX(0, queued_count - ?)", -queuedDelta))
 		}
 		statsQuery, statsArgs, err := statsBuilder.
-			Where(squirrel.Eq{"id": dbID.String()}).
+			Where(squirrel.Eq{"id": dbID}).
 			ToSql()
 		if err != nil {
 			return fmt.Errorf("failed to build stats update query: %w", err)
@@ -580,10 +556,6 @@ func (r *SQLiteRepository) UpdateEntriesStatus(ctx context.Context, dbID repo.UL
 
 // DeleteEntry removes a single entry and atomically decrements the parent database's statistics.
 func (r *SQLiteRepository) DeleteEntry(ctx context.Context, dbID repo.ULID, id int64) (repo.DeletedEntryMeta, error) {
-	if !shared.IsValidULID(dbID.String()) {
-		return repo.DeletedEntryMeta{}, fmt.Errorf("%w: invalid database id", customerrors.ErrValidation)
-	}
-
 	tableName := fmt.Sprintf(`"entries_%s"`, dbID.String())
 
 	// 1. Begin SQL Transaction
@@ -621,7 +593,7 @@ func (r *SQLiteRepository) DeleteEntry(ctx context.Context, dbID repo.ULID, id i
 		statsBuilder = statsBuilder.Set("queued_count", squirrel.Expr("MAX(0, queued_count - 1)"))
 	}
 	statsQuery, statsArgs, err := statsBuilder.
-		Where(squirrel.Eq{"id": dbID.String()}).
+		Where(squirrel.Eq{"id": dbID}).
 		ToSql()
 	if err != nil {
 		return repo.DeletedEntryMeta{}, fmt.Errorf("failed to build stats update query: %w", err)
@@ -641,10 +613,6 @@ func (r *SQLiteRepository) DeleteEntry(ctx context.Context, dbID repo.ULID, id i
 
 // DeleteEntries removes multiple entries in a single transaction and updates the database statistics once.
 func (r *SQLiteRepository) DeleteEntries(ctx context.Context, dbID repo.ULID, entryIDs []int64) ([]repo.DeletedEntryMeta, error) {
-	if !shared.IsValidULID(dbID.String()) {
-		return nil, fmt.Errorf("%w: invalid database id", customerrors.ErrValidation)
-	}
-
 	if len(entryIDs) == 0 {
 		return nil, customerrors.ErrNotFound
 	}
@@ -713,7 +681,7 @@ func (r *SQLiteRepository) DeleteEntries(ctx context.Context, dbID repo.ULID, en
 		statsBuilder = statsBuilder.Set("queued_count", squirrel.Expr("MAX(0, queued_count - ?)", deletedQueuedCount))
 	}
 	statsQuery, statsArgs, err := statsBuilder.
-		Where(squirrel.Eq{"id": dbID.String()}).
+		Where(squirrel.Eq{"id": dbID}).
 		ToSql()
 	if err != nil {
 		return nil, fmt.Errorf("failed to build stats update query: %w", err)
@@ -733,121 +701,31 @@ func (r *SQLiteRepository) DeleteEntries(ctx context.Context, dbID repo.ULID, en
 
 // SearchEntries retrieves entries matching complex nested filter criteria.
 func (r *SQLiteRepository) SearchEntries(ctx context.Context, dbID repo.ULID, req repo.SearchRequest, customFields []repo.CustomFieldDef) ([]repo.Entry, error) {
-	if !shared.IsValidULID(dbID.String()) {
-		return nil, fmt.Errorf("%w: invalid database id", customerrors.ErrValidation)
-	}
-
-	tableName := fmt.Sprintf(`"entries_%s"`, dbID.String())
-	builder := r.Builder.Select("*").From(tableName)
-
-	// 1. Build Filter Conditions securely
-	if req.Filter != nil && len(req.Filter.Conditions) > 0 {
-		var andExpr squirrel.And
-		var orExpr squirrel.Or
-		isOr := strings.ToLower(req.Filter.Operator) == "or"
-
-		for _, cond := range req.Filter.Conditions {
-			var cf *repo.CustomFieldDef
-			for i := range customFields {
-				if customFields[i].Name == cond.Field {
-					cf = &customFields[i]
-					break
-				}
+	query, args, err := sqlutil.BuildSearchQuery(r.Builder, dbID, req, customFields, sqlutil.SearchDialect{
+		CustomFieldsPrefix: customFieldsPrefix,
+		MediaFieldAllowed:  r.isAllowedMediaField,
+		FormatOperator: func(op string) string {
+			upper := strings.ToUpper(op)
+			if upper == "ILIKE" {
+				return "LIKE"
 			}
-
-			if cf != nil && cf.Type.IsCoordinate() {
-				if strings.ToLower(cond.Operator) != "in_box" {
-					return nil, fmt.Errorf("%w: operator '%s' is not supported on coordinate fields; only 'in_box' is allowed", customerrors.ErrValidation, cond.Operator)
-				}
-				box, err := repo.ParseBoundingBox(cond.Value)
-				if err != nil {
-					return nil, fmt.Errorf("%w: %v", customerrors.ErrValidation, err)
-				}
-				var expr squirrel.Sqlizer
-				if box.MinLng <= box.MaxLng {
-					expr = squirrel.Expr(
-						fmt.Sprintf(`"%s%d_lat" >= ? AND "%s%d_lat" <= ? AND "%s%d_lng" >= ? AND "%s%d_lng" <= ?`, customFieldsPrefix, cf.ID, customFieldsPrefix, cf.ID, customFieldsPrefix, cf.ID, customFieldsPrefix, cf.ID),
-						box.MinLat, box.MaxLat, box.MinLng, box.MaxLng,
-					)
-				} else {
-					expr = squirrel.Expr(
-						fmt.Sprintf(`"%s%d_lat" >= ? AND "%s%d_lat" <= ? AND ("%s%d_lng" >= ? OR "%s%d_lng" <= ?)`, customFieldsPrefix, cf.ID, customFieldsPrefix, cf.ID, customFieldsPrefix, cf.ID, customFieldsPrefix, cf.ID),
-						box.MinLat, box.MaxLat, box.MinLng, box.MaxLng,
-					)
-				}
-				if isOr {
-					orExpr = append(orExpr, expr)
-				} else {
-					andExpr = append(andExpr, expr)
-				}
-			} else {
-				if strings.ToLower(cond.Operator) == "in_box" {
-					return nil, fmt.Errorf("%w: 'in_box' operator is only supported on coordinate fields", customerrors.ErrValidation)
-				}
-				safeField, err := r.validateAndFormatSearchField(cond.Field, customFields)
-				if err != nil {
-					return nil, fmt.Errorf("%w: %v", customerrors.ErrValidation, err)
-				}
-
-				if !isValidOperator(cond.Operator) {
-					return nil, fmt.Errorf("%w: invalid operator '%s'", customerrors.ErrValidation, cond.Operator)
-				}
-
-				sqlOp := strings.ToUpper(cond.Operator)
-				if sqlOp == "ILIKE" {
-					sqlOp = "LIKE"
-				}
-
-				// Safely assemble the SQL condition using squirrel.Expr
-				expr := squirrel.Expr(fmt.Sprintf("%s %s ?", safeField, sqlOp), cond.Value)
-				if isOr {
-					orExpr = append(orExpr, expr)
-				} else {
-					andExpr = append(andExpr, expr)
-				}
+			return upper
+		},
+		CoordBoxExpr: func(cf repo.CustomFieldDef, box repo.BoundingBox) squirrel.Sqlizer {
+			if box.MinLng <= box.MaxLng {
+				return squirrel.Expr(
+					fmt.Sprintf(`"%s%d_lat" >= ? AND "%s%d_lat" <= ? AND "%s%d_lng" >= ? AND "%s%d_lng" <= ?`, customFieldsPrefix, cf.ID, customFieldsPrefix, cf.ID, customFieldsPrefix, cf.ID, customFieldsPrefix, cf.ID),
+					box.MinLat, box.MaxLat, box.MinLng, box.MaxLng,
+				)
 			}
-		}
-
-		if isOr {
-			builder = builder.Where(orExpr)
-		} else {
-			builder = builder.Where(andExpr)
-		}
-	}
-
-	// 2. Build Sorting securely
-	if req.Sort != nil && req.Sort.Field != "" {
-		for _, cf := range customFields {
-			if cf.Name == req.Sort.Field && cf.Type.IsCoordinate() {
-				return nil, fmt.Errorf("%w: sorting by coordinate fields is not supported", customerrors.ErrValidation)
-			}
-		}
-
-		safeField, err := r.validateAndFormatSearchField(req.Sort.Field, customFields)
-		if err != nil {
-			return nil, fmt.Errorf("%w: %v", customerrors.ErrValidation, err)
-		}
-
-		dir := "DESC"
-		if strings.ToLower(req.Sort.Direction) == "asc" {
-			dir = "ASC"
-		}
-		builder = builder.OrderBy(fmt.Sprintf("%s %s", safeField, dir))
-	} else {
-		builder = builder.OrderBy("timestamp DESC")
-	}
-
-	// 3. Build Pagination
-	if req.Pagination.Limit > 0 {
-		builder = builder.Limit(uint64(req.Pagination.Limit))
-	}
-	if req.Pagination.Offset > 0 {
-		builder = builder.Offset(uint64(req.Pagination.Offset))
-	}
-
-	query, args, err := builder.ToSql()
+			return squirrel.Expr(
+				fmt.Sprintf(`"%s%d_lat" >= ? AND "%s%d_lat" <= ? AND ("%s%d_lng" >= ? OR "%s%d_lng" <= ?)`, customFieldsPrefix, cf.ID, customFieldsPrefix, cf.ID, customFieldsPrefix, cf.ID, customFieldsPrefix, cf.ID),
+				box.MinLat, box.MaxLat, box.MinLng, box.MaxLng,
+			)
+		},
+	})
 	if err != nil {
-		return nil, fmt.Errorf("failed to build search query: %w", err)
+		return nil, err
 	}
 
 	rows, err := r.DB.QueryContext(ctx, query, args...)
@@ -866,10 +744,6 @@ func (r *SQLiteRepository) SearchEntries(ctx context.Context, dbID repo.ULID, re
 
 // ClaimQueuedEntry atomically claims a queued entry by changing its status to processing.
 func (r *SQLiteRepository) ClaimQueuedEntry(ctx context.Context, dbID repo.ULID, entryID int64) (bool, error) {
-	if !shared.IsValidULID(dbID.String()) {
-		return false, fmt.Errorf("%w: invalid database id", customerrors.ErrValidation)
-	}
-
 	tx, err := r.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return false, fmt.Errorf("failed to begin claim transaction: %w", err)
@@ -891,7 +765,7 @@ func (r *SQLiteRepository) ClaimQueuedEntry(ctx context.Context, dbID repo.ULID,
 	if rows == 1 {
 		statsQuery, statsArgs, err := r.Builder.Update("databases").
 			Set("queued_count", squirrel.Expr("MAX(0, queued_count - 1)")).
-			Where(squirrel.Eq{"id": dbID.String()}).
+			Where(squirrel.Eq{"id": dbID}).
 			ToSql()
 		if err != nil {
 			return false, fmt.Errorf("failed to build stats update query: %w", err)
@@ -908,47 +782,8 @@ func (r *SQLiteRepository) ClaimQueuedEntry(ctx context.Context, dbID repo.ULID,
 	return rows == 1, nil
 }
 
-// GetEntriesByStatus retrieves entries matching a status, ordered by ID ascending (oldest first).
-func (r *SQLiteRepository) GetEntriesByStatus(ctx context.Context, dbID repo.ULID, status repo.EntryStatus, limit uint64) ([]repo.Entry, error) {
-	if !shared.IsValidULID(dbID.String()) {
-		return nil, fmt.Errorf("%w: invalid database id", customerrors.ErrValidation)
-	}
-
-	customFields, err := r.getCustomFields(ctx, dbID)
-	if err != nil {
-		return nil, err
-	}
-
-	tableName := fmt.Sprintf(`"entries_%s"`, dbID.String())
-	b := r.Builder.Select("*").From(tableName).Where(squirrel.Eq{"status": status}).OrderBy("id ASC")
-	if limit > 0 {
-		b = b.Limit(limit)
-	}
-	query, args, err := b.ToSql()
-	if err != nil {
-		return nil, fmt.Errorf("failed to build get-by-status query: %w", err)
-	}
-
-	rows, err := r.DB.QueryContext(ctx, query, args...)
-	if err != nil {
-		return nil, fmt.Errorf("failed to query entries by status: %w", err)
-	}
-	defer rows.Close()
-
-	entries, err := r.scanEntryRows(rows, customFields)
-	if err != nil {
-		return nil, fmt.Errorf("failed to scan entries by status: %w", err)
-	}
-
-	return entries, nil
-}
-
 // CountEntriesByStatus counts the number of entries with the specified status.
 func (r *SQLiteRepository) CountEntriesByStatus(ctx context.Context, dbID repo.ULID, status repo.EntryStatus) (int64, error) {
-	if !shared.IsValidULID(dbID.String()) {
-		return 0, fmt.Errorf("%w: invalid database id", customerrors.ErrValidation)
-	}
-
 	tableName := fmt.Sprintf(`"entries_%s"`, dbID.String())
 	query, args, err := r.Builder.Select("COUNT(*)").From(tableName).Where(squirrel.Eq{"status": status}).ToSql()
 	if err != nil {

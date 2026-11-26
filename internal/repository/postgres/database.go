@@ -6,8 +6,8 @@ import (
 	"errors"
 	"fmt"
 	repo "mediahub_oss/internal/repository"
-	"mediahub_oss/internal/shared"
 	"mediahub_oss/internal/shared/customerrors"
+	"mediahub_oss/internal/shared/ulid"
 	"strings"
 
 	"github.com/Masterminds/squirrel"
@@ -26,16 +26,26 @@ func isPQUniqueViolation(err error) bool {
 	return strings.Contains(errStr, "unique constraint") || strings.Contains(errStr, "duplicate key")
 }
 
+func isPQUndefinedTable(err error) bool {
+	if err == nil {
+		return false
+	}
+	var pqErr *pq.Error
+	if errors.As(err, &pqErr) {
+		return pqErr.Code == "42P01"
+	}
+	errStr := strings.ToLower(err.Error())
+	return strings.Contains(errStr, "undefined_table") || strings.Contains(errStr, "does not exist")
+}
+
 // CreateDatabase inserts the database metadata and dynamically provisions its dedicated entry table.
 func (r *PostgresRepository) CreateDatabase(ctx context.Context, db repo.Database) (repo.Database, error) {
 	if !safeNameRegex.MatchString(db.Name) {
 		return repo.Database{}, fmt.Errorf("%w: database name contains invalid characters", customerrors.ErrInvalidName)
 	}
 
-	if db.ID == "" {
-		db.ID = repo.ULID(shared.GenerateULID())
-	} else if !shared.IsValidULID(db.ID.String()) {
-		return repo.Database{}, fmt.Errorf("%w: invalid database id", customerrors.ErrValidation)
+	if db.ID.IsZero() {
+		db.ID = ulid.New()
 	}
 
 	var hkLastRunMs int64 = 0
@@ -47,11 +57,11 @@ func (r *PostgresRepository) CreateDatabase(ctx context.Context, db repo.Databas
 		db.CustomFields[i].ID = i
 	}
 
-	createTableSQL, err := r.BuildDynamicTableSchema(db.ID.String(), db.ContentType, db.CustomFields)
+	createTableSQL, err := r.BuildDynamicTableSchema(db.ID, db.ContentType, db.CustomFields)
 	if err != nil {
 		return repo.Database{}, fmt.Errorf("%w: %v", customerrors.ErrValidation, err)
 	}
-	indexSQLs := BuildIndexesSQL(db.ID.String(), db.CustomFields)
+	indexSQLs := BuildIndexesSQL(db.ID, db.CustomFields)
 
 	tx, err := r.DB.BeginTx(ctx, nil)
 	if err != nil {
@@ -118,13 +128,9 @@ func (r *PostgresRepository) CreateDatabase(ctx context.Context, db repo.Databas
 
 // GetDatabase retrieves a single database configuration by its ULID.
 func (r *PostgresRepository) GetDatabase(ctx context.Context, dbID repo.ULID) (repo.Database, error) {
-	if !shared.IsValidULID(dbID.String()) {
-		return repo.Database{}, fmt.Errorf("%w: invalid database id", customerrors.ErrValidation)
-	}
-
 	query, args, err := r.Builder.Select("id", "name", "content_type", "hk_interval", "hk_disk_space", "hk_max_age", "create_preview", "auto_conversion", "n_max_queued", "hk_last_run", "entry_count", "total_disk_space_bytes", "queued_count").
 		From("databases").
-		Where(squirrel.Eq{"id": dbID.String()}).
+		Where(squirrel.Eq{"id": dbID}).
 		ToSql()
 	if err != nil {
 		return repo.Database{}, fmt.Errorf("failed to build select query: %w", err)
@@ -192,9 +198,9 @@ func (r *PostgresRepository) GetDatabases(ctx context.Context) ([]repo.Database,
 	}
 	defer cfRows.Close()
 
-	cfMap := make(map[string][]repo.CustomFieldDef)
+	cfMap := make(map[repo.ULID][]repo.CustomFieldDef)
 	for cfRows.Next() {
-		var dbID string
+		var dbID repo.ULID
 		var cf repo.CustomFieldDef
 		if err := cfRows.Scan(&dbID, &cf.ID, &cf.Name, &cf.Type, &cf.IsIndexed); err != nil {
 			return nil, fmt.Errorf("failed to scan custom field: %w", err)
@@ -206,7 +212,7 @@ func (r *PostgresRepository) GetDatabases(ctx context.Context) ([]repo.Database,
 	}
 
 	for i := range databases {
-		if cfs, ok := cfMap[databases[i].ID.String()]; ok {
+		if cfs, ok := cfMap[databases[i].ID]; ok {
 			databases[i].CustomFields = cfs
 		} else {
 			databases[i].CustomFields = []repo.CustomFieldDef{}
@@ -220,9 +226,6 @@ func (r *PostgresRepository) GetDatabases(ctx context.Context) ([]repo.Database,
 func (r *PostgresRepository) UpdateDatabase(ctx context.Context, db repo.Database) (repo.Database, error) {
 	if !safeNameRegex.MatchString(db.Name) {
 		return repo.Database{}, fmt.Errorf("%w: database name contains invalid characters", customerrors.ErrInvalidName)
-	}
-	if !shared.IsValidULID(db.ID.String()) {
-		return repo.Database{}, fmt.Errorf("%w: invalid database id", customerrors.ErrValidation)
 	}
 
 	var hkLastRunMs int64 = 0
@@ -266,15 +269,11 @@ func (r *PostgresRepository) UpdateDatabase(ctx context.Context, db repo.Databas
 // recomputed the true values; regular configuration updates must not use it or
 // concurrent entry operations would lose their statistics deltas.
 func (r *PostgresRepository) UpdateDatabaseStats(ctx context.Context, dbID repo.ULID, stats repo.DatabaseStats) error {
-	if !shared.IsValidULID(dbID.String()) {
-		return fmt.Errorf("%w: invalid database id", customerrors.ErrValidation)
-	}
-
 	query, args, err := r.Builder.Update("databases").
 		Set("entry_count", stats.EntryCount).
 		Set("total_disk_space_bytes", stats.TotalDiskSpaceBytes).
 		Set("queued_count", stats.QueuedCount).
-		Where(squirrel.Eq{"id": dbID.String()}).
+		Where(squirrel.Eq{"id": dbID}).
 		ToSql()
 	if err != nil {
 		return fmt.Errorf("failed to build stats update query: %w", err)
@@ -292,10 +291,6 @@ func (r *PostgresRepository) UpdateDatabaseStats(ctx context.Context, dbID repo.
 
 // DeleteDatabase permanently removes a database and its entries table.
 func (r *PostgresRepository) DeleteDatabase(ctx context.Context, dbID repo.ULID) error {
-	if !shared.IsValidULID(dbID.String()) {
-		return fmt.Errorf("%w: invalid database id", customerrors.ErrValidation)
-	}
-
 	tx, err := r.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
@@ -307,7 +302,7 @@ func (r *PostgresRepository) DeleteDatabase(ctx context.Context, dbID repo.ULID)
 		return fmt.Errorf("failed to drop dynamic table: %w", err)
 	}
 
-	query, args, err := r.Builder.Delete("databases").Where(squirrel.Eq{"id": dbID.String()}).ToSql()
+	query, args, err := r.Builder.Delete("databases").Where(squirrel.Eq{"id": dbID}).ToSql()
 	if err != nil {
 		return fmt.Errorf("failed to build delete query: %w", err)
 	}
@@ -331,13 +326,9 @@ func (r *PostgresRepository) DeleteDatabase(ctx context.Context, dbID repo.ULID)
 
 // GetDatabaseStats retrieves live statistics for a specific database by its ID.
 func (r *PostgresRepository) GetDatabaseStats(ctx context.Context, dbID repo.ULID) (repo.DatabaseStats, error) {
-	if !shared.IsValidULID(dbID.String()) {
-		return repo.DatabaseStats{}, fmt.Errorf("%w: invalid database id", customerrors.ErrValidation)
-	}
-
 	query, args, err := r.Builder.Select("entry_count", "total_disk_space_bytes", "queued_count").
 		From("databases").
-		Where(squirrel.Eq{"id": dbID.String()}).
+		Where(squirrel.Eq{"id": dbID}).
 		ToSql()
 	if err != nil {
 		return repo.DatabaseStats{}, fmt.Errorf("failed to build select query: %w", err)
@@ -374,11 +365,11 @@ func (r *PostgresRepository) GetDatabaseULIDsWithQueuedEntries(ctx context.Conte
 
 	var ulids []repo.ULID
 	for rows.Next() {
-		var id string
+		var id repo.ULID
 		if err := rows.Scan(&id); err != nil {
 			return nil, fmt.Errorf("failed to scan database id: %w", err)
 		}
-		ulids = append(ulids, repo.ULID(id))
+		ulids = append(ulids, id)
 	}
 
 	if err := rows.Err(); err != nil {

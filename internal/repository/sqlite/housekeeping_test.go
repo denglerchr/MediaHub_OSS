@@ -6,10 +6,7 @@ import (
 	"time"
 
 	repo "mediahub_oss/internal/repository"
-	"mediahub_oss/internal/repository/migrations"
 	"mediahub_oss/internal/repository/sqlite"
-
-	"github.com/pressly/goose/v3"
 )
 
 // Regression test: HouseKeepingRequired must select exactly the columns that
@@ -25,11 +22,7 @@ func TestHouseKeepingRequired_ScanSuccess(t *testing.T) {
 	}
 	defer r.Close()
 
-	if err := goose.SetDialect("sqlite3"); err != nil {
-		t.Fatalf("failed to set goose dialect: %v", err)
-	}
-	goose.SetBaseFS(migrations.EmbedFS)
-	if err := goose.Up(r.DB, "sqlite"); err != nil {
+	if err := r.MigrateUp(context.Background()); err != nil {
 		t.Fatalf("failed to run migrations: %v", err)
 	}
 

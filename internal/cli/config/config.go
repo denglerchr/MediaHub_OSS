@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"mediahub_oss/internal/shared/customerrors"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/BurntSushi/toml"
@@ -50,29 +51,145 @@ func LoadConfig(path string) (*Config, error) {
 		return nil, err
 	}
 
-	// 5. If JWT Secret is omitted, generate a cryptographically secure random secret and persist it
-	if strings.TrimSpace(config.Auth.JWT.Secret) == "" {
-		secret, err := generateRandomSecret(32)
-		if err != nil {
-			return nil, fmt.Errorf("failed to generate random JWT secret: %w", err)
-		}
-		config.Auth.JWT.Secret = secret
-		if config.Auth.JWT.AccessDuration == "" {
-			config.Auth.JWT.AccessDuration = "5min"
-		}
-		if config.Auth.JWT.RefreshDuration == "" {
-			config.Auth.JWT.RefreshDuration = "24h"
-		}
+	return &config, nil
+}
 
-		if path != "" {
-			if err := SaveConfig(path, &config); err != nil {
-				return nil, fmt.Errorf("failed to save generated JWT secret: %w", err)
-			}
-			slog.Info("Auto-generated and persisted JWT secret to config file", "path", path)
-		}
+// EnsureJWTSecret ensures a JWT signing secret is configured before starting the HTTP server.
+// PostgreSQL deployments require an explicit secret to prevent multi-instance split-brain;
+// SQLite deployments auto-generate and persist a secret to the config file when omitted.
+func EnsureJWTSecret(path string, cfg *Config, logger *slog.Logger) error {
+	if cfg == nil {
+		return fmt.Errorf("config must not be nil")
+	}
+	if strings.TrimSpace(cfg.Auth.JWT.Secret) != "" {
+		return nil
+	}
+	if strings.EqualFold(strings.TrimSpace(cfg.Database.Driver), "postgres") {
+		return fmt.Errorf("invalid configuration: auth.jwt.secret must be explicitly configured (e.g. via MEDIAHUB_AUTH_JWT_SECRET) when using the postgres driver to prevent multi-instance JWT split-brain")
 	}
 
-	return &config, nil
+	secret, err := generateRandomSecret(32)
+	if err != nil {
+		return fmt.Errorf("failed to generate random JWT secret: %w", err)
+	}
+	cfg.Auth.JWT.Secret = secret
+	if strings.TrimSpace(cfg.Auth.JWT.AccessDuration) == "" {
+		cfg.Auth.JWT.AccessDuration = "5min"
+	}
+	if strings.TrimSpace(cfg.Auth.JWT.RefreshDuration) == "" {
+		cfg.Auth.JWT.RefreshDuration = "24h"
+	}
+
+	if path != "" {
+		if logger == nil {
+			logger = slog.Default()
+		}
+		if err := persistJWTSecret(path, cfg.Auth.JWT); err != nil {
+			logger.Warn("Failed to persist auto-generated JWT secret to config file; an ephemeral in-memory secret will be used and existing tokens will be invalidated on restart", "path", path, "error", err)
+			return nil
+		}
+		logger.Info("Auto-generated and persisted JWT secret to config file", "path", path)
+	}
+
+	return nil
+}
+
+func persistJWTSecret(path string, jwtCfg jwtConfigInternal) error {
+	var raw map[string]any
+	if _, err := toml.DecodeFile(path, &raw); err != nil {
+		if !errors.Is(err, os.ErrNotExist) && !os.IsNotExist(err) {
+			return fmt.Errorf("failed to decode existing config file: %w", err)
+		}
+	}
+	if raw == nil {
+		raw = make(map[string]any)
+	}
+
+	var authMap map[string]any
+	if existingAuth, ok := raw["auth"]; ok && existingAuth != nil {
+		castAuth, ok := existingAuth.(map[string]any)
+		if !ok {
+			return fmt.Errorf("unexpected non-table [auth] section in config file %s", path)
+		}
+		authMap = castAuth
+	} else {
+		authMap = make(map[string]any)
+		raw["auth"] = authMap
+	}
+
+	var jwtMap map[string]any
+	if existingJWT, ok := authMap["jwt"]; ok && existingJWT != nil {
+		castJWT, ok := existingJWT.(map[string]any)
+		if !ok {
+			return fmt.Errorf("unexpected non-table [auth.jwt] section in config file %s", path)
+		}
+		jwtMap = castJWT
+	} else {
+		jwtMap = make(map[string]any)
+		authMap["jwt"] = jwtMap
+	}
+
+	jwtMap["secret"] = jwtCfg.Secret
+	if isMissingOrEmptyTOMLString(jwtMap, "access_duration") && jwtCfg.AccessDuration != "" {
+		jwtMap["access_duration"] = jwtCfg.AccessDuration
+	}
+	if isMissingOrEmptyTOMLString(jwtMap, "refresh_duration") && jwtCfg.RefreshDuration != "" {
+		jwtMap["refresh_duration"] = jwtCfg.RefreshDuration
+	}
+
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, "."+filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return fmt.Errorf("failed to create temporary config file: %w", err)
+	}
+	tmpPath := tmp.Name()
+	removeTmp := true
+	defer func() {
+		if removeTmp {
+			_ = os.Remove(tmpPath)
+		}
+	}()
+
+	if err := tmp.Chmod(0600); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("failed to set permissions on temporary config file: %w", err)
+	}
+	if err := toml.NewEncoder(tmp).Encode(raw); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("failed to encode config to temporary file: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("failed to close temporary config file: %w", err)
+	}
+
+	if err := os.Rename(tmpPath, path); err != nil {
+		f, openErr := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
+		if openErr != nil {
+			return fmt.Errorf("failed to replace config file: rename=%w; fallback open=%v", err, openErr)
+		}
+		_ = f.Chmod(0600)
+		encErr := toml.NewEncoder(f).Encode(raw)
+		closeErr := f.Close()
+		if encErr != nil {
+			return fmt.Errorf("failed to encode config on fallback write: %w", encErr)
+		}
+		if closeErr != nil {
+			return fmt.Errorf("failed to close config file on fallback write: %w", closeErr)
+		}
+		return nil
+	}
+
+	removeTmp = false
+	return nil
+}
+
+func isMissingOrEmptyTOMLString(m map[string]any, key string) bool {
+	v, ok := m[key]
+	if !ok || v == nil {
+		return true
+	}
+	s, ok := v.(string)
+	return ok && strings.TrimSpace(s) == ""
 }
 
 // generateRandomSecret generates a cryptographically secure hex-encoded random string.
@@ -116,9 +233,8 @@ func (cfg *Config) ValidateConfig() error {
 }
 
 // SaveConfig writes the current configuration back to a TOML file.
-// Used to persist the auto-generated JWT secret.
 func SaveConfig(path string, cfg *Config) error {
-	f, err := os.Create(path)
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
 	if err != nil {
 		return fmt.Errorf("trying to save the config: %w", customerrors.ErrorCreateFile)
 	}

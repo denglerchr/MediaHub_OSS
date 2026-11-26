@@ -1,6 +1,7 @@
 package processing
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -66,7 +67,7 @@ func (p *Processor) storeProcessedStream(ctx context.Context, db repo.Database, 
 		return fmt.Errorf("failed to seek file stream before storage: %w", err)
 	}
 
-	fileSize, err := p.Storage.Write(ctx, db.ID.String(), entry.ID, stream)
+	fileSize, err := p.Storage.Write(ctx, db.ID, entry.ID, stream)
 	if err != nil {
 		p.failUploadEntry(ctx, db, *entry, err)
 		return fmt.Errorf("failed to write to storage provider: %w", err)
@@ -75,37 +76,47 @@ func (p *Processor) storeProcessedStream(ctx context.Context, db repo.Database, 
 	return nil
 }
 
-// generateAndStorePreview pipes the output of the given preview producer directly
-// into storage and returns the stored preview size in bytes. The pipe is drained
-// correctly even if the storage write fails first.
+const maxPreviewBytes = 10 << 20 // 10 MiB
+
+var errPreviewTooLarge = fmt.Errorf("generated preview exceeds maximum size (%d bytes)", maxPreviewBytes)
+
+type cappedWriter struct {
+	buf      *bytes.Buffer
+	limit    int
+	exceeded bool
+}
+
+func (w *cappedWriter) Write(p []byte) (int, error) {
+	if w.exceeded || len(p) > w.limit-w.buf.Len() {
+		w.exceeded = true
+		return 0, errPreviewTooLarge
+	}
+	return w.buf.Write(p)
+}
+
+// generateAndStorePreview buffers the output of the preview producer in memory up
+// to maxPreviewBytes and then writes it to storage with a known byte length.
 func (p *Processor) generateAndStorePreview(
 	ctx context.Context,
 	db repo.Database,
 	entryID int64,
-	mimeType string,
 	produce func(ctx context.Context, w io.Writer) error,
 ) (uint64, error) {
-	pr, pw := io.Pipe()
-	errChan := make(chan error, 1)
+	genCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
 
-	go func() {
-		defer pw.Close()
-		errChan <- produce(ctx, pw)
-	}()
-
-	previewSize, err := p.Storage.WritePreview(ctx, db.ID.String(), entryID, pr)
-	if err != nil {
-		pr.CloseWithError(err)
-		<-errChan
-		return 0, fmt.Errorf("failed to save preview to storage: %w", err)
+	var buf bytes.Buffer
+	cw := &cappedWriter{buf: &buf, limit: maxPreviewBytes}
+	if err := produce(genCtx, cw); err != nil {
+		return 0, fmt.Errorf("failed to generate preview: %w", err)
+	}
+	if cw.exceeded {
+		return 0, fmt.Errorf("failed to generate preview: %w", errPreviewTooLarge)
 	}
 
-	if genErr := <-errChan; genErr != nil {
-		// The generator failed mid-stream: the storage write above already committed
-		// whatever partial bytes were produced (the pipe closes with a clean EOF).
-		// Discard the corrupted preview so no invalid file remains in storage.
-		_ = p.Storage.DeletePreview(ctx, db.ID.String(), entryID)
-		return 0, fmt.Errorf("failed to generate preview: %w", genErr)
+	previewSize, err := p.Storage.WritePreview(ctx, db.ID, entryID, bytes.NewReader(buf.Bytes()))
+	if err != nil {
+		return 0, fmt.Errorf("failed to save preview to storage: %w", err)
 	}
 
 	return uint64(previewSize), nil

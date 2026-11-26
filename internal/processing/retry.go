@@ -19,11 +19,13 @@ import (
 // The backoff state is intentionally in-memory and per-node: it is a retry
 // heuristic, not a correctness mechanism (the database remains the source of
 // truth for entry status). Attempts grow exponentially up to
-// retryMaxClaimDelay, and records are pruned once their delay has passed.
+// retryMaxClaimDelay, and records are pruned once their retention window past
+// nextTry has elapsed.
 
 const (
 	retryBaseClaimDelay = 30 * time.Second
 	retryMaxClaimDelay  = 5 * time.Minute
+	retryEntryRetention = 2 * retryMaxClaimDelay
 )
 
 // retryEntryKey uniquely identifies an entry across all databases.
@@ -59,8 +61,11 @@ func (rr *retryRegistry) noteClaimFailure(dbID repo.ULID, entryID int64) {
 	info := rr.claims[key]
 	info.attempts++
 
-	delay := retryBaseClaimDelay << (info.attempts - 1)
-	if delay > retryMaxClaimDelay || delay <= 0 {
+	delay := retryBaseClaimDelay
+	for i := 1; i < info.attempts && delay < retryMaxClaimDelay; i++ {
+		delay *= 2
+	}
+	if delay > retryMaxClaimDelay {
 		delay = retryMaxClaimDelay
 	}
 	info.nextTry = time.Now().Add(delay)
@@ -83,14 +88,15 @@ func (rr *retryRegistry) claimDeferred(dbID repo.ULID, entryID int64) bool {
 	return ok && time.Now().Before(info.nextTry)
 }
 
-// prune drops records whose backoff window has passed, bounding memory use for
-// entries that disappear without ever being claimed again.
+// prune drops records whose retention window past nextTry has elapsed, bounding
+// memory use for entries that disappear without ever being claimed again while
+// preserving attempt counts across retry cycles.
 func (rr *retryRegistry) prune() {
 	rr.mu.Lock()
 	defer rr.mu.Unlock()
 	now := time.Now()
 	for id, info := range rr.claims {
-		if !now.Before(info.nextTry) {
+		if now.After(info.nextTry.Add(retryEntryRetention)) {
 			delete(rr.claims, id)
 		}
 	}

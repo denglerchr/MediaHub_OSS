@@ -20,21 +20,22 @@ import (
 // access in-memory data streams via HTTP Range requests.
 type LocalStreamServer struct {
 	server   *http.Server
-	listener net.Listener
 	sessions map[string]*StreamSession
-	mu       sync.RWMutex // Protects the sessions map from concurrent map writes/reads
+	mu       sync.RWMutex // Protects the sessions map, closed state, and session reference counts
+	closed   bool
 	logger   *slog.Logger
 	baseURL  string // The dynamic base URL of the local server
 	cancel   context.CancelFunc
 }
 
 type StreamSession struct {
-	id        string
 	readerAt  io.ReaderAt // Replaces io.ReadSeeker to allow stateless concurrent reads
 	size      int64       // Required for io.NewSectionReader
 	token     string
 	expiresAt time.Time
 	spoolPath string // Disk spool backing readerAt when the stream was spooled; empty for pass-through readers
+	refs      int    // Protected by LocalStreamServer.mu; initial 1 for registration + 1 per active handler
+	closed    bool   // Protected by LocalStreamServer.mu; true once detached by Unregister, sweeper, or Shutdown
 }
 
 // NewLocalStreamServer initializes and starts the internal server.
@@ -47,7 +48,6 @@ func NewLocalStreamServer(logger *slog.Logger) (*LocalStreamServer, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	ls := &LocalStreamServer{
-		listener: listener,
 		sessions: make(map[string]*StreamSession),
 		logger:   logger,
 		baseURL:  fmt.Sprintf("http://%s", listener.Addr().String()),
@@ -71,10 +71,25 @@ func NewLocalStreamServer(logger *slog.Logger) (*LocalStreamServer, error) {
 	return ls, nil
 }
 
-// Shutdown gracefully closes the internal server.
+// Shutdown gracefully closes the internal server and removes any remaining spool files.
 func (l *LocalStreamServer) Shutdown(ctx context.Context) error {
 	l.cancel()
-	return l.server.Shutdown(ctx)
+	err := l.server.Shutdown(ctx)
+
+	var toRemove []*StreamSession
+	l.mu.Lock()
+	l.closed = true
+	for id, session := range l.sessions {
+		if l.closeSessionLocked(id, session) {
+			toRemove = append(toRemove, session)
+		}
+	}
+	l.mu.Unlock()
+
+	for _, session := range toRemove {
+		removeSpoolFile(session)
+	}
+	return err
 }
 
 // isConcurrentSafeReaderAt checks whether the stream is a known concurrent-safe io.ReaderAt
@@ -166,15 +181,20 @@ func (l *LocalStreamServer) Register(ctx context.Context, stream io.ReadSeeker, 
 	}
 
 	session := &StreamSession{
-		id:        id,
 		readerAt:  readerAt,
 		size:      size,
 		token:     token,
 		expiresAt: time.Now().Add(ttl),
 		spoolPath: spoolPath,
+		refs:      1,
 	}
 
 	l.mu.Lock()
+	if l.closed {
+		l.mu.Unlock()
+		removeSpoolFile(session)
+		return "", "", fmt.Errorf("local stream server is shut down")
+	}
 	l.sessions[id] = session
 	l.mu.Unlock()
 
@@ -182,14 +202,38 @@ func (l *LocalStreamServer) Register(ctx context.Context, stream io.ReadSeeker, 
 	return id, fullURL, nil
 }
 
+// closeSessionLocked detaches a session from the active map, marks it closed,
+// and drops its registration reference. The caller must hold l.mu and remove the
+// spool file outside l.mu if it returns true.
+func (l *LocalStreamServer) closeSessionLocked(id string, session *StreamSession) bool {
+	delete(l.sessions, id)
+	session.closed = true
+	session.refs--
+	return session.refs == 0
+}
+
+func (l *LocalStreamServer) releaseSession(session *StreamSession) {
+	l.mu.Lock()
+	session.refs--
+	shouldRemove := session.refs == 0 && session.closed
+	l.mu.Unlock()
+
+	if shouldRemove {
+		removeSpoolFile(session)
+	}
+}
+
 func (l *LocalStreamServer) Unregister(id string) {
 	l.mu.Lock()
 	session := l.sessions[id]
-	delete(l.sessions, id)
+	var toRemove *StreamSession
+	if session != nil && l.closeSessionLocked(id, session) {
+		toRemove = session
+	}
 	l.mu.Unlock()
 
-	if session != nil {
-		removeSpoolFile(session)
+	if toRemove != nil {
+		removeSpoolFile(toRemove)
 	}
 }
 
@@ -210,19 +254,22 @@ func (l *LocalStreamServer) handleStream(w http.ResponseWriter, r *http.Request)
 	id := r.PathValue("id")
 	token := r.URL.Query().Get("token")
 
-	l.mu.RLock()
+	l.mu.Lock()
 	session, exists := l.sessions[id]
-	l.mu.RUnlock()
-
-	if !exists || session.token != token {
+	if !exists || session.closed || session.token != token {
+		l.mu.Unlock()
 		http.Error(w, "Unauthorized or Stream Not Found", http.StatusUnauthorized)
 		return
 	}
-
 	if time.Now().After(session.expiresAt) {
+		l.mu.Unlock()
 		http.Error(w, "Stream Session Expired", http.StatusGone)
 		return
 	}
+	session.refs++
+	l.mu.Unlock()
+
+	defer l.releaseSession(session)
 
 	// Give THIS specific HTTP request its own independent cursor!
 	// This prevents the race condition when FFmpeg opens multiple concurrent threads.
@@ -240,16 +287,22 @@ func (l *LocalStreamServer) startSweeper(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			var toRemove []*StreamSession
 			l.mu.Lock()
 			now := time.Now()
 			for id, session := range l.sessions {
 				if now.After(session.expiresAt) {
-					delete(l.sessions, id)
-					removeSpoolFile(session)
+					if l.closeSessionLocked(id, session) {
+						toRemove = append(toRemove, session)
+					}
 					l.logger.Debug("Sweeper removed expired stream session", "id", id)
 				}
 			}
 			l.mu.Unlock()
+
+			for _, session := range toRemove {
+				removeSpoolFile(session)
+			}
 		}
 	}
 }

@@ -6,13 +6,10 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"io"
 	"mediahub_oss/internal/httpserver/utils"
 	"mediahub_oss/internal/repository"
-	"mediahub_oss/internal/shared"
-	"mediahub_oss/internal/shared/customerrors"
+	"mediahub_oss/internal/shared/ulid"
 	"net/http"
 	"time"
 )
@@ -80,7 +77,7 @@ func mapToAPIKeyResponse(key repository.APIKey) APIKeyResponse {
 	}
 
 	return APIKeyResponse{
-		ID:          string(key.ID),
+		ID:          key.ID.String(),
 		Name:        key.Name,
 		KeyHint:     key.KeyHint,
 		ScopeView:   key.Scope.HasAccess(repository.AccessView),
@@ -136,7 +133,7 @@ func (h *UserHandler) GetAllAPIKeys(w http.ResponseWriter, r *http.Request) {
 		}
 		apiKeyResp := mapToAPIKeyResponse(key)
 		apiKeyResp.User = &UserSubResponse{
-			ID:          string(u.ID),
+			ID:          u.ID.String(),
 			Username:    u.Username,
 			IsAdmin:     u.IsAdmin,
 			AccountType: u.AccountType,
@@ -172,30 +169,15 @@ func (h *UserHandler) CreateAPIKey(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	userIDStr := r.PathValue("user_ulid")
 
-	var userID repository.ULID
-	var targetUsername string
 	ctxUser := utils.GetUserFromContext(ctx)
-	if string(ctxUser.ID) == userIDStr {
-		userID = ctxUser.ID
-		targetUsername = ctxUser.Username
-	} else {
-		user, err := h.Repo.GetUserByID(ctx, repository.ULID(userIDStr))
-		if err != nil {
-			if errors.Is(err, customerrors.ErrNotFound) {
-				utils.RespondWithError(w, http.StatusNotFound, "User not found")
-			} else {
-				h.Logger.Error("Failed to retrieve user", "error", err)
-				utils.RespondWithError(w, http.StatusInternalServerError, "Internal server error")
-			}
-			return
-		}
-		userID = user.ID
-		targetUsername = user.Username
+	userID, targetUsername, ok := h.resolveTargetUserOrRespond(w, r, ctxUser, userIDStr)
+	if !ok {
+		return
 	}
 
 	var payload CreateAPIKeyPayload
-	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-		utils.RespondWithError(w, http.StatusBadRequest, "Invalid JSON body")
+	if status, msg := utils.DecodeJSONBody(w, r, &payload); status != 0 {
+		utils.RespondWithError(w, status, msg)
 		return
 	}
 
@@ -231,7 +213,7 @@ func (h *UserHandler) CreateAPIKey(w http.ResponseWriter, r *http.Request) {
 	}
 
 	keyModel := repository.APIKey{
-		ID:        repository.ULID(shared.GenerateULID()),
+		ID:        ulid.New(),
 		UserID:    userID,
 		Name:      payload.Name,
 		KeyHash:   keyHash,
@@ -253,17 +235,9 @@ func (h *UserHandler) CreateAPIKey(w http.ResponseWriter, r *http.Request) {
 		Token:          token,
 	}
 
-	h.Auditor.Log(ctx, "user.create_key", ctxUser.Username, targetUsername, map[string]any{
-		"key_id":       string(createdKey.ID),
-		"key_name":     createdKey.Name,
-		"key_hint":     createdKey.KeyHint,
-		"scope_view":   createdKey.Scope.HasAccess(repository.AccessView),
-		"scope_create": createdKey.Scope.HasAccess(repository.AccessCreate),
-		"scope_edit":   createdKey.Scope.HasAccess(repository.AccessEdit),
-		"scope_delete": createdKey.Scope.HasAccess(repository.AccessDelete),
-		"scope_admin":  createdKey.Scope.HasAccess(repository.AccessAdmin),
-		"expires_at":   payload.ExpiresAt,
-	})
+	auditDetails := apiKeyScopeAuditDetails(createdKey)
+	auditDetails["expires_at"] = payload.ExpiresAt
+	h.Auditor.Log(ctx, "user.create_key", ctxUser.Username, targetUsername, auditDetails)
 
 	utils.RespondWithJSON(w, http.StatusCreated, response)
 }
@@ -286,24 +260,12 @@ func (h *UserHandler) GetAPIKeys(w http.ResponseWriter, r *http.Request) {
 
 	// Check if context user matches the target ULID to avoid a DB query
 	ctxUser := utils.GetUserFromContext(ctx)
-	var targetUsername string
-	if string(ctxUser.ID) != userIDStr {
-		user, err := h.Repo.GetUserByID(ctx, repository.ULID(userIDStr))
-		if err != nil {
-			if errors.Is(err, customerrors.ErrNotFound) {
-				utils.RespondWithError(w, http.StatusNotFound, "User not found")
-			} else {
-				h.Logger.Error("Failed to retrieve user", "error", err)
-				utils.RespondWithError(w, http.StatusInternalServerError, "Internal server error")
-			}
-			return
-		}
-		targetUsername = user.Username
-	} else {
-		targetUsername = ctxUser.Username
+	userID, targetUsername, ok := h.resolveTargetUserOrRespond(w, r, ctxUser, userIDStr)
+	if !ok {
+		return
 	}
 
-	keys, err := h.Repo.GetAPIKeysByUserID(ctx, repository.ULID(userIDStr))
+	keys, err := h.Repo.GetAPIKeysByUserID(ctx, userID)
 	if err != nil {
 		h.Logger.Error("Failed to retrieve API keys for user", "error", err, "user_id", userIDStr)
 		utils.RespondWithError(w, http.StatusInternalServerError, "Internal server error")
@@ -337,29 +299,15 @@ func (h *UserHandler) GetAPIKeys(w http.ResponseWriter, r *http.Request) {
 // @Router       /user/{user_ulid}/keys/{key_ulid} [get]
 func (h *UserHandler) GetAPIKey(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	userIDStr := r.PathValue("user_ulid")
-	keyIDStr := r.PathValue("key_ulid")
-
-	key, err := h.Repo.GetAPIKeyByID(ctx, repository.ULID(keyIDStr))
-	if err != nil {
-		if errors.Is(err, customerrors.ErrNotFound) {
-			utils.RespondWithError(w, http.StatusNotFound, "API Key not found")
-		} else {
-			h.Logger.Error("Failed to retrieve API key", "error", err, "key_id", keyIDStr)
-			utils.RespondWithError(w, http.StatusInternalServerError, "Internal server error")
-		}
-		return
-	}
-
-	if string(key.UserID) != userIDStr {
-		utils.RespondWithError(w, http.StatusNotFound, "API Key not found for this user")
+	key, userIDStr, ok := h.getOwnedAPIKeyOrRespond(w, r)
+	if !ok {
 		return
 	}
 
 	ctxUser := utils.GetUserFromContext(ctx)
 
 	h.Auditor.Log(ctx, "user.get_key", ctxUser.Username, fmt.Sprintf("%s/key/%s", userIDStr, key.ID), map[string]any{
-		"key_id":   string(key.ID),
+		"key_id":   key.ID.String(),
 		"key_name": key.Name,
 	})
 
@@ -384,28 +332,14 @@ func (h *UserHandler) GetAPIKey(w http.ResponseWriter, r *http.Request) {
 // @Router       /user/{user_ulid}/keys/{key_ulid} [patch]
 func (h *UserHandler) UpdateAPIKey(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	userIDStr := r.PathValue("user_ulid")
-	keyIDStr := r.PathValue("key_ulid")
-
-	key, err := h.Repo.GetAPIKeyByID(ctx, repository.ULID(keyIDStr))
-	if err != nil {
-		if errors.Is(err, customerrors.ErrNotFound) {
-			utils.RespondWithError(w, http.StatusNotFound, "API Key not found")
-		} else {
-			h.Logger.Error("Failed to retrieve API key", "error", err, "key_id", keyIDStr)
-			utils.RespondWithError(w, http.StatusInternalServerError, "Internal server error")
-		}
+	key, userIDStr, ok := h.getOwnedAPIKeyOrRespond(w, r)
+	if !ok {
 		return
 	}
 
-	if string(key.UserID) != userIDStr {
-		utils.RespondWithError(w, http.StatusNotFound, "API Key not found for this user")
-		return
-	}
-
-	bodyBytes, err := io.ReadAll(r.Body)
-	if err != nil {
-		utils.RespondWithError(w, http.StatusBadRequest, "Failed to read request body")
+	bodyBytes, status, msg := utils.ReadJSONBody(w, r)
+	if status != 0 {
+		utils.RespondWithError(w, status, msg)
 		return
 	}
 
@@ -440,23 +374,14 @@ func (h *UserHandler) UpdateAPIKey(w http.ResponseWriter, r *http.Request) {
 
 	updatedKey, err := h.Repo.UpdateAPIKey(ctx, key)
 	if err != nil {
-		h.Logger.Error("Failed to update API key", "error", err, "key_id", keyIDStr)
+		h.Logger.Error("Failed to update API key", "error", err, "key_id", key.ID)
 		utils.RespondWithError(w, http.StatusInternalServerError, "Failed to update API Key")
 		return
 	}
 
 	ctxUser := utils.GetUserFromContext(ctx)
 
-	h.Auditor.Log(ctx, "user.update_key", ctxUser.Username, fmt.Sprintf("%s/key/%s", userIDStr, key.ID), map[string]any{
-		"key_id":       string(updatedKey.ID),
-		"key_name":     updatedKey.Name,
-		"key_hint":     updatedKey.KeyHint,
-		"scope_view":   updatedKey.Scope.HasAccess(repository.AccessView),
-		"scope_create": updatedKey.Scope.HasAccess(repository.AccessCreate),
-		"scope_edit":   updatedKey.Scope.HasAccess(repository.AccessEdit),
-		"scope_delete": updatedKey.Scope.HasAccess(repository.AccessDelete),
-		"scope_admin":  updatedKey.Scope.HasAccess(repository.AccessAdmin),
-	})
+	h.Auditor.Log(ctx, "user.update_key", ctxUser.Username, fmt.Sprintf("%s/key/%s", userIDStr, key.ID), apiKeyScopeAuditDetails(updatedKey))
 
 	utils.RespondWithJSON(w, http.StatusOK, mapToAPIKeyResponse(updatedKey))
 }
@@ -480,28 +405,14 @@ func (h *UserHandler) DeleteAPIKey(w http.ResponseWriter, r *http.Request) {
 		utils.RespondWithError(w, status, msg)
 		return
 	}
-	userIDStr := r.PathValue("user_ulid")
-	keyIDStr := r.PathValue("key_ulid")
 
-	key, err := h.Repo.GetAPIKeyByID(ctx, repository.ULID(keyIDStr))
-	if err != nil {
-		if errors.Is(err, customerrors.ErrNotFound) {
-			utils.RespondWithError(w, http.StatusNotFound, "API Key not found")
-		} else {
-			h.Logger.Error("Failed to retrieve API key", "error", err, "key_id", keyIDStr)
-			utils.RespondWithError(w, http.StatusInternalServerError, "Internal server error")
-		}
+	key, userIDStr, ok := h.getOwnedAPIKeyOrRespond(w, r)
+	if !ok {
 		return
 	}
 
-	if string(key.UserID) != userIDStr {
-		utils.RespondWithError(w, http.StatusNotFound, "API Key not found for this user")
-		return
-	}
-
-	err = h.Repo.DeleteAPIKey(ctx, repository.ULID(keyIDStr))
-	if err != nil {
-		h.Logger.Error("Failed to delete API key", "error", err, "key_id", keyIDStr)
+	if err := h.Repo.DeleteAPIKey(ctx, key.ID); err != nil {
+		h.Logger.Error("Failed to delete API key", "error", err, "key_id", key.ID)
 		utils.RespondWithError(w, http.StatusInternalServerError, "Failed to delete API Key")
 		return
 	}
@@ -509,7 +420,7 @@ func (h *UserHandler) DeleteAPIKey(w http.ResponseWriter, r *http.Request) {
 	ctxUser := utils.GetUserFromContext(ctx)
 
 	h.Auditor.Log(ctx, "user.delete_key", ctxUser.Username, fmt.Sprintf("%s/key/%s", userIDStr, key.ID), map[string]any{
-		"key_id":   string(key.ID),
+		"key_id":   key.ID.String(),
 		"key_name": key.Name,
 	})
 
@@ -525,11 +436,11 @@ func authorizeAPIKeyAction(ctx context.Context, targetScope *repository.AccessGr
 		return http.StatusForbidden, "Forbidden: Cannot grant admin scope without admin privileges"
 	}
 
-	if _, isAPIKey := utils.GetAPIKeyFromContext(ctx); isAPIKey {
-		if !holder.HasGlobalScope(repository.AccessAdmin) {
+	if apiKey, isAPIKey := utils.GetAPIKeyFromContext(ctx); isAPIKey {
+		if !apiKey.Scope.HasAccess(repository.AccessAdmin) {
 			return http.StatusForbidden, fmt.Sprintf("Forbidden: API key requires admin scope to %s API keys", action)
 		}
-		if targetScope != nil && (*targetScope&^holder.EffectiveScope()) != 0 {
+		if targetScope != nil && (*targetScope&^apiKey.Scope) != 0 {
 			return http.StatusForbidden, "Forbidden: Cannot grant scopes exceeding the API key's own permissions"
 		}
 	}

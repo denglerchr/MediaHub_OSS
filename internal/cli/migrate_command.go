@@ -5,8 +5,6 @@ import (
 	"context"
 	"fmt"
 	"mediahub_oss/internal/repository"
-	"mediahub_oss/internal/repository/postgres"
-	"mediahub_oss/internal/repository/sqlite"
 	"os"
 	"strings"
 
@@ -57,16 +55,7 @@ func runMigration(command string, globalOptions *GlobalOptions) error {
 	ctx := context.Background()
 	logger := globalOptions.Logger
 
-	var repo repository.Repository
-	var err error
-	switch globalOptions.Conf.Database.Driver {
-	case "sqlite":
-		repo, err = sqlite.NewRepository(globalOptions.Conf.Database.Source)
-	case "postgres":
-		repo, err = postgres.NewRepository(globalOptions.Conf.Database.Source, globalOptions.Conf.Database.MaxOpenConns, globalOptions.Conf.Database.MaxIdleConns)
-	default:
-		return fmt.Errorf("unsupported database driver: %s", globalOptions.Conf.Database.Driver)
-	}
+	repo, err := initRepository(globalOptions.Conf.Database)
 	if err != nil {
 		return fmt.Errorf("failed to connect to database: %w", err)
 	}

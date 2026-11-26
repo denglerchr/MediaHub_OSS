@@ -3,6 +3,7 @@ package repository
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 )
@@ -113,7 +114,20 @@ func ParseCoordinate(val any) (Coordinate, error) {
 	}
 }
 
+func validateFiniteFloat(name string, v float64) error {
+	if math.IsNaN(v) || math.IsInf(v, 0) {
+		return fmt.Errorf("%s must be a finite number, got %v", name, v)
+	}
+	return nil
+}
+
 func validateCoordinate(c Coordinate) (Coordinate, error) {
+	if err := validateFiniteFloat("latitude", c.Latitude); err != nil {
+		return Coordinate{}, err
+	}
+	if err := validateFiniteFloat("longitude", c.Longitude); err != nil {
+		return Coordinate{}, err
+	}
 	if c.Latitude < -90.0 || c.Latitude > 90.0 {
 		return Coordinate{}, fmt.Errorf("latitude %v out of range [-90.0, 90.0]", c.Latitude)
 	}
@@ -184,6 +198,19 @@ func ParseBoundingBox(val any) (BoundingBox, error) {
 }
 
 func validateBoundingBox(b BoundingBox) (BoundingBox, error) {
+	for _, field := range []struct {
+		name string
+		val  float64
+	}{
+		{"min_lat", b.MinLat},
+		{"max_lat", b.MaxLat},
+		{"min_lng", b.MinLng},
+		{"max_lng", b.MaxLng},
+	} {
+		if err := validateFiniteFloat(field.name, field.val); err != nil {
+			return BoundingBox{}, err
+		}
+	}
 	if b.MinLat < -90.0 || b.MinLat > 90.0 {
 		return BoundingBox{}, fmt.Errorf("min_lat %v out of range [-90.0, 90.0]", b.MinLat)
 	}

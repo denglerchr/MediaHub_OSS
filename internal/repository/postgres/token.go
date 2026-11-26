@@ -16,7 +16,7 @@ import (
 func (r *PostgresRepository) StoreRefreshToken(ctx context.Context, userID repo.ULID, tokenHash string, validDuration time.Duration) error {
 	query, args, err := r.Builder.Insert("refresh_tokens").
 		Columns("user_id", "token_hash", "expiry").
-		Values(userID.String(), tokenHash, squirrel.Expr("(EXTRACT(EPOCH FROM clock_timestamp()) * 1000 + ?)::BIGINT", validDuration.Milliseconds())).
+		Values(userID, tokenHash, squirrel.Expr("(EXTRACT(EPOCH FROM clock_timestamp()) * 1000 + ?)::BIGINT", validDuration.Milliseconds())).
 		ToSql()
 	if err != nil {
 		return fmt.Errorf("failed to build insert token query: %w", err)
@@ -37,19 +37,37 @@ func (r *PostgresRepository) ValidateRefreshToken(ctx context.Context, tokenHash
 		Where(squirrel.Expr("token_hash = ? AND expiry >= (EXTRACT(EPOCH FROM clock_timestamp()) * 1000)", tokenHash)).
 		ToSql()
 	if err != nil {
-		return "", fmt.Errorf("failed to build validate token query: %w", err)
+		return repo.ULID{}, fmt.Errorf("failed to build validate token query: %w", err)
 	}
 
-	var userIDStr string
-	err = r.DB.QueryRowContext(ctx, query, args...).Scan(&userIDStr)
+	var userID repo.ULID
+	err = r.DB.QueryRowContext(ctx, query, args...).Scan(&userID)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return "", customerrors.ErrNotFound
+			return repo.ULID{}, customerrors.ErrNotFound
 		}
-		return "", fmt.Errorf("failed to query refresh token: %w", err)
+		return repo.ULID{}, fmt.Errorf("failed to query refresh token: %w", err)
 	}
 
-	return repo.ULID(userIDStr), nil
+	return userID, nil
+}
+
+// ConsumeRefreshToken atomically deletes an unexpired refresh token and returns its associated user ID.
+func (r *PostgresRepository) ConsumeRefreshToken(ctx context.Context, tokenHash string) (repo.ULID, error) {
+	const query = `DELETE FROM refresh_tokens
+WHERE token_hash = $1
+  AND expiry >= (EXTRACT(EPOCH FROM clock_timestamp()) * 1000)::BIGINT
+RETURNING user_id`
+
+	var userID repo.ULID
+	if err := r.DB.QueryRowContext(ctx, query, tokenHash).Scan(&userID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return repo.ULID{}, customerrors.ErrNotFound
+		}
+		return repo.ULID{}, fmt.Errorf("failed to consume refresh token: %w", err)
+	}
+
+	return userID, nil
 }
 
 // DeleteRefreshToken removes a specific refresh token from the database using its hash.
@@ -103,7 +121,7 @@ func (r *PostgresRepository) DeleteExpiredRefreshTokens(ctx context.Context) (in
 // DeleteAllRefreshTokensForUser removes all active sessions for a specific user.
 func (r *PostgresRepository) DeleteAllRefreshTokensForUser(ctx context.Context, userID repo.ULID) error {
 	query, args, err := r.Builder.Delete("refresh_tokens").
-		Where(squirrel.Eq{"user_id": userID.String()}).
+		Where(squirrel.Eq{"user_id": userID}).
 		ToSql()
 	if err != nil {
 		return fmt.Errorf("failed to build delete all tokens query: %w", err)

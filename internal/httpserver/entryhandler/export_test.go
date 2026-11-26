@@ -21,6 +21,7 @@ import (
 	"mediahub_oss/internal/httpserver/utils"
 	repo "mediahub_oss/internal/repository"
 	"mediahub_oss/internal/shared/customerrors"
+	"mediahub_oss/internal/shared/ulid"
 	"mediahub_oss/internal/storage"
 )
 
@@ -73,27 +74,27 @@ type mockStorage struct {
 	storage.StorageProvider
 }
 
-func (m *mockStorage) Read(ctx context.Context, dbID string, id int64, offset int64, length int64) (io.ReadCloser, error) {
+func (m *mockStorage) Read(ctx context.Context, dbID ulid.ULID, id int64, offset int64, length int64) (io.ReadCloser, error) {
 	return io.NopCloser(strings.NewReader("dummy file content")), nil
 }
 
-func (m *mockStorage) ReadPreview(ctx context.Context, dbID string, id int64) (io.ReadCloser, error) {
+func (m *mockStorage) ReadPreview(ctx context.Context, dbID ulid.ULID, id int64) (io.ReadCloser, error) {
 	return io.NopCloser(strings.NewReader("dummy preview content")), nil
 }
 
-func (m *mockStorage) Write(ctx context.Context, dbID string, id int64, r io.Reader) (int64, error) {
+func (m *mockStorage) Write(ctx context.Context, dbID ulid.ULID, id int64, r io.Reader) (int64, error) {
 	return io.Copy(io.Discard, r)
 }
 
-func (m *mockStorage) WritePreview(ctx context.Context, dbID string, id int64, r io.Reader) (int64, error) {
+func (m *mockStorage) WritePreview(ctx context.Context, dbID ulid.ULID, id int64, r io.Reader) (int64, error) {
 	return io.Copy(io.Discard, r)
 }
 
-func (m *mockStorage) Delete(ctx context.Context, dbID string, id int64) error {
+func (m *mockStorage) Delete(ctx context.Context, dbID ulid.ULID, id int64) error {
 	return nil
 }
 
-func (m *mockStorage) DeletePreview(ctx context.Context, dbID string, id int64) error {
+func (m *mockStorage) DeletePreview(ctx context.Context, dbID ulid.ULID, id int64) error {
 	return nil
 }
 
@@ -107,7 +108,7 @@ func (m *mockImportMediaConverter) ReadMediaFieldsFromFile(ctx context.Context, 
 
 func TestExportEntries_IncludesMediaSpecificColumns(t *testing.T) {
 	mockDB := repo.Database{
-		ID:          "01HGFB9Z5W7ABCDEFGHJKMNPQR",
+		ID:          ulid.MustParse("01HGFB9Z5W7ABCDEFGHJKMNPQR"),
 		Name:        "TestImageDB",
 		ContentType: "image",
 		CustomFields: []repo.CustomFieldDef{
@@ -224,7 +225,7 @@ func TestExportEntries_IncludesMediaSpecificColumns(t *testing.T) {
 
 func TestImportEntries_DiskSpooledMultipartFile(t *testing.T) {
 	mockDB := repo.Database{
-		ID:          "01HGFB9Z5W7ABCDEFGHJKMNPQR",
+		ID:          ulid.MustParse("01HGFB9Z5W7ABCDEFGHJKMNPQR"),
 		Name:        "TestImageDB",
 		ContentType: "image",
 		CustomFields: []repo.CustomFieldDef{

@@ -16,6 +16,7 @@
 package processing
 
 import (
+	"context"
 	"log/slog"
 	"sync"
 	"sync/atomic"
@@ -60,6 +61,11 @@ type Processor struct {
 	// retries tracks per-entry backoff for queued entries that failed during
 	// processing, so transient failures cannot cause a hot claim/requeue loop.
 	retries *retryRegistry
+
+	workerCtx    context.Context
+	workerCancel context.CancelFunc
+	wg           sync.WaitGroup
+	shuttingDown atomic.Bool
 }
 
 // NewProcessor creates a Processor enforcing the given conversion concurrency limits.
@@ -71,6 +77,7 @@ func NewProcessor(
 	nFfmpegTotal int,
 	logger *slog.Logger,
 ) *Processor {
+	workerCtx, workerCancel := context.WithCancel(context.Background())
 	return &Processor{
 		Repo:           repository,
 		Storage:        store,
@@ -79,5 +86,56 @@ func NewProcessor(
 		NFfmpegAsync:   nFfmpegAsync,
 		NFfmpegTotal:   nFfmpegTotal,
 		retries:        newRetryRegistry(),
+		workerCtx:      workerCtx,
+		workerCancel:   workerCancel,
+	}
+}
+
+func (p *Processor) workerContext() context.Context {
+	if p.workerCtx != nil {
+		return p.workerCtx
+	}
+	return context.Background()
+}
+
+func (p *Processor) isShuttingDown() bool {
+	return p.shuttingDown.Load()
+}
+
+// tryTrackWorker registers a background goroutine in p.wg if the processor is
+// not shutting down. Holding p.mu around the check and wg.Add prevents racing
+// with Shutdown's wg.Wait.
+func (p *Processor) tryTrackWorker() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.shuttingDown.Load() {
+		return false
+	}
+	p.wg.Add(1)
+	return true
+}
+
+// Shutdown stops dispatching new background work, cancels the worker context,
+// and waits for active background goroutines to exit or until ctx expires.
+func (p *Processor) Shutdown(ctx context.Context) error {
+	p.mu.Lock()
+	p.shuttingDown.Store(true)
+	p.mu.Unlock()
+
+	if p.workerCancel != nil {
+		p.workerCancel()
+	}
+
+	done := make(chan struct{})
+	go func() {
+		p.wg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 }

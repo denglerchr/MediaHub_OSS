@@ -2,7 +2,6 @@ package infohandler
 
 import (
 	"context"
-	"log/slog"
 	"time"
 )
 
@@ -27,7 +26,6 @@ type FeaturesConfig struct {
 }
 
 type InfoHandler struct {
-	Logger       *slog.Logger
 	Version      string
 	StartTime    time.Time
 	ConversionTo map[string][]string

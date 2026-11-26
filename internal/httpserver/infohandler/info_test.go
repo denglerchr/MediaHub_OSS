@@ -3,8 +3,6 @@ package infohandler_test
 import (
 	"context"
 	"encoding/json"
-	"io"
-	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -34,14 +32,12 @@ func (m *mockAuthEndpointProvider) GetAuthEndpoint(ctx context.Context) (string,
 }
 
 func TestInfoHandler_GetInfo_OIDCEnabled_WithAuthEndpoint(t *testing.T) {
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	mc := &mockMediaConverter{}
 	provider := &mockAuthEndpointProvider{
 		authEndpoint: "https://idp.example.com/oauth2/authorize",
 	}
 
 	handler := infohandler.NewInfoHandler(
-		logger,
 		"1.0.0-test",
 		mc,
 		true, // oidcEnabled
@@ -76,11 +72,9 @@ func TestInfoHandler_GetInfo_OIDCEnabled_WithAuthEndpoint(t *testing.T) {
 }
 
 func TestInfoHandler_GetInfo_OIDCDisabled(t *testing.T) {
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	mc := &mockMediaConverter{}
 
 	handler := infohandler.NewInfoHandler(
-		logger,
 		"1.0.0-test",
 		mc,
 		false, // oidcEnabled

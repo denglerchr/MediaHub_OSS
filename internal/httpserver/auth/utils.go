@@ -5,10 +5,10 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
-	"errors"
 	"fmt"
 	"mediahub_oss/internal/repository"
 	"mediahub_oss/internal/shared/customerrors"
+	"mediahub_oss/internal/shared/ulid"
 	"strings"
 	"time"
 
@@ -28,42 +28,46 @@ func (am *AuthMiddleware) validateJWT(ctx context.Context, tokenString string) (
 	}, jwt.WithValidMethods([]string{jwt.SigningMethodHS256.Alg()}))
 
 	if err != nil {
-		return repository.User{}, err
+		return repository.User{}, fmt.Errorf("%w: %w", customerrors.ErrPermissionDenied, err)
 	}
 
 	if claims, ok := token.Claims.(jwt.MapClaims); ok && token.Valid {
 		// Check expiration
 		exp, err := claims.GetExpirationTime()
 		if err != nil || exp == nil {
-			return repository.User{}, errors.New("missing or invalid expiration claim")
+			return repository.User{}, fmt.Errorf("%w: missing or invalid expiration claim", customerrors.ErrPermissionDenied)
 		}
 		if exp.Before(time.Now()) {
-			return repository.User{}, errors.New("token expired")
+			return repository.User{}, fmt.Errorf("%w: token expired", customerrors.ErrPermissionDenied)
 		}
 
 		// Extract User ID (ULID string)
 		userIDStr, ok := claims["sub"].(string)
-		if !ok {
-			return repository.User{}, errors.New("invalid subject in token")
+		if !ok || userIDStr == "" {
+			return repository.User{}, fmt.Errorf("%w: invalid subject in token", customerrors.ErrPermissionDenied)
+		}
+		userID, err := ulid.Parse(userIDStr)
+		if err != nil {
+			return repository.User{}, fmt.Errorf("%w: invalid subject in token: %w", customerrors.ErrPermissionDenied, err)
 		}
 
 		// Fetch fresh user data from DB to ensure they still exist / weren't banned
-		return am.Repo.GetUserByID(ctx, repository.ULID(userIDStr))
+		return am.Repo.GetUserByID(ctx, userID)
 	}
 
-	return repository.User{}, errors.New("invalid token claims")
+	return repository.User{}, fmt.Errorf("%w: invalid token claims", customerrors.ErrPermissionDenied)
 }
 
 // validateBasicAuth decodes base64 credentials and verifies the password hash.
 func (am *AuthMiddleware) validateBasicAuth(ctx context.Context, encodedValue string) (repository.User, error) {
 	decodedBytes, err := base64.StdEncoding.DecodeString(encodedValue)
 	if err != nil {
-		return repository.User{}, errors.New("invalid base64")
+		return repository.User{}, fmt.Errorf("%w: invalid base64", customerrors.ErrPermissionDenied)
 	}
 
 	pair := strings.SplitN(string(decodedBytes), ":", 2)
 	if len(pair) != 2 {
-		return repository.User{}, errors.New("invalid basic auth format")
+		return repository.User{}, fmt.Errorf("%w: invalid basic auth format", customerrors.ErrPermissionDenied)
 	}
 
 	return ValidateBasicAuth(ctx, am.Repo, pair[0], pair[1])
@@ -100,7 +104,7 @@ func ValidateBasicAuth(ctx context.Context, repo repository.Repository, username
 // validateAPIKey hashes the secret part of the token, queries the API key joined with the owner, and checks for expiry.
 func (am *AuthMiddleware) validateAPIKey(ctx context.Context, token string) (repository.User, repository.APIKey, error) {
 	if len(token) <= 4 {
-		return repository.User{}, repository.APIKey{}, errors.New("invalid token length")
+		return repository.User{}, repository.APIKey{}, fmt.Errorf("%w: invalid token length", customerrors.ErrPermissionDenied)
 	}
 
 	secret := token[4:]
@@ -114,7 +118,7 @@ func (am *AuthMiddleware) validateAPIKey(ctx context.Context, token string) (rep
 
 	// Validate expiry
 	if !key.ExpiresAt.IsZero() && time.Now().After(key.ExpiresAt) {
-		return repository.User{}, repository.APIKey{}, errors.New("token expired")
+		return repository.User{}, repository.APIKey{}, fmt.Errorf("%w: token expired", customerrors.ErrPermissionDenied)
 	}
 
 	return user, key, nil

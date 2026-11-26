@@ -4,24 +4,17 @@ import (
 	"context"
 	"fmt"
 
-	"mediahub_oss/internal/repository/migrations"
 	sqlitemigrations "mediahub_oss/internal/repository/migrations/sqlite"
-
-	"github.com/pressly/goose/v3"
 )
-
-// Ensure goose uses the embedded filesystem and the correct dialect
-func init() {
-	goose.SetBaseFS(migrations.EmbedFS)
-}
 
 // GetMigrationVersion retrieves the current schema version (e.g., 2000).
 func (r *SQLiteRepository) GetMigrationVersion(ctx context.Context) (int, error) {
-	sqlitemigrations.Register()
-	goose.SetDialect("sqlite3")
+	provider, err := sqlitemigrations.NewProvider(r.DB)
+	if err != nil {
+		return 0, fmt.Errorf("failed to initialize migration provider: %w", err)
+	}
 
-	// GetDBVersion returns an int64. We cast it to int to match our interface.
-	version, err := goose.GetDBVersion(r.DB)
+	version, err := provider.GetDBVersion(ctx)
 	if err != nil {
 		return 0, fmt.Errorf("failed to get database version: %w", err)
 	}
@@ -31,11 +24,12 @@ func (r *SQLiteRepository) GetMigrationVersion(ctx context.Context) (int, error)
 
 // MigrateUp applies all pending migrations.
 func (r *SQLiteRepository) MigrateUp(ctx context.Context) error {
-	sqlitemigrations.Register()
-	goose.SetDialect("sqlite3")
+	provider, err := sqlitemigrations.NewProvider(r.DB)
+	if err != nil {
+		return fmt.Errorf("failed to initialize migration provider: %w", err)
+	}
 
-	// The second argument "sqlite" refers to the subfolder inside your embed.FS
-	if err := goose.UpContext(ctx, r.DB, "sqlite"); err != nil {
+	if _, err := provider.Up(ctx); err != nil {
 		return fmt.Errorf("failed to migrate database up: %w", err)
 	}
 	return nil
@@ -43,10 +37,12 @@ func (r *SQLiteRepository) MigrateUp(ctx context.Context) error {
 
 // MigrateDown rolls back the database by one version.
 func (r *SQLiteRepository) MigrateDown(ctx context.Context) error {
-	sqlitemigrations.Register()
-	goose.SetDialect("sqlite3")
+	provider, err := sqlitemigrations.NewProvider(r.DB)
+	if err != nil {
+		return fmt.Errorf("failed to initialize migration provider: %w", err)
+	}
 
-	if err := goose.DownContext(ctx, r.DB, "sqlite"); err != nil {
+	if _, err := provider.Down(ctx); err != nil {
 		return fmt.Errorf("failed to migrate database down: %w", err)
 	}
 	return nil

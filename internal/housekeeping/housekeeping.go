@@ -6,70 +6,253 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"mediahub_oss/internal/repository"
 	"mediahub_oss/internal/shared"
 	"mediahub_oss/internal/shared/customerrors"
+	"mediahub_oss/internal/shared/ulid"
 	"mediahub_oss/internal/storage"
+)
+
+const (
+	maxLockOwnerLen          = 128
+	defaultSchedulerInterval = 5 * time.Minute
+	defaultLockTTL           = 30 * time.Minute
+	defaultLockRenewInterval = 10 * time.Minute
+	lockOpTimeout            = 5 * time.Second
+	maxConsecutiveRenewFails = 3
 )
 
 // HouseKeeper manages both scheduled and manual housekeeping tasks.
 type HouseKeeper struct {
-	Repo           repository.Repository
-	Storage        storage.StorageProvider
-	Logger         *slog.Logger
-	InstanceID     string // Unique identifier for the pod/node
-	AuditRetention time.Duration
+	Repo              repository.Repository
+	Storage           storage.StorageProvider
+	Logger            *slog.Logger
+	InstanceID        string // Unique identifier for the pod/node
+	AuditRetention    time.Duration
+	SchedulerInterval time.Duration
+	LockTTL           time.Duration
+	LockRenewInterval time.Duration
+	wg                sync.WaitGroup
 }
 
 // NewHouseKeeper creates a new Housekeeping Service.
 func NewHouseKeeper(repo repository.Repository, storage storage.StorageProvider, logger *slog.Logger, auditRetention time.Duration) *HouseKeeper {
 	// Use the hostname (Pod name in K8s) as the base instance ID.
 	hostname, err := os.Hostname()
-	if err != nil {
+	if err != nil || hostname == "" {
 		hostname = "unknown-host"
+	}
+	if len(hostname) > 64 {
+		hostname = hostname[:64]
 	}
 	// Append startup timestamp and a random suffix to ensure uniqueness even if
 	// several instances start on the same host within the same second (lock
 	// ownership must never collide).
-	instanceID := fmt.Sprintf("%s-%d-%s", hostname, time.Now().Unix(), shared.GenerateULID())
+	instanceID := fmt.Sprintf("%s-%d-%s", hostname, time.Now().Unix(), ulid.New().String())
 
 	return &HouseKeeper{
-		Repo:           repo,
-		Storage:        storage,
-		Logger:         logger,
-		InstanceID:     instanceID,
-		AuditRetention: auditRetention,
+		Repo:              repo,
+		Storage:           storage,
+		Logger:            logger,
+		InstanceID:        instanceID,
+		AuditRetention:    auditRetention,
+		SchedulerInterval: defaultSchedulerInterval,
+		LockTTL:           defaultLockTTL,
+		LockRenewInterval: defaultLockRenewInterval,
 	}
+}
+
+// newLockOwnerID generates a unique per-run lock owner identifier bounded to maxLockOwnerLen bytes.
+func (s *HouseKeeper) newLockOwnerID() string {
+	runID := ulid.New().String()
+	base := s.InstanceID
+	if base == "" {
+		base = "housekeeper"
+	}
+	maxBaseLen := maxLockOwnerLen - 1 - len(runID)
+	if maxBaseLen < 0 {
+		maxBaseLen = 0
+	}
+	if len(base) > maxBaseLen {
+		base = base[:maxBaseLen]
+	}
+	if maxBaseLen == 0 {
+		return runID[:min(len(runID), maxLockOwnerLen)]
+	}
+	return base + "-" + runID
 }
 
 // StartScheduler launches a background goroutine that periodically checks all databases
 // to see if their housekeeping interval has passed.
 func (s *HouseKeeper) StartScheduler(ctx context.Context) {
-	ticker := time.NewTicker(5 * time.Minute) // Check every 5 minutes
+	interval := s.SchedulerInterval
+	if interval <= 0 {
+		interval = defaultSchedulerInterval
+	}
+	ticker := time.NewTicker(interval)
 
+	s.wg.Add(1)
 	go func() {
+		defer s.wg.Done()
+		defer ticker.Stop()
+
 		for {
 			select {
 			case <-ctx.Done():
 				s.Logger.Info("Stopping housekeeping scheduler")
-				ticker.Stop()
 				return
 			case <-ticker.C:
+				if ctx.Err() != nil {
+					s.Logger.Info("Stopping housekeeping scheduler")
+					return
+				}
 				s.runGlobalTasks(ctx)
+				if ctx.Err() != nil {
+					s.Logger.Info("Stopping housekeeping scheduler")
+					return
+				}
 				s.runDBTasks(ctx)
 			}
 		}
 	}()
 }
 
+// Shutdown waits for the housekeeping scheduler and any active scheduled run
+// to complete, or returns ctx.Err() if the shutdown context expires first.
+func (s *HouseKeeper) Shutdown(ctx context.Context) error {
+	done := make(chan struct{})
+	go func() {
+		s.wg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (s *HouseKeeper) releaseLockDetached(ctx context.Context, lockName, ownerID, scope string) {
+	unlockCtx, unlockCancel := context.WithTimeout(context.WithoutCancel(ctx), lockOpTimeout)
+	defer unlockCancel()
+
+	released, err := s.Repo.ReleaseLock(unlockCtx, lockName, ownerID)
+	if err != nil {
+		s.Logger.Error("Failed to release distributed lock", "scope", scope, "lock_name", lockName, "owner_id", ownerID, "error", err)
+	} else if !released {
+		s.Logger.Warn("Distributed lock was not released; lock expired or was claimed by another instance", "scope", scope, "lock_name", lockName, "owner_id", ownerID)
+	}
+}
+
+func (s *HouseKeeper) resolveLockTimings() (time.Duration, time.Duration) {
+	lockTTL := s.LockTTL
+	if lockTTL <= 0 {
+		lockTTL = defaultLockTTL
+	}
+	renewInterval := s.LockRenewInterval
+	if renewInterval > 0 && renewInterval >= lockTTL {
+		// Cap renewal below TTL so short custom TTLs (e.g. in tests) still renew before expiry.
+		renewInterval = lockTTL / 3
+		if renewInterval <= 0 {
+			renewInterval = lockTTL / 2
+		}
+	}
+	return lockTTL, renewInterval
+}
+
+func (s *HouseKeeper) runLockHeartbeat(
+	sweepCtx context.Context,
+	sweepCancel context.CancelFunc,
+	lockName string,
+	ownerID string,
+	lockTTL time.Duration,
+	renewInterval time.Duration,
+	db repository.Database,
+	lockLost *atomic.Bool,
+	done chan<- struct{},
+) {
+	defer close(done)
+
+	ticker := time.NewTicker(renewInterval)
+	defer ticker.Stop()
+
+	consecutiveFailures := 0
+	for {
+		select {
+		case <-sweepCtx.Done():
+			return
+		case <-ticker.C:
+			if sweepCtx.Err() != nil {
+				return
+			}
+
+			renewCtx, cancel := context.WithTimeout(sweepCtx, lockOpTimeout)
+			acquired, err := s.Repo.AcquireLock(renewCtx, lockName, ownerID, lockTTL)
+			cancel()
+
+			if sweepCtx.Err() != nil {
+				return
+			}
+			if err == nil && acquired {
+				consecutiveFailures = 0
+				continue
+			}
+			if err == nil && !acquired {
+				s.Logger.Warn("Housekeeping lock expired or was claimed by another instance; aborting sweep",
+					"database_id", db.ID,
+					"database_name", db.Name,
+					"lock_name", lockName,
+					"owner_id", ownerID,
+				)
+				lockLost.Store(true)
+				sweepCancel()
+				return
+			}
+
+			consecutiveFailures++
+			s.Logger.Warn("Failed to renew housekeeping lock",
+				"database_id", db.ID,
+				"database_name", db.Name,
+				"lock_name", lockName,
+				"owner_id", ownerID,
+				"consecutive_failures", consecutiveFailures,
+				"error", err,
+			)
+			if consecutiveFailures >= maxConsecutiveRenewFails {
+				s.Logger.Warn("Aborting housekeeping sweep after repeated lock renewal failures",
+					"database_id", db.ID,
+					"database_name", db.Name,
+					"lock_name", lockName,
+					"owner_id", ownerID,
+				)
+				lockLost.Store(true)
+				sweepCancel()
+				return
+			}
+		}
+	}
+}
+
+func sweepAbortErr(err error, lockLost bool) error {
+	if lockLost {
+		return fmt.Errorf("housekeeping lock lost: %w", err)
+	}
+	return err
+}
+
 // runGlobalTasks handles maintenance that is not tied to a specific media database.
 func (s *HouseKeeper) runGlobalTasks(ctx context.Context) {
 	lockName := "global_tasks"
+	ownerID := s.newLockOwnerID()
 
 	// Attempt to acquire the lock for 5 minutes
-	acquired, err := s.Repo.AcquireLock(ctx, lockName, s.InstanceID, 5*time.Minute)
+	acquired, err := s.Repo.AcquireLock(ctx, lockName, ownerID, 5*time.Minute)
 	if err != nil {
 		s.Logger.Error("Failed to acquire lock for global tasks", "error", err)
 		return
@@ -79,15 +262,8 @@ func (s *HouseKeeper) runGlobalTasks(ctx context.Context) {
 		return
 	}
 
-	// Ensure the lock is released when we finish
-	defer func() {
-		released, err := s.Repo.ReleaseLock(ctx, lockName, s.InstanceID)
-		if err != nil {
-			s.Logger.Error("Failed to release global tasks lock", "error", err)
-		} else if !released {
-			s.Logger.Warn("Global tasks lock was not released; lock expired or was claimed by another instance", "lock_name", lockName, "instance_id", s.InstanceID)
-		}
-	}()
+	// Ensure the lock is released even if ctx is canceled during shutdown
+	defer s.releaseLockDetached(ctx, lockName, ownerID, "global_tasks")
 
 	// Execute global maintenance
 
@@ -99,12 +275,20 @@ func (s *HouseKeeper) runGlobalTasks(ctx context.Context) {
 		s.Logger.Info("Cleaned up expired refresh tokens", "deleted_count", deletedCount)
 	}
 
+	if ctx.Err() != nil {
+		return
+	}
+
 	// 1b. Clean up expired API keys
 	deletedKeysCount, err := s.Repo.DeleteExpiredAPIKeys(ctx)
 	if err != nil {
 		s.Logger.Error("Failed to clean up expired API keys", "error", err)
 	} else if deletedKeysCount > 0 {
 		s.Logger.Info("Cleaned up expired API keys", "deleted_count", deletedKeysCount)
+	}
+
+	if ctx.Err() != nil {
+		return
 	}
 
 	// 2. Clean up old audit logs
@@ -119,13 +303,16 @@ func (s *HouseKeeper) runGlobalTasks(ctx context.Context) {
 
 func (s *HouseKeeper) runDBTasks(ctx context.Context) {
 	// Fetch ONLY the databases that need housekeeping, relying on the DB server's clock.
-	reqDbs, err := s.Repo.HouseKeepingRequired(ctx) //
+	reqDbs, err := s.Repo.HouseKeepingRequired(ctx)
 	if err != nil {
 		s.Logger.Error("Housekeeping scheduler failed to fetch required databases", "error", err)
 		return
 	}
 
 	for _, db := range reqDbs {
+		if ctx.Err() != nil {
+			return
+		}
 		s.Logger.Debug("Triggering scheduled housekeeping", "database_id", db.ID, "database_name", db.Name)
 
 		// Run synchronously to avoid spiking CPU/Disk I/O with concurrent sweeps
@@ -145,14 +332,15 @@ func (s *HouseKeeper) runDBTasks(ctx context.Context) {
 // are collected and returned so API callers can distinguish "nothing to do"
 // from "the sweep failed".
 func (s *HouseKeeper) RunDBHousekeeping(ctx context.Context, db repository.Database) (int, uint64, error) {
-	var lockName = "hk_" + db.ID.String()
-	var totalDeleted int = 0
-	var totalFreed uint64 = 0
+	lockName := "hk_" + db.ID.String()
+	ownerID := s.newLockOwnerID()
+	lockTTL, renewInterval := s.resolveLockTimings()
+	var totalDeleted int
+	var totalFreed uint64
 	var runErr error
-	var err error
 
-	// 1. Acquire Distributed Lock (30-minute TTL as a safety net for large deletions)
-	acquired, err := s.Repo.AcquireLock(ctx, lockName, s.InstanceID, 30*time.Minute)
+	// 1. Acquire Distributed Lock
+	acquired, err := s.Repo.AcquireLock(ctx, lockName, ownerID, lockTTL)
 	if err != nil {
 		return 0, 0, fmt.Errorf("failed to check lock status: %w", err)
 	}
@@ -160,15 +348,21 @@ func (s *HouseKeeper) RunDBHousekeeping(ctx context.Context, db repository.Datab
 		return 0, 0, customerrors.ErrLockNotAcquired
 	}
 
-	// Ensure lock is released regardless of panics or errors
-	defer func() {
-		released, err := s.Repo.ReleaseLock(ctx, lockName, s.InstanceID)
-		if err != nil {
-			s.Logger.Error("Failed to release lock after housekeeping", "database", db.Name, "error", err)
-		} else if !released {
-			s.Logger.Warn("Housekeeping lock was not released; lock expired or was claimed by another instance", "database_id", db.ID, "database_name", db.Name, "instance_id", s.InstanceID)
-		}
-	}()
+	// Register ReleaseLock FIRST so LIFO executes it LAST, after the heartbeat stops and ctx is detached.
+	defer s.releaseLockDetached(ctx, lockName, ownerID, "database:"+db.Name)
+
+	sweepCtx, sweepCancel := context.WithCancel(ctx)
+	var lockLost atomic.Bool
+	if renewInterval > 0 {
+		heartbeatDone := make(chan struct{})
+		go s.runLockHeartbeat(sweepCtx, sweepCancel, lockName, ownerID, lockTTL, renewInterval, db, &lockLost, heartbeatDone)
+		defer func() {
+			sweepCancel()
+			<-heartbeatDone
+		}()
+	} else {
+		defer sweepCancel()
+	}
 
 	deletableStatuses := []repository.EntryStatus{repository.EntryStatusReady, repository.EntryStatusError}
 
@@ -177,18 +371,23 @@ func (s *HouseKeeper) RunDBHousekeeping(ctx context.Context, db repository.Datab
 		maxAgeDur := db.Housekeeping.MaxAge
 
 		// 1. Fetch the unified database time
-		dbTime, err := s.Repo.GetDBTime(ctx)
+		dbTime, err := s.Repo.GetDBTime(sweepCtx)
 		if err != nil {
 			s.Logger.Error("Housekeeper failed to get DB time for MaxAge cutoff", "error", err, "database", db.Name)
-			return totalDeleted, totalFreed, err // Or handle gracefully depending on your preference
+			return totalDeleted, totalFreed, sweepAbortErr(err, lockLost.Load())
 		}
 
 		// 2. Calculate cutoff using DB time and the MaxAge duration
 		cutoff := dbTime.Add(-maxAgeDur)
 
 		for {
+			if err := sweepCtx.Err(); err != nil {
+				runErr = errors.Join(runErr, sweepAbortErr(err, lockLost.Load()))
+				break
+			}
+
 			// We process in batches of 100 to prevent memory spikes.
-			entries, err := s.Repo.GetEntries(ctx, db.ID, repository.QueryOptions{
+			entries, err := s.Repo.GetEntries(sweepCtx, db.ID, repository.QueryOptions{
 				Limit:    100,
 				Offset:   0,
 				Order:    "asc",
@@ -215,7 +414,7 @@ func (s *HouseKeeper) RunDBHousekeeping(ctx context.Context, db repository.Datab
 				break
 			}
 
-			delCount, freed, err := s.deleteEntriesBatch(ctx, db.ID, deletable)
+			delCount, freed, err := s.deleteEntriesBatch(sweepCtx, db.ID, deletable)
 			totalDeleted += delCount
 			totalFreed += freed
 
@@ -232,13 +431,18 @@ func (s *HouseKeeper) RunDBHousekeeping(ctx context.Context, db repository.Datab
 	}
 
 	// If DiskSpace is 0, this check is disabled.
-	if db.Housekeeping.DiskSpace > 0 {
-		currentSpace := s.resolveCurrentDiskSpace(ctx, db, totalFreed)
+	if db.Housekeeping.DiskSpace > 0 && sweepCtx.Err() == nil {
+		currentSpace := s.resolveCurrentDiskSpace(sweepCtx, db, totalFreed)
 		limit := db.Housekeeping.DiskSpace
 
 		for currentSpace > limit {
+			if err := sweepCtx.Err(); err != nil {
+				runErr = errors.Join(runErr, sweepAbortErr(err, lockLost.Load()))
+				break
+			}
+
 			// Fetch the absolute oldest entries in the DB, regardless of age
-			entries, err := s.Repo.GetEntries(ctx, db.ID, repository.QueryOptions{
+			entries, err := s.Repo.GetEntries(sweepCtx, db.ID, repository.QueryOptions{
 				Limit:    100,
 				Offset:   0,
 				Order:    "asc",
@@ -261,7 +465,7 @@ func (s *HouseKeeper) RunDBHousekeeping(ctx context.Context, db repository.Datab
 			}
 
 			// Accumulate just enough entries to dip below the limit
-			var slideEnd int = 0
+			var slideEnd int
 			var targetSpaceToFree uint64
 
 			for i, e := range deletable {
@@ -274,7 +478,7 @@ func (s *HouseKeeper) RunDBHousekeeping(ctx context.Context, db repository.Datab
 				}
 			}
 
-			delCount, freed, err := s.deleteEntriesBatch(ctx, db.ID, deletable[:slideEnd])
+			delCount, freed, err := s.deleteEntriesBatch(sweepCtx, db.ID, deletable[:slideEnd])
 			totalDeleted += delCount
 			totalFreed += freed
 			if currentSpace > freed {
@@ -299,8 +503,16 @@ func (s *HouseKeeper) RunDBHousekeeping(ctx context.Context, db repository.Datab
 		}
 	}
 
+	if err := sweepCtx.Err(); err != nil {
+		if !errors.Is(runErr, err) {
+			runErr = errors.Join(runErr, sweepAbortErr(err, lockLost.Load()))
+		}
+		s.Logger.Warn("Housekeeping aborted before completion", "database_id", db.ID.String(), "database_name", db.Name, "error", err)
+		return totalDeleted, totalFreed, runErr
+	}
+
 	// Update LastHkRun utilizing the new atomic database method to prevent stat overwrites
-	_, err = s.Repo.HouseKeepingWasCalled(ctx, db.ID)
+	_, err = s.Repo.HouseKeepingWasCalled(sweepCtx, db.ID)
 	if err != nil {
 		s.Logger.Error("Housekeeper failed to update LastHkRun", "error", err, "database_id", db.ID, "database_name", db.Name)
 		runErr = errors.Join(runErr, fmt.Errorf("update LastHkRun: %w", err))

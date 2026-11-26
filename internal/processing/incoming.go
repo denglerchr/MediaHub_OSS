@@ -6,11 +6,21 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"time"
 
 	"mediahub_oss/internal/media"
 	repo "mediahub_oss/internal/repository"
 	"mediahub_oss/internal/shared/customerrors"
 )
+
+const cleanupTimeout = 15 * time.Second
+
+func cleanupContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithTimeout(context.WithoutCancel(ctx), cleanupTimeout)
+}
 
 // ProcessIncomingEntry is the entry point for newly uploaded files ("incoming" pipeline).
 //
@@ -82,9 +92,15 @@ func (p *Processor) processSynchronously(
 	if plan.NeedsConversion && !plan.CanConvert {
 		return repo.Entry{}, fmt.Errorf("cannot convert %v to the database mime type %v", plan.InitMimeType, db.Config.AutoConversion)
 	}
+	if p.isShuttingDown() {
+		return repo.Entry{}, customerrors.ErrUnavailable
+	}
 
 	needsSlot := plan.NeedsSlot()
 	if needsSlot && !p.tryReserveSyncSlot() {
+		if p.isShuttingDown() {
+			return repo.Entry{}, customerrors.ErrUnavailable
+		}
 		return repo.Entry{}, customerrors.ErrResourceExhausted
 	}
 	slotHandedOff := false
@@ -157,9 +173,16 @@ func (p *Processor) processSynchronously(
 			return repo.Entry{}, fmt.Errorf("failed to finalize entry metadata: %w", err)
 		}
 
+		if !p.tryTrackWorker() {
+			return p.markEntryReady(ctx, db, processingEntry)
+		}
+
 		keepTempStream = true // owned by the preview goroutine
 		slotHandedOff = true  // released by the preview goroutine
-		go p.generatePreviewInBackground(db, processingEntry, tempStream, plan.ResultMimeType)
+		go func() {
+			defer p.wg.Done()
+			p.generatePreviewInBackground(db, processingEntry, tempStream, plan.ResultMimeType)
+		}()
 		return processingEntry, nil
 	}
 
@@ -180,9 +203,15 @@ func (p *Processor) processAsynchronously(
 	if plan.NeedsConversion && !plan.CanConvert {
 		return repo.Entry{}, fmt.Errorf("cannot convert %v to the database mime type %v", plan.InitMimeType, db.Config.AutoConversion)
 	}
+	if p.isShuttingDown() {
+		return repo.Entry{}, customerrors.ErrUnavailable
+	}
 
 	needsSlot := plan.NeedsSlot()
 	if needsSlot && !p.tryReserveAsyncSlot() {
+		if p.isShuttingDown() {
+			return repo.Entry{}, customerrors.ErrUnavailable
+		}
 		return repo.Entry{}, customerrors.ErrResourceExhausted
 	}
 
@@ -203,11 +232,22 @@ func (p *Processor) processAsynchronously(
 		return repo.Entry{}, err
 	}
 
+	if !p.tryTrackWorker() {
+		if needsSlot {
+			p.unreserveAsyncSlot()
+		}
+		os.Remove(workerTempPath)
+		p.discardPreliminaryEntry(ctx, db.ID, createdEntry.ID, false)
+		return repo.Entry{}, customerrors.ErrUnavailable
+	}
+
+	workerCtx := p.workerContext()
 	go func() {
+		defer p.wg.Done()
 		if needsSlot {
 			defer p.releaseAsyncSlot()
 		}
-		p.finalizeEntryFile(context.Background(), db, createdEntry, workerTempPath, plan)
+		p.finalizeEntryFile(workerCtx, db, createdEntry, workerTempPath, plan)
 	}()
 
 	return createdEntry, nil
@@ -228,6 +268,9 @@ func (p *Processor) queueIncomingFile(
 ) (repo.Entry, error) {
 	if plan.NeedsConversion && !plan.CanConvert {
 		return repo.Entry{}, fmt.Errorf("cannot convert %v to the database mime type %v", plan.InitMimeType, db.Config.AutoConversion)
+	}
+	if p.isShuttingDown() {
+		return repo.Entry{}, customerrors.ErrUnavailable
 	}
 
 	if db.NMaxQueued <= 0 {
@@ -255,26 +298,16 @@ func (p *Processor) queueIncomingFile(
 		return repo.Entry{}, err
 	}
 
-	// On failure remove the entry again; fall back to marking it as erroneous so
-	// no entry is ever left in a phantom "processing" state.
-	discardEntry := func() {
-		if _, delErr := p.Repo.DeleteEntry(ctx, db.ID, createdEntry.ID); delErr != nil {
-			_ = p.Repo.UpdateEntriesStatus(ctx, db.ID, []int64{createdEntry.ID}, repo.EntryStatusError)
-		}
-	}
-
-	fileSize, err := p.Storage.Write(ctx, db.ID.String(), createdEntry.ID, file)
+	fileSize, err := p.Storage.Write(ctx, db.ID, createdEntry.ID, file)
 	if err != nil {
-		_ = p.Storage.Delete(ctx, db.ID.String(), createdEntry.ID)
-		discardEntry()
+		p.discardPreliminaryEntry(ctx, db.ID, createdEntry.ID, true)
 		return repo.Entry{}, fmt.Errorf("failed to write file to storage: %w", err)
 	}
 
 	createdEntry.Size = uint64(fileSize)
 	queuedEntry, err := p.Repo.EnqueueEntry(ctx, db.ID, createdEntry, db.NMaxQueued)
 	if err != nil {
-		_ = p.Storage.Delete(ctx, db.ID.String(), createdEntry.ID)
-		discardEntry()
+		p.discardPreliminaryEntry(ctx, db.ID, createdEntry.ID, true)
 		if errors.Is(err, customerrors.ErrUnavailable) {
 			p.Logger.Warn("Upload rejected: conversion capacity exhausted and queue is full",
 				"database_id", db.ID.String(), "max_queued", db.NMaxQueued)
@@ -288,6 +321,20 @@ func (p *Processor) queueIncomingFile(
 	return queuedEntry, nil
 }
 
+// discardPreliminaryEntry removes a failed preliminary entry (and optionally its
+// stored object) using a detached cleanup context so client disconnects cannot
+// leave entries stuck in processing or orphaned files in storage.
+func (p *Processor) discardPreliminaryEntry(ctx context.Context, dbID repo.ULID, entryID int64, deleteStorage bool) {
+	cleanupCtx, cancel := cleanupContext(ctx)
+	defer cancel()
+	if deleteStorage {
+		_ = p.Storage.Delete(cleanupCtx, dbID, entryID)
+	}
+	if _, delErr := p.Repo.DeleteEntry(cleanupCtx, dbID, entryID); delErr != nil {
+		_ = p.Repo.UpdateEntriesStatus(cleanupCtx, dbID, []int64{entryID}, repo.EntryStatusError)
+	}
+}
+
 // generatePreviewInBackground generates and stores the preview for a synchronously
 // stored entry, then marks the entry ready and releases the reserved sync slot.
 // If tempStream is non-nil (converted file on disk), it is used directly and closed
@@ -295,22 +342,22 @@ func (p *Processor) queueIncomingFile(
 func (p *Processor) generatePreviewInBackground(db repo.Database, entry repo.Entry, tempStream *TempFileStream, mimeType string) {
 	defer p.releaseSyncSlot()
 
-	ctx := context.Background()
+	ctx := p.workerContext()
 	var previewSize uint64
 	var err error
 
 	if tempStream != nil {
 		defer tempStream.Close()
-		previewSize, err = p.generateAndStorePreview(ctx, db, entry.ID, mimeType, func(ctx context.Context, w io.Writer) error {
+		previewSize, err = p.generateAndStorePreview(ctx, db, entry.ID, func(ctx context.Context, w io.Writer) error {
 			return p.MediaConverter.CreatePreviewFromFile(ctx, tempStream.Name(), w, mimeType)
 		})
 	} else {
-		storedStream, readErr := p.Storage.Read(ctx, db.ID.String(), entry.ID, 0, -1)
+		storedStream, readErr := p.Storage.Read(ctx, db.ID, entry.ID, 0, -1)
 		if readErr != nil {
 			err = fmt.Errorf("failed to read stored file for preview: %w", readErr)
 		} else {
 			defer storedStream.Close()
-			previewSize, err = p.generateAndStorePreview(ctx, db, entry.ID, mimeType, func(ctx context.Context, w io.Writer) error {
+			previewSize, err = p.generateAndStorePreview(ctx, db, entry.ID, func(ctx context.Context, w io.Writer) error {
 				if rs, ok := storedStream.(io.ReadSeeker); ok {
 					return p.MediaConverter.CreatePreviewFromStream(ctx, rs, w, mimeType)
 				}
@@ -338,15 +385,18 @@ func (p *Processor) generatePreviewInBackground(db repo.Database, entry repo.Ent
 		p.Logger.Error("Background preview generation failed", "entry", entry.ID, "error", err)
 	}
 
-	if currentEntry, getErr := p.Repo.GetEntry(ctx, db.ID, entry.ID); getErr == nil {
+	finalizeCtx, cancel := cleanupContext(ctx)
+	defer cancel()
+
+	if currentEntry, getErr := p.Repo.GetEntry(finalizeCtx, db.ID, entry.ID); getErr == nil {
 		entry.FileName = currentEntry.FileName
 	}
 
 	entry.Status = repo.EntryStatusReady
 	entry.PreviewSize = previewSize
-	if _, err := p.Repo.UpdateEntry(ctx, db.ID, entry); err != nil {
+	if _, err := p.Repo.UpdateEntry(finalizeCtx, db.ID, entry); err != nil {
 		p.Logger.Error("Failed to update status to ready after background preview", "entry", entry.ID, "error", err)
-		_ = p.Storage.DeletePreview(ctx, db.ID.String(), entry.ID)
+		_ = p.Storage.DeletePreview(finalizeCtx, db.ID, entry.ID)
 	}
 }
 
@@ -365,10 +415,12 @@ func (p *Processor) markEntryReady(ctx context.Context, db repo.Database, entry 
 // any partially stored file. The entry itself is kept for transparency.
 func (p *Processor) failUploadEntry(ctx context.Context, db repo.Database, entry repo.Entry, uploadErr error) {
 	p.Logger.Error("Upload processing failed", "entry", entry.ID, "error", uploadErr)
-	_ = p.Storage.Delete(ctx, db.ID.String(), entry.ID)
+	cleanupCtx, cancel := cleanupContext(ctx)
+	defer cancel()
+	_ = p.Storage.Delete(cleanupCtx, db.ID, entry.ID)
 	entry.Size = 0
 	entry.Status = repo.EntryStatusError
-	_, _ = p.Repo.UpdateEntry(ctx, db.ID, entry)
+	_, _ = p.Repo.UpdateEntry(cleanupCtx, db.ID, entry)
 }
 
 // claimTempFile moves an upload spooled to disk by the HTTP layer into a fresh

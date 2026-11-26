@@ -334,6 +334,8 @@ definitions:
         type: string
       code_verifier:
         type: string
+      nonce:
+        type: string
       redirect_uri:
         type: string
     type: object
@@ -868,7 +870,7 @@ paths:
   /database/{database_id}/entries:
     get:
       description: Retrieves a paginated list of entries from a specific database.
-        Only supports time-based filters.
+        Supports time-based and ID-range filters.
       parameters:
       - description: Database ID
         in: path
@@ -906,6 +908,16 @@ paths:
         format: int64
         in: query
         name: tend
+        type: integer
+      - description: Inclusive start entry ID (id >= idstart)
+        format: int64
+        in: query
+        name: idstart
+        type: integer
+      - description: Inclusive end entry ID (id <= idend)
+        format: int64
+        in: query
+        name: idend
         type: integer
       produces:
       - application/json

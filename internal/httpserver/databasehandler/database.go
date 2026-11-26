@@ -1,7 +1,6 @@
 package databasehandler
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -29,13 +28,13 @@ func (h *DatabaseHandler) GetDatabase(w http.ResponseWriter, r *http.Request) {
 
 	user := utils.GetUserFromContext(ctx)
 
-	id := r.PathValue("database_id")
-	if id == "" {
-		utils.RespondWithError(w, http.StatusBadRequest, "Missing required path parameter: database_id")
+	dbID, ok := parseDatabaseIDParam(w, r)
+	if !ok {
 		return
 	}
+	id := dbID.String()
 
-	db, err := h.Repo.GetDatabase(ctx, repository.ULID(id))
+	db, err := h.Repo.GetDatabase(ctx, dbID)
 	if errors.Is(err, customerrors.ErrNotFound) {
 		utils.RespondWithError(w, http.StatusNotFound, "Database not found.")
 		return
@@ -74,7 +73,8 @@ func (h *DatabaseHandler) GetDatabases(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 2. Filter for non-admin users based on database-level permissions
+	// 2. Filter unless caller holds global admin rights (GlobalAdmin session or
+	//    APIKeyOfAdmin with AccessAdmin, whose Scope already covers all databases).
 	holder := utils.GetPermissionHolderFromContext(ctx)
 	if !holder.IsGlobalAdmin() {
 		permsMap, err := holder.GetAllPermissions(ctx)
@@ -85,17 +85,17 @@ func (h *DatabaseHandler) GetDatabases(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// Build an O(1) lookup map of databases the user is allowed to see using the ULID
-		allowedDBs := make(map[string]bool)
+		allowedDBs := make(map[repository.ULID]bool)
 		for dbID, perm := range permsMap {
 			if perm != 0 {
-				allowedDBs[dbID.String()] = true
+				allowedDBs[dbID] = true
 			}
 		}
 
 		// Filter the original database list into a new slice
 		var filteredDBs []repository.Database
 		for _, db := range dbs {
-			if allowedDBs[db.ID.String()] {
+			if allowedDBs[db.ID] {
 				filteredDBs = append(filteredDBs, db)
 			}
 		}
@@ -135,9 +135,9 @@ func (h *DatabaseHandler) CreateDatabase(w http.ResponseWriter, r *http.Request)
 	var payload DatabaseCreatePayload
 	var ctx = r.Context()
 
-	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-		h.Logger.Warn("Failed to decode request body", "error", err)
-		utils.RespondWithError(w, http.StatusBadRequest, "Invalid request payload")
+	if status, msg := utils.DecodeJSONBody(w, r, &payload); status != 0 {
+		h.Logger.Warn("Failed to decode request body", "status", status, "error", msg)
+		utils.RespondWithError(w, status, msg)
 		return
 	}
 
@@ -200,13 +200,12 @@ func (h *DatabaseHandler) UpdateDatabase(w http.ResponseWriter, r *http.Request)
 	var ctx = r.Context()
 
 	// Parse request
-	id := r.PathValue("database_id")
-	if id == "" {
-		utils.RespondWithError(w, http.StatusBadRequest, "Missing required path parameter: id")
+	dbID, ok := parseDatabaseIDParam(w, r)
+	if !ok {
 		return
 	}
 
-	db, err := h.Repo.GetDatabase(ctx, repository.ULID(id))
+	db, err := h.Repo.GetDatabase(ctx, dbID)
 	if errors.Is(err, customerrors.ErrNotFound) {
 		utils.RespondWithError(w, http.StatusNotFound, "Database not found.")
 		return
@@ -219,8 +218,8 @@ func (h *DatabaseHandler) UpdateDatabase(w http.ResponseWriter, r *http.Request)
 	user := utils.GetUserFromContext(ctx)
 
 	var updates DatabaseUpdatePayload
-	if err := json.NewDecoder(r.Body).Decode(&updates); err != nil {
-		utils.RespondWithError(w, http.StatusBadRequest, "Invalid request payload")
+	if status, msg := utils.DecodeJSONBody(w, r, &updates); status != 0 {
+		utils.RespondWithError(w, status, msg)
 		return
 	}
 
@@ -230,7 +229,12 @@ func (h *DatabaseHandler) UpdateDatabase(w http.ResponseWriter, r *http.Request)
 	}
 	db.NMaxQueued = updates.NMaxQueued
 	db.Config = updates.getConfig()
-	db.Housekeeping = updates.getHK(db.Housekeeping.LastHkRun)
+	hk, err := updates.getHK(db.Housekeeping.LastHkRun)
+	if err != nil {
+		utils.RespondWithError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	db.Housekeeping = hk
 
 	updatedDB, err := h.Repo.UpdateDatabase(ctx, db)
 	if err != nil {
@@ -265,17 +269,19 @@ func (h *DatabaseHandler) UpdateDatabase(w http.ResponseWriter, r *http.Request)
 func (h *DatabaseHandler) DeleteDatabase(w http.ResponseWriter, r *http.Request) {
 	var ctx = r.Context()
 
-	id := r.PathValue("database_id")
-	if id == "" {
-		utils.RespondWithError(w, http.StatusBadRequest, "Missing required path parameter: id")
+	dbID, ok := parseDatabaseIDParam(w, r)
+	if !ok {
 		return
 	}
+	id := dbID.String()
 
 	user := utils.GetUserFromContext(ctx)
 
-	if err := shared.DeleteDatabaseSafe(ctx, h.Repo, h.Storage, repository.ULID(id)); err != nil {
+	if err := shared.DeleteDatabaseSafe(ctx, h.Repo, h.Storage, dbID); err != nil {
 		if errors.Is(err, customerrors.ErrNotFound) || strings.Contains(err.Error(), "not found") {
 			utils.RespondWithError(w, http.StatusNotFound, "Database not found.")
+		} else if errors.Is(err, customerrors.ErrValidation) {
+			utils.RespondWithError(w, http.StatusBadRequest, err.Error())
 		} else if strings.Contains(err.Error(), "invalid database name") {
 			utils.RespondWithError(w, http.StatusBadRequest, "Invalid database name.")
 		} else {
@@ -315,14 +321,14 @@ func (h *DatabaseHandler) TriggerHousekeeping(w http.ResponseWriter, r *http.Req
 	user := utils.GetUserFromContext(ctx)
 
 	// 2. Extract database ID from path
-	id := r.PathValue("database_id")
-	if id == "" {
-		utils.RespondWithError(w, http.StatusBadRequest, "Missing required parameter: id")
+	dbID, ok := parseDatabaseIDParam(w, r)
+	if !ok {
 		return
 	}
+	id := dbID.String()
 
 	// 3. Verify the database exists
-	db, err := h.Repo.GetDatabase(ctx, repository.ULID(id))
+	db, err := h.Repo.GetDatabase(ctx, dbID)
 	if err != nil {
 		utils.RespondWithError(w, http.StatusNotFound, "Database not found")
 		return

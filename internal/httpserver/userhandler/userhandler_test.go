@@ -16,14 +16,18 @@ import (
 	"mediahub_oss/internal/logging/audit"
 	repo "mediahub_oss/internal/repository"
 	"mediahub_oss/internal/shared/customerrors"
+	"mediahub_oss/internal/shared/ulid"
 )
 
 type mockUserRepo struct {
 	repo.Repository
-	users     map[repo.ULID]repo.User
-	userSlice []repo.User
-	permsErr  map[repo.ULID]error
-	apiKeys   map[repo.ULID]repo.APIKey
+	users      map[repo.ULID]repo.User
+	userSlice  []repo.User
+	permsErr   map[repo.ULID]error
+	apiKeys    map[repo.ULID]repo.APIKey
+	adminCount int64
+	updateErr  error
+	deleteErr  error
 }
 
 func (m *mockUserRepo) GetUserByID(ctx context.Context, id repo.ULID) (repo.User, error) {
@@ -34,7 +38,7 @@ func (m *mockUserRepo) GetUserByID(ctx context.Context, id repo.ULID) (repo.User
 }
 
 func (m *mockUserRepo) CreateUser(ctx context.Context, u repo.User) (repo.User, error) {
-	u.ID = "01HGFB9Z5W7ABCDEFGHJKMNPQR"
+	u.ID = ulid.MustParse("01HGFB9Z5W7ABCDEFGHJKMNPQR")
 	if m.users == nil {
 		m.users = make(map[repo.ULID]repo.User)
 	}
@@ -43,6 +47,9 @@ func (m *mockUserRepo) CreateUser(ctx context.Context, u repo.User) (repo.User, 
 }
 
 func (m *mockUserRepo) UpdateUser(ctx context.Context, u repo.User) (repo.User, error) {
+	if m.updateErr != nil {
+		return repo.User{}, m.updateErr
+	}
 	if _, ok := m.users[u.ID]; !ok {
 		return repo.User{}, customerrors.ErrNotFound
 	}
@@ -53,6 +60,30 @@ func (m *mockUserRepo) UpdateUser(ctx context.Context, u repo.User) (repo.User, 
 	}
 	m.users[u.ID] = u
 	return u, nil
+}
+
+func (m *mockUserRepo) DeleteUser(ctx context.Context, id repo.ULID) error {
+	if m.deleteErr != nil {
+		return m.deleteErr
+	}
+	if _, ok := m.users[id]; !ok {
+		return customerrors.ErrNotFound
+	}
+	delete(m.users, id)
+	return nil
+}
+
+func (m *mockUserRepo) CountAdminUsers(ctx context.Context) (int64, error) {
+	if m.adminCount > 0 {
+		return m.adminCount, nil
+	}
+	var count int64
+	for _, u := range m.users {
+		if u.IsAdmin {
+			count++
+		}
+	}
+	return count, nil
 }
 
 func (m *mockUserRepo) SetUserPermissions(ctx context.Context, p repo.UserPermissions) error {
@@ -137,7 +168,7 @@ func TestCreateUser_DuplicateDatabasePermissionsRejected(t *testing.T) {
 }
 
 func TestUpdateUser_DuplicateDatabasePermissionsRejected(t *testing.T) {
-	targetULID := repo.ULID("01HGFB9Z5W7ABCDEFGHJKMNPQR")
+	targetULID := ulid.MustParse("01HGFB9Z5W7ABCDEFGHJKMNPQR")
 	mockRepo := &mockUserRepo{
 		users: map[repo.ULID]repo.User{
 			targetULID: {
@@ -163,8 +194,8 @@ func TestUpdateUser_DuplicateDatabasePermissionsRejected(t *testing.T) {
 	}
 	body, _ := json.Marshal(payload)
 
-	req := httptest.NewRequest(http.MethodPatch, "/api/user/"+string(targetULID), bytes.NewReader(body))
-	req.SetPathValue("user_ulid", string(targetULID))
+	req := httptest.NewRequest(http.MethodPatch, "/api/user/"+targetULID.String(), bytes.NewReader(body))
+	req.SetPathValue("user_ulid", targetULID.String())
 	req = req.WithContext(context.WithValue(req.Context(), utils.UserKey, &repo.User{Username: "admin", IsAdmin: true}))
 	rec := httptest.NewRecorder()
 
@@ -199,7 +230,7 @@ func TestCreateUser_OIDCDirectCreationRejected(t *testing.T) {
 }
 
 func TestUpdateUser_OIDCPasswordChangeRejected(t *testing.T) {
-	targetULID := repo.ULID("01HGFB9Z5W7ABCDEFGHJKMNPQR")
+	targetULID := ulid.MustParse("01HGFB9Z5W7ABCDEFGHJKMNPQR")
 	mockRepo := &mockUserRepo{
 		users: map[repo.ULID]repo.User{
 			targetULID: {
@@ -218,8 +249,8 @@ func TestUpdateUser_OIDCPasswordChangeRejected(t *testing.T) {
 	}
 	body, _ := json.Marshal(payload)
 
-	req := httptest.NewRequest(http.MethodPatch, "/api/user/"+string(targetULID), bytes.NewReader(body))
-	req.SetPathValue("user_ulid", string(targetULID))
+	req := httptest.NewRequest(http.MethodPatch, "/api/user/"+targetULID.String(), bytes.NewReader(body))
+	req.SetPathValue("user_ulid", targetULID.String())
 	req = req.WithContext(context.WithValue(req.Context(), utils.UserKey, &repo.User{Username: "admin", IsAdmin: true}))
 	rec := httptest.NewRecorder()
 
@@ -231,7 +262,7 @@ func TestUpdateUser_OIDCPasswordChangeRejected(t *testing.T) {
 }
 
 func TestUpdateUser_ServiceAccountPasswordChangeRejected(t *testing.T) {
-	targetULID := repo.ULID("01HGFB9Z5W7ABCDEFGHJKMNPQR")
+	targetULID := ulid.MustParse("01HGFB9Z5W7ABCDEFGHJKMNPQR")
 	mockRepo := &mockUserRepo{
 		users: map[repo.ULID]repo.User{
 			targetULID: {
@@ -250,8 +281,8 @@ func TestUpdateUser_ServiceAccountPasswordChangeRejected(t *testing.T) {
 	}
 	body, _ := json.Marshal(payload)
 
-	req := httptest.NewRequest(http.MethodPatch, "/api/user/"+string(targetULID), bytes.NewReader(body))
-	req.SetPathValue("user_ulid", string(targetULID))
+	req := httptest.NewRequest(http.MethodPatch, "/api/user/"+targetULID.String(), bytes.NewReader(body))
+	req.SetPathValue("user_ulid", targetULID.String())
 	req = req.WithContext(context.WithValue(req.Context(), utils.UserKey, &repo.User{Username: "admin", IsAdmin: true}))
 	rec := httptest.NewRecorder()
 
@@ -263,7 +294,7 @@ func TestUpdateUser_ServiceAccountPasswordChangeRejected(t *testing.T) {
 }
 
 func TestUpdateMe_OIDCPasswordChangeRejected(t *testing.T) {
-	targetULID := repo.ULID("01HGFB9Z5W7ABCDEFGHJKMNPQR")
+	targetULID := ulid.MustParse("01HGFB9Z5W7ABCDEFGHJKMNPQR")
 	mockRepo := &mockUserRepo{}
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	auditor := audit.NewAuditLogger(false, "stdio", logger, mockRepo)
@@ -286,7 +317,7 @@ func TestUpdateMe_OIDCPasswordChangeRejected(t *testing.T) {
 }
 
 func TestUpdateMe_ServiceAccountPasswordChangeRejected(t *testing.T) {
-	targetULID := repo.ULID("01HGFB9Z5W7ABCDEFGHJKMNPQR")
+	targetULID := ulid.MustParse("01HGFB9Z5W7ABCDEFGHJKMNPQR")
 	mockRepo := &mockUserRepo{}
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	auditor := audit.NewAuditLogger(false, "stdio", logger, mockRepo)
@@ -336,9 +367,9 @@ func TestCreateUser_DefaultAccountTypeLocal(t *testing.T) {
 }
 
 func TestGetUsers_SkipsUserOnPermissionsErrorWithoutZeroValueEntry(t *testing.T) {
-	u1 := repo.User{ID: "01HGFB9Z5W7ABCDEFGHJKMNPQ1", Username: "alice", IsAdmin: false, AccountType: repo.AccountTypeLocal}
-	u2 := repo.User{ID: "01HGFB9Z5W7ABCDEFGHJKMNPQ2", Username: "broken", IsAdmin: false, AccountType: repo.AccountTypeLocal}
-	u3 := repo.User{ID: "01HGFB9Z5W7ABCDEFGHJKMNPQ3", Username: "bob", IsAdmin: true, AccountType: repo.AccountTypeLocal}
+	u1 := repo.User{ID: ulid.MustParse("01HGFB9Z5W7ABCDEFGHJKMNPQ1"), Username: "alice", IsAdmin: false, AccountType: repo.AccountTypeLocal}
+	u2 := repo.User{ID: ulid.MustParse("01HGFB9Z5W7ABCDEFGHJKMNPQ2"), Username: "broken", IsAdmin: false, AccountType: repo.AccountTypeLocal}
+	u3 := repo.User{ID: ulid.MustParse("01HGFB9Z5W7ABCDEFGHJKMNPQ3"), Username: "bob", IsAdmin: true, AccountType: repo.AccountTypeLocal}
 
 	mockRepo := &mockUserRepo{
 		userSlice: []repo.User{u1, u2, u3},
@@ -369,7 +400,7 @@ func TestGetUsers_SkipsUserOnPermissionsErrorWithoutZeroValueEntry(t *testing.T)
 		t.Fatalf("expected 2 users in response, got %d: %+v", len(users), users)
 	}
 	for i, u := range users {
-		if u.ID == "" || u.Username == "" {
+		if u.ID.IsZero() || u.Username == "" {
 			t.Errorf("unexpected zero-value user at index %d: %+v", i, u)
 		}
 	}
@@ -379,8 +410,8 @@ func TestGetUsers_SkipsUserOnPermissionsErrorWithoutZeroValueEntry(t *testing.T)
 }
 
 func TestUpdateUser_DuplicateUsernameReturnsConflict(t *testing.T) {
-	u1ID := repo.ULID("01HGFB9Z5W7ABCDEFGHJKMNPQ1")
-	u2ID := repo.ULID("01HGFB9Z5W7ABCDEFGHJKMNPQ2")
+	u1ID := ulid.MustParse("01HGFB9Z5W7ABCDEFGHJKMNPQ1")
+	u2ID := ulid.MustParse("01HGFB9Z5W7ABCDEFGHJKMNPQ2")
 	mockRepo := &mockUserRepo{
 		users: map[repo.ULID]repo.User{
 			u1ID: {ID: u1ID, Username: "alice", PasswordHash: "hash1"},
@@ -396,8 +427,8 @@ func TestUpdateUser_DuplicateUsernameReturnsConflict(t *testing.T) {
 	}
 	body, _ := json.Marshal(payload)
 
-	req := httptest.NewRequest(http.MethodPatch, "/api/user/"+string(u2ID), bytes.NewReader(body))
-	req.SetPathValue("user_ulid", string(u2ID))
+	req := httptest.NewRequest(http.MethodPatch, "/api/user/"+u2ID.String(), bytes.NewReader(body))
+	req.SetPathValue("user_ulid", u2ID.String())
 	req = req.WithContext(context.WithValue(req.Context(), utils.UserKey, &repo.User{Username: "admin", IsAdmin: true}))
 	rec := httptest.NewRecorder()
 
@@ -409,9 +440,9 @@ func TestUpdateUser_DuplicateUsernameReturnsConflict(t *testing.T) {
 }
 
 func TestAPIKey_SecurityConstraints(t *testing.T) {
-	adminID := repo.ULID("01ADMIN00000000000000000000")
-	userID := repo.ULID("01USER000000000000000000000")
-	existingKeyID := repo.ULID("01KEY0000000000000000000000")
+	adminID := ulid.MustParse("01HGFB9Z5W7ABCDEFGHJKMNPQ4")
+	userID := ulid.MustParse("01HGFB9Z5W7ABCDEFGHJKMNPQ5")
+	existingKeyID := ulid.MustParse("01HGFB9Z5W7ABCDEFGHJKMNPQ6")
 
 	mockRepo := &mockUserRepo{
 		users: map[repo.ULID]repo.User{
@@ -438,8 +469,8 @@ func TestAPIKey_SecurityConstraints(t *testing.T) {
 			ScopeAdmin: true,
 		}
 		body, _ := json.Marshal(payload)
-		req := httptest.NewRequest(http.MethodPost, "/api/user/"+string(userID)+"/keys", bytes.NewReader(body))
-		req.SetPathValue("user_ulid", string(userID))
+		req := httptest.NewRequest(http.MethodPost, "/api/user/"+userID.String()+"/keys", bytes.NewReader(body))
+		req.SetPathValue("user_ulid", userID.String())
 
 		ctx := context.WithValue(req.Context(), utils.UserKey, &repo.User{ID: userID, Username: "user", IsAdmin: false})
 		ctx = context.WithValue(ctx, utils.PermissionHolderKey, &utils.UserPermissions{
@@ -461,11 +492,11 @@ func TestAPIKey_SecurityConstraints(t *testing.T) {
 			ScopeView: true,
 		}
 		body, _ := json.Marshal(payload)
-		req := httptest.NewRequest(http.MethodPost, "/api/user/"+string(userID)+"/keys", bytes.NewReader(body))
-		req.SetPathValue("user_ulid", string(userID))
+		req := httptest.NewRequest(http.MethodPost, "/api/user/"+userID.String()+"/keys", bytes.NewReader(body))
+		req.SetPathValue("user_ulid", userID.String())
 
 		callerKey := &repo.APIKey{
-			ID:     "01CALLERKEY",
+			ID:     ulid.MustParse("01HGFB9Z5W7ABCDEFGHJKMNPC1"),
 			UserID: userID,
 			Scope:  repo.AccessView | repo.AccessEdit, // No AccessAdmin
 		}
@@ -493,11 +524,11 @@ func TestAPIKey_SecurityConstraints(t *testing.T) {
 			ScopeDelete: true, // Not possessed by caller!
 		}
 		body, _ := json.Marshal(payload)
-		req := httptest.NewRequest(http.MethodPost, "/api/user/"+string(userID)+"/keys", bytes.NewReader(body))
-		req.SetPathValue("user_ulid", string(userID))
+		req := httptest.NewRequest(http.MethodPost, "/api/user/"+userID.String()+"/keys", bytes.NewReader(body))
+		req.SetPathValue("user_ulid", userID.String())
 
 		callerKey := &repo.APIKey{
-			ID:     "01CALLERKEY2",
+			ID:     ulid.MustParse("01HGFB9Z5W7ABCDEFGHJKMNPC2"),
 			UserID: userID,
 			Scope:  repo.AccessAdmin | repo.AccessView,
 		}
@@ -523,9 +554,9 @@ func TestAPIKey_SecurityConstraints(t *testing.T) {
 			ScopeAdmin: &scopeAdmin,
 		}
 		body, _ := json.Marshal(payload)
-		req := httptest.NewRequest(http.MethodPatch, "/api/user/"+string(userID)+"/keys/"+string(existingKeyID), bytes.NewReader(body))
-		req.SetPathValue("user_ulid", string(userID))
-		req.SetPathValue("key_ulid", string(existingKeyID))
+		req := httptest.NewRequest(http.MethodPatch, "/api/user/"+userID.String()+"/keys/"+existingKeyID.String(), bytes.NewReader(body))
+		req.SetPathValue("user_ulid", userID.String())
+		req.SetPathValue("key_ulid", existingKeyID.String())
 
 		ctx := context.WithValue(req.Context(), utils.UserKey, &repo.User{ID: userID, Username: "user", IsAdmin: false})
 		ctx = context.WithValue(ctx, utils.PermissionHolderKey, &utils.UserPermissions{
@@ -547,12 +578,12 @@ func TestAPIKey_SecurityConstraints(t *testing.T) {
 			Name: &name,
 		}
 		body, _ := json.Marshal(payload)
-		req := httptest.NewRequest(http.MethodPatch, "/api/user/"+string(userID)+"/keys/"+string(existingKeyID), bytes.NewReader(body))
-		req.SetPathValue("user_ulid", string(userID))
-		req.SetPathValue("key_ulid", string(existingKeyID))
+		req := httptest.NewRequest(http.MethodPatch, "/api/user/"+userID.String()+"/keys/"+existingKeyID.String(), bytes.NewReader(body))
+		req.SetPathValue("user_ulid", userID.String())
+		req.SetPathValue("key_ulid", existingKeyID.String())
 
 		callerKey := &repo.APIKey{
-			ID:     "01CALLERKEY3",
+			ID:     ulid.MustParse("01HGFB9Z5W7ABCDEFGHJKMNPC3"),
 			UserID: userID,
 			Scope:  repo.AccessView,
 		}
@@ -578,12 +609,12 @@ func TestAPIKey_SecurityConstraints(t *testing.T) {
 			ScopeDelete: &scopeDelete,
 		}
 		body, _ := json.Marshal(payload)
-		req := httptest.NewRequest(http.MethodPatch, "/api/user/"+string(userID)+"/keys/"+string(existingKeyID), bytes.NewReader(body))
-		req.SetPathValue("user_ulid", string(userID))
-		req.SetPathValue("key_ulid", string(existingKeyID))
+		req := httptest.NewRequest(http.MethodPatch, "/api/user/"+userID.String()+"/keys/"+existingKeyID.String(), bytes.NewReader(body))
+		req.SetPathValue("user_ulid", userID.String())
+		req.SetPathValue("key_ulid", existingKeyID.String())
 
 		callerKey := &repo.APIKey{
-			ID:     "01CALLERKEY4",
+			ID:     ulid.MustParse("01HGFB9Z5W7ABCDEFGHJKMNPC4"),
 			UserID: userID,
 			Scope:  repo.AccessAdmin | repo.AccessView, // Does not have AccessDelete
 		}
@@ -604,12 +635,12 @@ func TestAPIKey_SecurityConstraints(t *testing.T) {
 	})
 
 	t.Run("API key caller without AccessAdmin cannot DeleteAPIKey", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodDelete, "/api/user/"+string(userID)+"/keys/"+string(existingKeyID), nil)
-		req.SetPathValue("user_ulid", string(userID))
-		req.SetPathValue("key_ulid", string(existingKeyID))
+		req := httptest.NewRequest(http.MethodDelete, "/api/user/"+userID.String()+"/keys/"+existingKeyID.String(), nil)
+		req.SetPathValue("user_ulid", userID.String())
+		req.SetPathValue("key_ulid", existingKeyID.String())
 
 		callerKey := &repo.APIKey{
-			ID:     "01CALLERKEY5",
+			ID:     ulid.MustParse("01HGFB9Z5W7ABCDEFGHJKMNPC5"),
 			UserID: userID,
 			Scope:  repo.AccessView | repo.AccessDelete, // No AccessAdmin
 		}
@@ -636,11 +667,11 @@ func TestAPIKey_SecurityConstraints(t *testing.T) {
 			ScopeView:  true,
 		}
 		body, _ := json.Marshal(payload)
-		req := httptest.NewRequest(http.MethodPost, "/api/user/"+string(adminID)+"/keys", bytes.NewReader(body))
-		req.SetPathValue("user_ulid", string(adminID))
+		req := httptest.NewRequest(http.MethodPost, "/api/user/"+adminID.String()+"/keys", bytes.NewReader(body))
+		req.SetPathValue("user_ulid", adminID.String())
 
 		ctx := context.WithValue(req.Context(), utils.UserKey, &repo.User{ID: adminID, Username: "admin", IsAdmin: true})
-		ctx = context.WithValue(ctx, utils.PermissionHolderKey, &utils.GlobalAdmin{UserULID: adminID})
+		ctx = context.WithValue(ctx, utils.PermissionHolderKey, &utils.GlobalAdmin{})
 
 		rec := httptest.NewRecorder()
 		handler.CreateAPIKey(rec, req.WithContext(ctx))
@@ -650,4 +681,226 @@ func TestAPIKey_SecurityConstraints(t *testing.T) {
 		}
 	})
 
+}
+
+func TestUserAndAPIKey_ConflictAndBodyLimit(t *testing.T) {
+	adminID := ulid.MustParse("01HGFB9Z5W7ABCDEFGHJKMNPQR")
+	otherAdminID := ulid.MustParse("01HGFB9Z5W7ABCDEFGHJKMNPQS")
+	keyID := ulid.MustParse("01HGFB9Z5W7ABCDEFGHJKMNPQT")
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	t.Run("UpdateUser repo ErrConflict maps to 409", func(t *testing.T) {
+		mockRepo := &mockUserRepo{
+			users: map[repo.ULID]repo.User{
+				adminID:      {ID: adminID, Username: "admin1", IsAdmin: true},
+				otherAdminID: {ID: otherAdminID, Username: "admin2", IsAdmin: true},
+			},
+			adminCount: 2, // Pre-check passes, simulating race until atomic repo update returns ErrConflict
+			updateErr:  customerrors.ErrConflict,
+		}
+		auditor := audit.NewAuditLogger(false, "stdio", logger, mockRepo)
+		handler := userhandler.UserHandler{Logger: logger, Auditor: auditor, Repo: mockRepo}
+
+		isAdmin := false
+		body, _ := json.Marshal(userhandler.UpdateUserPayload{IsAdmin: &isAdmin})
+		req := httptest.NewRequest(http.MethodPatch, "/api/user/"+adminID.String(), bytes.NewReader(body))
+		req.SetPathValue("user_ulid", adminID.String())
+		req = req.WithContext(context.WithValue(req.Context(), utils.UserKey, &repo.User{ID: otherAdminID, Username: "admin2", IsAdmin: true}))
+		rec := httptest.NewRecorder()
+
+		handler.UpdateUser(rec, req)
+		if rec.Code != http.StatusConflict {
+			t.Fatalf("expected 409 Conflict on UpdateUser ErrConflict, got %d: %s", rec.Code, rec.Body.String())
+		}
+	})
+
+	t.Run("DeleteUser repo ErrConflict maps to 409", func(t *testing.T) {
+		mockRepo := &mockUserRepo{
+			users: map[repo.ULID]repo.User{
+				adminID:      {ID: adminID, Username: "admin1", IsAdmin: true},
+				otherAdminID: {ID: otherAdminID, Username: "admin2", IsAdmin: true},
+			},
+			adminCount: 2,
+			deleteErr:  customerrors.ErrConflict,
+		}
+		auditor := audit.NewAuditLogger(false, "stdio", logger, mockRepo)
+		handler := userhandler.UserHandler{Logger: logger, Auditor: auditor, Repo: mockRepo}
+
+		req := httptest.NewRequest(http.MethodDelete, "/api/user/"+adminID.String(), nil)
+		req.SetPathValue("user_ulid", adminID.String())
+		req = req.WithContext(context.WithValue(req.Context(), utils.UserKey, &repo.User{ID: otherAdminID, Username: "admin2", IsAdmin: true}))
+		rec := httptest.NewRecorder()
+
+		handler.DeleteUser(rec, req)
+		if rec.Code != http.StatusConflict {
+			t.Fatalf("expected 409 Conflict on DeleteUser ErrConflict, got %d: %s", rec.Code, rec.Body.String())
+		}
+	})
+
+	t.Run("oversized JSON bodies return 413 across user and API key endpoints", func(t *testing.T) {
+		mockRepo := &mockUserRepo{
+			users: map[repo.ULID]repo.User{
+				adminID: {ID: adminID, Username: "admin", IsAdmin: true, AccountType: repo.AccountTypeLocal},
+			},
+			apiKeys: map[repo.ULID]repo.APIKey{
+				keyID: {ID: keyID, UserID: adminID, Name: "k1", Scope: repo.AccessView},
+			},
+		}
+		auditor := audit.NewAuditLogger(false, "stdio", logger, mockRepo)
+		handler := userhandler.UserHandler{Logger: logger, Auditor: auditor, Repo: mockRepo}
+
+		oversized := bytes.Repeat([]byte("a"), int(utils.MaxJSONBodyBytes)+16)
+		bigBody := append(append([]byte(`{"username":"`), oversized...), []byte(`"}`)...)
+
+		// CreateUser
+		req1 := httptest.NewRequest(http.MethodPost, "/api/user", bytes.NewReader(bigBody))
+		req1 = req1.WithContext(context.WithValue(req1.Context(), utils.UserKey, &repo.User{ID: adminID, Username: "admin", IsAdmin: true}))
+		rec1 := httptest.NewRecorder()
+		handler.CreateUser(rec1, req1)
+		if rec1.Code != http.StatusRequestEntityTooLarge {
+			t.Fatalf("CreateUser expected 413, got %d", rec1.Code)
+		}
+
+		// UpdateUser
+		req2 := httptest.NewRequest(http.MethodPatch, "/api/user/"+adminID.String(), bytes.NewReader(bigBody))
+		req2.SetPathValue("user_ulid", adminID.String())
+		req2 = req2.WithContext(context.WithValue(req2.Context(), utils.UserKey, &repo.User{ID: adminID, Username: "admin", IsAdmin: true}))
+		rec2 := httptest.NewRecorder()
+		handler.UpdateUser(rec2, req2)
+		if rec2.Code != http.StatusRequestEntityTooLarge {
+			t.Fatalf("UpdateUser expected 413, got %d", rec2.Code)
+		}
+
+		// UpdateMe
+		req3 := httptest.NewRequest(http.MethodPatch, "/api/me", bytes.NewReader(bigBody))
+		req3 = req3.WithContext(context.WithValue(req3.Context(), utils.UserKey, &repo.User{ID: adminID, Username: "admin", AccountType: repo.AccountTypeLocal}))
+		rec3 := httptest.NewRecorder()
+		handler.UpdateMe(rec3, req3)
+		if rec3.Code != http.StatusRequestEntityTooLarge {
+			t.Fatalf("UpdateMe expected 413, got %d", rec3.Code)
+		}
+
+		// CreateAPIKey
+		ctx4 := context.WithValue(context.Background(), utils.UserKey, &repo.User{ID: adminID, Username: "admin", IsAdmin: true})
+		ctx4 = context.WithValue(ctx4, utils.PermissionHolderKey, &utils.GlobalAdmin{})
+		req4 := httptest.NewRequest(http.MethodPost, "/api/user/"+adminID.String()+"/keys", bytes.NewReader(bigBody)).WithContext(ctx4)
+		req4.SetPathValue("user_ulid", adminID.String())
+		rec4 := httptest.NewRecorder()
+		handler.CreateAPIKey(rec4, req4)
+		if rec4.Code != http.StatusRequestEntityTooLarge {
+			t.Fatalf("CreateAPIKey expected 413, got %d", rec4.Code)
+		}
+
+		// UpdateAPIKey
+		req5 := httptest.NewRequest(http.MethodPatch, "/api/user/"+adminID.String()+"/keys/"+keyID.String(), bytes.NewReader(bigBody)).WithContext(ctx4)
+		req5.SetPathValue("user_ulid", adminID.String())
+		req5.SetPathValue("key_ulid", keyID.String())
+		rec5 := httptest.NewRecorder()
+		handler.UpdateAPIKey(rec5, req5)
+		if rec5.Code != http.StatusRequestEntityTooLarge {
+			t.Fatalf("UpdateAPIKey expected 413, got %d", rec5.Code)
+		}
+	})
+}
+func TestUserAndAPIKey_InvalidULIDValidation(t *testing.T) {
+	adminID := ulid.MustParse("01HGFB9Z5W7ABCDEFGHJKMNPQR")
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	t.Run("CreateUser rejects invalid permission database_id before creating user", func(t *testing.T) {
+		mockRepo := &mockUserRepo{users: make(map[repo.ULID]repo.User)}
+		auditor := audit.NewAuditLogger(false, "stdio", logger, mockRepo)
+		handler := userhandler.UserHandler{Logger: logger, Auditor: auditor, Repo: mockRepo}
+
+		payload := userhandler.CreateUserPayload{
+			Username: "badpermuser",
+			Password: "password123",
+			Permissions: []userhandler.DatabasePermission{
+				{DatabaseID: "not-a-valid-ulid", CanView: true},
+			},
+		}
+		body, _ := json.Marshal(payload)
+		req := httptest.NewRequest(http.MethodPost, "/api/user", bytes.NewReader(body))
+		req = req.WithContext(context.WithValue(req.Context(), utils.UserKey, &repo.User{ID: adminID, Username: "admin", IsAdmin: true}))
+		rec := httptest.NewRecorder()
+
+		handler.CreateUser(rec, req)
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("expected 400 Bad Request, got %d: %s", rec.Code, rec.Body.String())
+		}
+		if len(mockRepo.users) != 0 {
+			t.Fatalf("expected user not to be created when permission database_id is invalid")
+		}
+	})
+
+	t.Run("UpdateUser rejects invalid permission database_id before mutating user", func(t *testing.T) {
+		mockRepo := &mockUserRepo{
+			users: map[repo.ULID]repo.User{
+				adminID: {ID: adminID, Username: "original", IsAdmin: false},
+			},
+		}
+		auditor := audit.NewAuditLogger(false, "stdio", logger, mockRepo)
+		handler := userhandler.UserHandler{Logger: logger, Auditor: auditor, Repo: mockRepo}
+
+		payload := userhandler.UpdateUserPayload{
+			Username: "should_not_apply",
+			Permissions: []userhandler.DatabasePermission{
+				{DatabaseID: "../bad", CanView: true},
+			},
+		}
+		body, _ := json.Marshal(payload)
+		req := httptest.NewRequest(http.MethodPatch, "/api/user/"+adminID.String(), bytes.NewReader(body))
+		req.SetPathValue("user_ulid", adminID.String())
+		req = req.WithContext(context.WithValue(req.Context(), utils.UserKey, &repo.User{ID: adminID, Username: "admin", IsAdmin: true}))
+		rec := httptest.NewRecorder()
+
+		handler.UpdateUser(rec, req)
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("expected 400 Bad Request, got %d: %s", rec.Code, rec.Body.String())
+		}
+		if mockRepo.users[adminID].Username != "original" {
+			t.Fatalf("expected user not to be mutated when permission database_id is invalid")
+		}
+	})
+
+	t.Run("GetAPIKey rejects invalid user_ulid or key_ulid with 400", func(t *testing.T) {
+		mockRepo := &mockUserRepo{users: map[repo.ULID]repo.User{adminID: {ID: adminID, Username: "admin", IsAdmin: true}}}
+		auditor := audit.NewAuditLogger(false, "stdio", logger, mockRepo)
+		handler := userhandler.UserHandler{Logger: logger, Auditor: auditor, Repo: mockRepo}
+
+		req1 := httptest.NewRequest(http.MethodGet, "/api/user/bad/keys/"+adminID.String(), nil)
+		req1.SetPathValue("user_ulid", "bad")
+		req1.SetPathValue("key_ulid", adminID.String())
+		req1 = req1.WithContext(context.WithValue(req1.Context(), utils.UserKey, &repo.User{ID: adminID, Username: "admin", IsAdmin: true}))
+		rec1 := httptest.NewRecorder()
+		handler.GetAPIKey(rec1, req1)
+		if rec1.Code != http.StatusBadRequest {
+			t.Fatalf("expected 400 for invalid user_ulid, got %d", rec1.Code)
+		}
+
+		req2 := httptest.NewRequest(http.MethodGet, "/api/user/"+adminID.String()+"/keys/bad", nil)
+		req2.SetPathValue("user_ulid", adminID.String())
+		req2.SetPathValue("key_ulid", "bad")
+		req2 = req2.WithContext(context.WithValue(req2.Context(), utils.UserKey, &repo.User{ID: adminID, Username: "admin", IsAdmin: true}))
+		rec2 := httptest.NewRecorder()
+		handler.GetAPIKey(rec2, req2)
+		if rec2.Code != http.StatusBadRequest {
+			t.Fatalf("expected 400 for invalid key_ulid, got %d", rec2.Code)
+		}
+	})
+
+	t.Run("CreateAPIKey rejects invalid user_ulid with 400", func(t *testing.T) {
+		mockRepo := &mockUserRepo{users: map[repo.ULID]repo.User{adminID: {ID: adminID, Username: "admin", IsAdmin: true}}}
+		auditor := audit.NewAuditLogger(false, "stdio", logger, mockRepo)
+		handler := userhandler.UserHandler{Logger: logger, Auditor: auditor, Repo: mockRepo}
+
+		req := httptest.NewRequest(http.MethodPost, "/api/user/bad/keys", bytes.NewReader([]byte(`{"name":"k"}`)))
+		req.SetPathValue("user_ulid", "bad")
+		req = req.WithContext(context.WithValue(req.Context(), utils.UserKey, &repo.User{ID: adminID, Username: "admin", IsAdmin: true}))
+		req = req.WithContext(context.WithValue(req.Context(), utils.PermissionHolderKey, &utils.GlobalAdmin{}))
+		rec := httptest.NewRecorder()
+		handler.CreateAPIKey(rec, req)
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("expected 400 for invalid user_ulid, got %d", rec.Code)
+		}
+	})
 }

@@ -8,12 +8,9 @@ import (
 
 	repo "mediahub_oss/internal/repository"
 	"mediahub_oss/internal/repository/migrations"
-	_ "mediahub_oss/internal/repository/migrations/sqlite"
 	"mediahub_oss/internal/repository/sqlite"
 	"mediahub_oss/internal/shared"
 	"mediahub_oss/internal/shared/customerrors"
-
-	"github.com/pressly/goose/v3"
 )
 
 func TestCreateEntry_ZeroTimestamp(t *testing.T) {
@@ -27,11 +24,7 @@ func TestCreateEntry_ZeroTimestamp(t *testing.T) {
 	defer r.Close()
 
 	// 2. Run migrations
-	if err := goose.SetDialect("sqlite3"); err != nil {
-		t.Fatalf("failed to set goose dialect: %v", err)
-	}
-	goose.SetBaseFS(migrations.EmbedFS)
-	if err := goose.Up(r.DB, "sqlite"); err != nil {
+	if err := r.MigrateUp(context.Background()); err != nil {
 		t.Fatalf("failed to run migrations: %v", err)
 	}
 
@@ -100,11 +93,7 @@ func TestGetEntries_TimeFilterEpochAndHistorical(t *testing.T) {
 	}
 	defer r.Close()
 
-	if err := goose.SetDialect("sqlite3"); err != nil {
-		t.Fatalf("failed to set goose dialect: %v", err)
-	}
-	goose.SetBaseFS(migrations.EmbedFS)
-	if err := goose.Up(r.DB, "sqlite"); err != nil {
+	if err := r.MigrateUp(context.Background()); err != nil {
 		t.Fatalf("failed to run migrations: %v", err)
 	}
 
@@ -224,11 +213,7 @@ func TestEntryTimestamps_Pre1970AndEpochRoundTrip(t *testing.T) {
 	}
 	defer r.Close()
 
-	if err := goose.SetDialect("sqlite3"); err != nil {
-		t.Fatalf("failed to set goose dialect: %v", err)
-	}
-	goose.SetBaseFS(migrations.EmbedFS)
-	if err := goose.Up(r.DB, "sqlite"); err != nil {
+	if err := r.MigrateUp(context.Background()); err != nil {
 		t.Fatalf("failed to run migrations: %v", err)
 	}
 
@@ -383,11 +368,7 @@ func TestDeleteDatabase_InvalidatesCustomFieldsCache(t *testing.T) {
 	}
 	defer r.Close()
 
-	if err := goose.SetDialect("sqlite3"); err != nil {
-		t.Fatalf("failed to set goose dialect: %v", err)
-	}
-	goose.SetBaseFS(migrations.EmbedFS)
-	if err := goose.Up(r.DB, "sqlite"); err != nil {
+	if err := r.MigrateUp(context.Background()); err != nil {
 		t.Fatalf("failed to run migrations: %v", err)
 	}
 
@@ -444,11 +425,7 @@ func TestCoordinateCustomField_SQLite(t *testing.T) {
 	}
 	defer r.Close()
 
-	if err := goose.SetDialect("sqlite3"); err != nil {
-		t.Fatalf("failed to set goose dialect: %v", err)
-	}
-	goose.SetBaseFS(migrations.EmbedFS)
-	if err := goose.Up(r.DB, "sqlite"); err != nil {
+	if err := r.MigrateUp(context.Background()); err != nil {
 		t.Fatalf("failed to run migrations: %v", err)
 	}
 
@@ -722,79 +699,6 @@ func TestCoordinateCustomField_SQLite(t *testing.T) {
 	}
 }
 
-func TestGetEntriesByStatus_Limit(t *testing.T) {
-	ctx := context.Background()
-
-	r, err := sqlite.NewRepository(":memory:")
-	if err != nil {
-		t.Fatalf("failed to create repo: %v", err)
-	}
-	defer r.Close()
-
-	if err := goose.SetDialect("sqlite3"); err != nil {
-		t.Fatalf("failed to set goose dialect: %v", err)
-	}
-	goose.SetBaseFS(migrations.EmbedFS)
-	if err := goose.Up(r.DB, "sqlite"); err != nil {
-		t.Fatalf("failed to run migrations: %v", err)
-	}
-
-	db, err := r.CreateDatabase(ctx, repo.Database{
-		Name:        "test_queue_limit",
-		ContentType: "image",
-	})
-	if err != nil {
-		t.Fatalf("failed to create database: %v", err)
-	}
-
-	// Create 5 queued entries
-	for i := 0; i < 5; i++ {
-		_, err := r.CreateEntry(ctx, db, repo.Entry{
-			FileName: "queued.jpg",
-			MimeType: "image/jpeg",
-			Size:     1024,
-			Status:   repo.EntryStatusQueued,
-			MediaFields: map[string]any{
-				"width":  800,
-				"height": 600,
-			},
-		})
-		if err != nil {
-			t.Fatalf("failed to create entry %d: %v", i, err)
-		}
-	}
-
-	// 1. With 0 limit -> returns all 5
-	all, err := r.GetEntriesByStatus(ctx, db.ID, repo.EntryStatusQueued, 0)
-	if err != nil {
-		t.Fatalf("GetEntriesByStatus without limit failed: %v", err)
-	}
-	if len(all) != 5 {
-		t.Fatalf("expected 5 entries without limit, got %d", len(all))
-	}
-
-	// 2. With limit 1 -> returns oldest 1
-	one, err := r.GetEntriesByStatus(ctx, db.ID, repo.EntryStatusQueued, 1)
-	if err != nil {
-		t.Fatalf("GetEntriesByStatus with limit 1 failed: %v", err)
-	}
-	if len(one) != 1 {
-		t.Fatalf("expected 1 entry with limit 1, got %d", len(one))
-	}
-	if one[0].ID != all[0].ID {
-		t.Errorf("expected oldest entry ID %d, got %d", all[0].ID, one[0].ID)
-	}
-
-	// 3. With limit 3 -> returns oldest 3
-	three, err := r.GetEntriesByStatus(ctx, db.ID, repo.EntryStatusQueued, 3)
-	if err != nil {
-		t.Fatalf("GetEntriesByStatus with limit 3 failed: %v", err)
-	}
-	if len(three) != 3 {
-		t.Fatalf("expected 3 entries with limit 3, got %d", len(three))
-	}
-}
-
 func TestGetDatabaseULIDsWithQueuedEntries(t *testing.T) {
 	ctx := context.Background()
 
@@ -804,11 +708,7 @@ func TestGetDatabaseULIDsWithQueuedEntries(t *testing.T) {
 	}
 	defer r.Close()
 
-	if err := goose.SetDialect("sqlite3"); err != nil {
-		t.Fatalf("failed to set goose dialect: %v", err)
-	}
-	goose.SetBaseFS(migrations.EmbedFS)
-	if err := goose.Up(r.DB, "sqlite"); err != nil {
+	if err := r.MigrateUp(context.Background()); err != nil {
 		t.Fatalf("failed to run migrations: %v", err)
 	}
 
@@ -901,11 +801,7 @@ func TestEnqueueEntry_QueueLimit(t *testing.T) {
 	}
 	defer r.Close()
 
-	if err := goose.SetDialect("sqlite3"); err != nil {
-		t.Fatalf("failed to set goose dialect: %v", err)
-	}
-	goose.SetBaseFS(migrations.EmbedFS)
-	if err := goose.Up(r.DB, "sqlite"); err != nil {
+	if err := r.MigrateUp(context.Background()); err != nil {
 		t.Fatalf("failed to run migrations: %v", err)
 	}
 
@@ -1012,11 +908,7 @@ func TestGetEntries_StatusFilter(t *testing.T) {
 	}
 	defer r.Close()
 
-	if err := goose.SetDialect("sqlite3"); err != nil {
-		t.Fatalf("failed to set goose dialect: %v", err)
-	}
-	goose.SetBaseFS(migrations.EmbedFS)
-	if err := goose.Up(r.DB, "sqlite"); err != nil {
+	if err := r.MigrateUp(context.Background()); err != nil {
 		t.Fatalf("failed to run migrations: %v", err)
 	}
 
@@ -1076,11 +968,7 @@ func TestCreateEntry_DuplicateExplicitIDReturnsConflict(t *testing.T) {
 	}
 	defer r.Close()
 
-	if err := goose.SetDialect("sqlite3"); err != nil {
-		t.Fatalf("failed to set goose dialect: %v", err)
-	}
-	goose.SetBaseFS(migrations.EmbedFS)
-	if err := goose.Up(r.DB, "sqlite"); err != nil {
+	if err := r.MigrateUp(context.Background()); err != nil {
 		t.Fatalf("failed to run migrations: %v", err)
 	}
 
@@ -1120,11 +1008,7 @@ func TestUpdateDatabase_ValidationAndDuplicateName(t *testing.T) {
 	}
 	defer r.Close()
 
-	if err := goose.SetDialect("sqlite3"); err != nil {
-		t.Fatalf("failed to set goose dialect: %v", err)
-	}
-	goose.SetBaseFS(migrations.EmbedFS)
-	if err := goose.Up(r.DB, "sqlite"); err != nil {
+	if err := r.MigrateUp(context.Background()); err != nil {
 		t.Fatalf("failed to run migrations: %v", err)
 	}
 
@@ -1161,11 +1045,7 @@ func TestSearchEntries_ILIKEOperator(t *testing.T) {
 	}
 	defer r.Close()
 
-	if err := goose.SetDialect("sqlite3"); err != nil {
-		t.Fatalf("failed to set goose dialect: %v", err)
-	}
-	goose.SetBaseFS(migrations.EmbedFS)
-	if err := goose.Up(r.DB, "sqlite"); err != nil {
+	if err := r.MigrateUp(context.Background()); err != nil {
 		t.Fatalf("failed to run migrations: %v", err)
 	}
 
@@ -1220,11 +1100,7 @@ func TestUpdateEntry_DeletingStatusReturnsNotFound(t *testing.T) {
 	}
 	defer r.Close()
 
-	if err := goose.SetDialect("sqlite3"); err != nil {
-		t.Fatalf("failed to set goose dialect: %v", err)
-	}
-	goose.SetBaseFS(migrations.EmbedFS)
-	if err := goose.Up(r.DB, "sqlite"); err != nil {
+	if err := r.MigrateUp(context.Background()); err != nil {
 		t.Fatalf("failed to run migrations: %v", err)
 	}
 
@@ -1277,11 +1153,7 @@ func TestUpdateEntriesStatus_QueuedCountTracking(t *testing.T) {
 	}
 	defer r.Close()
 
-	if err := goose.SetDialect("sqlite3"); err != nil {
-		t.Fatalf("failed to set goose dialect: %v", err)
-	}
-	goose.SetBaseFS(migrations.EmbedFS)
-	if err := goose.Up(r.DB, "sqlite"); err != nil {
+	if err := r.MigrateUp(context.Background()); err != nil {
 		t.Fatalf("failed to run migrations: %v", err)
 	}
 
@@ -1337,5 +1209,108 @@ func TestUpdateEntriesStatus_QueuedCountTracking(t *testing.T) {
 	// Transition non-existent ID -> should return ErrNotFound
 	if err := r.UpdateEntriesStatus(ctx, db.ID, []int64{999999}, repo.EntryStatusReady); !errors.Is(err, customerrors.ErrNotFound) {
 		t.Fatalf("expected ErrNotFound for non-existent IDs, got: %v", err)
+	}
+}
+
+func TestSQLite_MigrationLifecycle(t *testing.T) {
+	ctx := context.Background()
+
+	r, err := sqlite.NewRepository(":memory:")
+	if err != nil {
+		t.Fatalf("failed to create repo: %v", err)
+	}
+	defer r.Close()
+
+	// 1. Fresh DB returns version 0 before MigrateUp
+	version, err := r.GetMigrationVersion(ctx)
+	if err != nil {
+		t.Fatalf("GetMigrationVersion on fresh DB failed: %v", err)
+	}
+	if version != 0 {
+		t.Fatalf("expected initial migration version 0, got %d", version)
+	}
+
+	// 2. MigrateUp advances to RequiredVersion
+	if err := r.MigrateUp(ctx); err != nil {
+		t.Fatalf("MigrateUp failed: %v", err)
+	}
+	version, err = r.GetMigrationVersion(ctx)
+	if err != nil {
+		t.Fatalf("GetMigrationVersion after MigrateUp failed: %v", err)
+	}
+	if version != migrations.RequiredVersion {
+		t.Fatalf("expected migration version %d after MigrateUp, got %d", migrations.RequiredVersion, version)
+	}
+
+	// 3. MigrateDown rolls back below RequiredVersion
+	if err := r.MigrateDown(ctx); err != nil {
+		t.Fatalf("MigrateDown failed: %v", err)
+	}
+	version, err = r.GetMigrationVersion(ctx)
+	if err != nil {
+		t.Fatalf("GetMigrationVersion after MigrateDown failed: %v", err)
+	}
+	if version >= migrations.RequiredVersion {
+		t.Fatalf("expected migration version < %d after MigrateDown, got %d", migrations.RequiredVersion, version)
+	}
+}
+
+func TestSQLite_GetEntries_IDRange(t *testing.T) {
+	ctx := context.Background()
+
+	r, err := sqlite.NewRepository(":memory:")
+	if err != nil {
+		t.Fatalf("failed to create repo: %v", err)
+	}
+	defer r.Close()
+
+	if err := r.MigrateUp(ctx); err != nil {
+		t.Fatalf("failed to run migrations: %v", err)
+	}
+
+	db, err := r.CreateDatabase(ctx, repo.Database{
+		Name:        "id_range_db",
+		ContentType: "image",
+	})
+	if err != nil {
+		t.Fatalf("failed to create database: %v", err)
+	}
+
+	for i := 1; i <= 5; i++ {
+		if _, err := r.CreateEntry(ctx, db, repo.Entry{
+			ID:          int64(i),
+			FileName:    "img.jpg",
+			MimeType:    "image/jpeg",
+			Size:        100,
+			Status:      repo.EntryStatusReady,
+			MediaFields: map[string]any{"width": 100, "height": 100},
+		}); err != nil {
+			t.Fatalf("CreateEntry %d failed: %v", i, err)
+		}
+	}
+
+	checkIDs := func(name string, opts repo.QueryOptions, want []int64) {
+		t.Helper()
+		entries, err := r.GetEntries(ctx, db.ID, opts)
+		if err != nil {
+			t.Fatalf("%s: unexpected error: %v", name, err)
+		}
+		if len(entries) != len(want) {
+			t.Fatalf("%s: got %d entries, want %d", name, len(entries), len(want))
+		}
+		for i, w := range want {
+			if entries[i].ID != w {
+				t.Errorf("%s: entries[%d].ID = %d, want %d", name, i, entries[i].ID, w)
+			}
+		}
+	}
+
+	checkIDs("idstart only", repo.QueryOptions{Order: "asc", IDStart: 3}, []int64{3, 4, 5})
+	checkIDs("idend only", repo.QueryOptions{Order: "asc", IDEnd: 2}, []int64{1, 2})
+	checkIDs("both inclusive", repo.QueryOptions{Order: "asc", IDStart: 2, IDEnd: 4}, []int64{2, 3, 4})
+	checkIDs("single id", repo.QueryOptions{Order: "asc", IDStart: 3, IDEnd: 3}, []int64{3})
+
+	if _, err := r.GetEntries(ctx, db.ID, repo.QueryOptions{IDStart: 4, IDEnd: 2}); err == nil {
+		t.Fatalf("expected error for inverted IDStart/IDEnd range, got nil")
 	}
 }

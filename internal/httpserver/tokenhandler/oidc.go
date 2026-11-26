@@ -26,11 +26,14 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 )
 
+const maxOIDCResponseBytes int64 = 1 << 20
+
 // OidcTokenExchangeRequest defines the request payload for POST /api/token/oidc.
 type OidcTokenExchangeRequest struct {
 	Code         string `json:"code"`
 	RedirectURI  string `json:"redirect_uri"`
 	CodeVerifier string `json:"code_verifier,omitempty"`
+	Nonce        string `json:"nonce,omitempty"`
 }
 
 // OIDCClaims holds normalized claims extracted from the verified ID token / userinfo.
@@ -39,12 +42,18 @@ type OIDCClaims struct {
 	Subject           string
 	PreferredUsername string
 	Email             string
+	Nonce             string
 }
 
 // OIDCProvider abstracts the OIDC authorization code exchange and validation for testability.
 type OIDCProvider interface {
 	ExchangeCode(ctx context.Context, code, redirectURI, codeVerifier string) (*OIDCClaims, error)
 	GetAuthEndpoint(ctx context.Context) (string, error)
+}
+
+type jwkEntry struct {
+	key crypto.PublicKey
+	alg string
 }
 
 // HTTPOIDCProvider implements OIDCProvider using HTTP requests with JWKS discovery and caching.
@@ -56,8 +65,10 @@ type HTTPOIDCProvider struct {
 	mu              sync.RWMutex
 	cachedEndpoints openIDConfiguration
 	endpointsExpiry time.Time
-	cachedJWKS      map[string]crypto.PublicKey
+	endpointsFlight chan struct{}
+	cachedJWKS      map[string]jwkEntry
 	jwksExpiry      time.Time
+	jwksFlight      chan struct{}
 }
 
 // NewHTTPOIDCProvider creates a new HTTPOIDCProvider.
@@ -69,7 +80,7 @@ func NewHTTPOIDCProvider(cfg OIDCConfig, logger *slog.Logger) *HTTPOIDCProvider 
 		Config:     cfg,
 		HTTPClient: &http.Client{Timeout: 10 * time.Second},
 		Logger:     logger,
-		cachedJWKS: make(map[string]crypto.PublicKey),
+		cachedJWKS: make(map[string]jwkEntry),
 	}
 }
 
@@ -96,6 +107,7 @@ type jwksResponse struct {
 type jwkKey struct {
 	Kty string `json:"kty"`
 	Kid string `json:"kid"`
+	Use string `json:"use"`
 	Alg string `json:"alg"`
 	N   string `json:"n"`
 	E   string `json:"e"`
@@ -114,22 +126,71 @@ func (p *HTTPOIDCProvider) GetAuthEndpoint(ctx context.Context) (string, error) 
 }
 
 func (p *HTTPOIDCProvider) discoverEndpoints(ctx context.Context) (openIDConfiguration, error) {
-	p.mu.RLock()
-	if time.Now().Before(p.endpointsExpiry) && p.cachedEndpoints.TokenEndpoint != "" {
-		cfg := p.cachedEndpoints
+	for {
+		p.mu.RLock()
+		if time.Now().Before(p.endpointsExpiry) && p.cachedEndpoints.TokenEndpoint != "" {
+			cfg := p.cachedEndpoints
+			p.mu.RUnlock()
+			return cfg, nil
+		}
+		waitCh := p.endpointsFlight
 		p.mu.RUnlock()
-		return cfg, nil
+
+		if waitCh != nil {
+			select {
+			case <-waitCh:
+				continue
+			case <-ctx.Done():
+				return openIDConfiguration{}, ctx.Err()
+			}
+		}
+
+		p.mu.Lock()
+		if time.Now().Before(p.endpointsExpiry) && p.cachedEndpoints.TokenEndpoint != "" {
+			cfg := p.cachedEndpoints
+			p.mu.Unlock()
+			return cfg, nil
+		}
+		if p.endpointsFlight != nil {
+			waitCh = p.endpointsFlight
+			p.mu.Unlock()
+			select {
+			case <-waitCh:
+				continue
+			case <-ctx.Done():
+				return openIDConfiguration{}, ctx.Err()
+			}
+		}
+		flight := make(chan struct{})
+		p.endpointsFlight = flight
+		p.mu.Unlock()
+
+		var doc openIDConfiguration
+		var fetchErr error
+		var succeeded bool
+		func() {
+			defer func() {
+				p.mu.Lock()
+				if succeeded {
+					p.cachedEndpoints = doc
+					p.endpointsExpiry = time.Now().Add(24 * time.Hour)
+				}
+				p.endpointsFlight = nil
+				close(flight)
+				p.mu.Unlock()
+			}()
+			doc, fetchErr = p.fetchDiscoveryEndpoints(ctx)
+			succeeded = fetchErr == nil
+		}()
+
+		if fetchErr != nil {
+			return openIDConfiguration{}, fetchErr
+		}
+		return doc, nil
 	}
-	p.mu.RUnlock()
+}
 
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
-	// Double check under write lock
-	if time.Now().Before(p.endpointsExpiry) && p.cachedEndpoints.TokenEndpoint != "" {
-		return p.cachedEndpoints, nil
-	}
-
+func (p *HTTPOIDCProvider) fetchDiscoveryEndpoints(ctx context.Context) (openIDConfiguration, error) {
 	baseURL := strings.TrimRight(p.Config.IssuerURL, "/")
 	discoveryURL := baseURL + "/.well-known/openid-configuration"
 
@@ -149,7 +210,7 @@ func (p *HTTPOIDCProvider) discoverEndpoints(ctx context.Context) (openIDConfigu
 	}
 
 	var doc openIDConfiguration
-	if err := json.NewDecoder(resp.Body).Decode(&doc); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxOIDCResponseBytes)).Decode(&doc); err != nil {
 		return openIDConfiguration{}, fmt.Errorf("failed to decode OIDC discovery document from %s: %w", discoveryURL, err)
 	}
 
@@ -167,25 +228,105 @@ func (p *HTTPOIDCProvider) discoverEndpoints(ctx context.Context) (openIDConfigu
 		)
 	}
 
-	p.cachedEndpoints = doc
-	p.endpointsExpiry = time.Now().Add(24 * time.Hour)
-
 	return doc, nil
 }
 
-func (p *HTTPOIDCProvider) getJWKSPublicKey(ctx context.Context, jwksURI, kid string) (crypto.PublicKey, error) {
-	p.mu.RLock()
-	if time.Now().Before(p.jwksExpiry) {
-		if key, ok := p.cachedJWKS[kid]; ok {
-			p.mu.RUnlock()
-			return key, nil
+func lookupJWKEntry(jwks map[string]jwkEntry, kid string) (jwkEntry, bool) {
+	if entry, ok := jwks[kid]; ok {
+		return entry, true
+	}
+	if kid == "" && len(jwks) == 1 {
+		for _, v := range jwks {
+			return v, true
 		}
 	}
-	p.mu.RUnlock()
+	return jwkEntry{}, false
+}
 
-	p.mu.Lock()
-	defer p.mu.Unlock()
+func (p *HTTPOIDCProvider) getJWKSEntry(ctx context.Context, jwksURI, kid string) (jwkEntry, error) {
+	var waitedForRefresh bool
+	for {
+		p.mu.RLock()
+		cacheValid := time.Now().Before(p.jwksExpiry)
+		if cacheValid {
+			if entry, ok := lookupJWKEntry(p.cachedJWKS, kid); ok {
+				p.mu.RUnlock()
+				return entry, nil
+			}
+		}
+		if waitedForRefresh && cacheValid {
+			p.mu.RUnlock()
+			return jwkEntry{}, fmt.Errorf("no matching key found for kid '%s' in JWKS", kid)
+		}
+		waitCh := p.jwksFlight
+		p.mu.RUnlock()
 
+		if waitCh != nil {
+			select {
+			case <-waitCh:
+				waitedForRefresh = true
+				continue
+			case <-ctx.Done():
+				return jwkEntry{}, ctx.Err()
+			}
+		}
+
+		p.mu.Lock()
+		cacheValid = time.Now().Before(p.jwksExpiry)
+		if cacheValid {
+			if entry, ok := lookupJWKEntry(p.cachedJWKS, kid); ok {
+				p.mu.Unlock()
+				return entry, nil
+			}
+		}
+		if waitedForRefresh && cacheValid {
+			p.mu.Unlock()
+			return jwkEntry{}, fmt.Errorf("no matching key found for kid '%s' in JWKS", kid)
+		}
+		if p.jwksFlight != nil {
+			waitCh = p.jwksFlight
+			p.mu.Unlock()
+			select {
+			case <-waitCh:
+				waitedForRefresh = true
+				continue
+			case <-ctx.Done():
+				return jwkEntry{}, ctx.Err()
+			}
+		}
+		flight := make(chan struct{})
+		p.jwksFlight = flight
+		p.mu.Unlock()
+
+		var newMap map[string]jwkEntry
+		var fetchErr error
+		var succeeded bool
+		func() {
+			defer func() {
+				p.mu.Lock()
+				if succeeded {
+					p.cachedJWKS = newMap
+					p.jwksExpiry = time.Now().Add(1 * time.Hour)
+				}
+				p.jwksFlight = nil
+				close(flight)
+				p.mu.Unlock()
+			}()
+			newMap, fetchErr = p.fetchJWKS(ctx, jwksURI)
+			succeeded = fetchErr == nil
+		}()
+
+		if fetchErr != nil {
+			return jwkEntry{}, fetchErr
+		}
+		if entry, ok := lookupJWKEntry(newMap, kid); ok {
+			return entry, nil
+		}
+		return jwkEntry{}, fmt.Errorf("no matching key found for kid '%s' in JWKS", kid)
+	}
+}
+
+func (p *HTTPOIDCProvider) fetchJWKS(ctx context.Context, jwksURI string) (map[string]jwkEntry, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, jwksURI, nil)
 	if err != nil {
 		return nil, err
@@ -201,43 +342,34 @@ func (p *HTTPOIDCProvider) getJWKSPublicKey(ctx context.Context, jwksURI, kid st
 	}
 
 	var jwks jwksResponse
-	if err := json.NewDecoder(resp.Body).Decode(&jwks); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxOIDCResponseBytes)).Decode(&jwks); err != nil {
 		return nil, fmt.Errorf("failed to decode JWKS: %w", err)
 	}
 
-	newMap := make(map[string]crypto.PublicKey)
+	newMap := make(map[string]jwkEntry)
 	for _, k := range jwks.Keys {
+		if k.Use != "" && k.Use != "sig" {
+			continue
+		}
 		switch k.Kty {
 		case "RSA":
 			if k.N != "" && k.E != "" {
 				pubKey, err := parseRSAPublicKey(k.N, k.E)
 				if err == nil {
-					newMap[k.Kid] = pubKey
+					newMap[k.Kid] = jwkEntry{key: pubKey, alg: k.Alg}
 				}
 			}
 		case "EC":
 			if k.Crv != "" && k.X != "" && k.Y != "" {
 				pubKey, err := parseECPublicKey(k.Crv, k.X, k.Y)
 				if err == nil {
-					newMap[k.Kid] = pubKey
+					newMap[k.Kid] = jwkEntry{key: pubKey, alg: k.Alg}
 				}
 			}
 		}
 	}
 
-	p.cachedJWKS = newMap
-	p.jwksExpiry = time.Now().Add(1 * time.Hour)
-
-	if key, ok := newMap[kid]; ok {
-		return key, nil
-	}
-	if kid == "" && len(newMap) == 1 {
-		for _, v := range newMap {
-			return v, nil
-		}
-	}
-
-	return nil, fmt.Errorf("no matching key found for kid '%s' in JWKS", kid)
+	return newMap, nil
 }
 
 func decodeBase64URL(s string) ([]byte, error) {
@@ -334,7 +466,7 @@ func (p *HTTPOIDCProvider) ExchangeCode(ctx context.Context, code, redirectURI, 
 	}
 	defer resp.Body.Close()
 
-	bodyBytes, err := io.ReadAll(resp.Body)
+	bodyBytes, err := io.ReadAll(io.LimitReader(resp.Body, maxOIDCResponseBytes))
 	if err != nil {
 		return nil, fmt.Errorf("failed to read token response: %w", err)
 	}
@@ -375,11 +507,45 @@ func (p *HTTPOIDCProvider) ExchangeCode(ctx context.Context, code, redirectURI, 
 	return claims, nil
 }
 
+var allowedOIDCSigningMethods = []string{
+	"RS256", "RS384", "RS512",
+	"ES256", "ES384", "ES512",
+	"PS256", "PS384", "PS512",
+}
+
+func countAudienceEntries(aud any) int {
+	switch v := aud.(type) {
+	case string:
+		if v == "" {
+			return 0
+		}
+		return 1
+	case []string:
+		return len(v)
+	case []any:
+		return len(v)
+	default:
+		return 0
+	}
+}
+
 func (p *HTTPOIDCProvider) verifyIDToken(ctx context.Context, idToken string, endpoints openIDConfiguration) (*OIDCClaims, error) {
 	parsedToken, err := jwt.Parse(idToken, func(token *jwt.Token) (any, error) {
 		kid, _ := token.Header["kid"].(string)
-		return p.getJWKSPublicKey(ctx, endpoints.JWKSURI, kid)
-	}, jwt.WithAudience(p.Config.ClientID), jwt.WithExpirationRequired())
+		entry, err := p.getJWKSEntry(ctx, endpoints.JWKSURI, kid)
+		if err != nil {
+			return nil, err
+		}
+		alg, _ := token.Header["alg"].(string)
+		if entry.alg != "" && alg != entry.alg {
+			return nil, fmt.Errorf("id_token alg '%s' does not match JWK alg '%s'", alg, entry.alg)
+		}
+		return entry.key, nil
+	},
+		jwt.WithValidMethods(allowedOIDCSigningMethods),
+		jwt.WithAudience(p.Config.ClientID),
+		jwt.WithExpirationRequired(),
+	)
 	if err != nil || !parsedToken.Valid {
 		return nil, fmt.Errorf("invalid id_token signature or claims: %w", err)
 	}
@@ -387,6 +553,16 @@ func (p *HTTPOIDCProvider) verifyIDToken(ctx context.Context, idToken string, en
 	mapClaims, ok := parsedToken.Claims.(jwt.MapClaims)
 	if !ok {
 		return nil, errors.New("unexpected id_token claims type")
+	}
+
+	audCount := countAudienceEntries(mapClaims["aud"])
+	if azpRaw, hasAzp := mapClaims["azp"]; hasAzp {
+		azp, ok := azpRaw.(string)
+		if !ok || azp != p.Config.ClientID {
+			return nil, errors.New("invalid 'azp' claim in id_token")
+		}
+	} else if audCount > 1 {
+		return nil, errors.New("missing required 'azp' claim for multi-audience id_token")
 	}
 
 	iss, _ := mapClaims["iss"].(string)
@@ -412,6 +588,9 @@ func (p *HTTPOIDCProvider) verifyIDToken(ctx context.Context, idToken string, en
 	if em, ok := mapClaims["email"].(string); ok {
 		claims.Email = em
 	}
+	if nonce, ok := mapClaims["nonce"].(string); ok {
+		claims.Nonce = nonce
+	}
 	return claims, nil
 }
 
@@ -432,7 +611,7 @@ func (p *HTTPOIDCProvider) enrichClaimsFromUserinfo(ctx context.Context, accessT
 	}
 
 	var uiMap map[string]any
-	if err := json.NewDecoder(uiResp.Body).Decode(&uiMap); err != nil {
+	if err := json.NewDecoder(io.LimitReader(uiResp.Body, maxOIDCResponseBytes)).Decode(&uiMap); err != nil {
 		return nil
 	}
 
@@ -480,7 +659,11 @@ func (h *TokenHandler) GetTokenOIDC(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req OidcTokenExchangeRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.Code) == "" {
+	if status, msg := utils.DecodeJSONBody(w, r, &req); status != 0 {
+		utils.RespondWithError(w, status, msg)
+		return
+	}
+	if strings.TrimSpace(req.Code) == "" {
 		utils.RespondWithError(w, http.StatusBadRequest, "Invalid JSON body: 'code' is required")
 		return
 	}
@@ -488,7 +671,13 @@ func (h *TokenHandler) GetTokenOIDC(w http.ResponseWriter, r *http.Request) {
 	claims, err := h.OIDCProvider.ExchangeCode(ctx, req.Code, req.RedirectURI, req.CodeVerifier)
 	if err != nil {
 		h.Logger.Warn("OIDC code exchange failed", "error", err)
-		utils.RespondWithError(w, http.StatusUnauthorized, fmt.Sprintf("Authentication failed: %v", err))
+		utils.RespondWithError(w, http.StatusUnauthorized, "OIDC authentication failed")
+		return
+	}
+
+	if expectedNonce := strings.TrimSpace(req.Nonce); expectedNonce != "" && claims.Nonce != expectedNonce {
+		h.Logger.Warn("OIDC nonce mismatch", "has_nonce", claims.Nonce != "")
+		utils.RespondWithError(w, http.StatusUnauthorized, "OIDC authentication failed")
 		return
 	}
 
@@ -501,24 +690,35 @@ func (h *TokenHandler) GetTokenOIDC(w http.ResponseWriter, r *http.Request) {
 	user, err := h.Repo.GetUserByOIDCIdentity(ctx, normIssuer, claims.Subject)
 	if errors.Is(err, customerrors.ErrNotFound) {
 		// JIT Provisioning executed atomically in repository
-		createdUser, err := h.Repo.CreateOIDCUser(ctx, repo.CreateOIDCUserParams{
+		createdUser, createErr := h.Repo.CreateOIDCUser(ctx, repo.CreateOIDCUserParams{
 			Issuer:            normIssuer,
 			Subject:           claims.Subject,
 			PreferredUsername: claims.PreferredUsername,
 			Email:             claims.Email,
 			DefaultRightsUser: h.OIDCConfig.DefaultUserRights,
 		})
-		if err != nil {
-			h.Logger.Error("Failed to provision OIDC user", "error", err)
-			utils.RespondWithError(w, http.StatusInternalServerError, "Failed to provision user")
-			return
+		if createErr != nil {
+			if errors.Is(createErr, customerrors.ErrConflict) || errors.Is(createErr, customerrors.ErrUserExists) {
+				existingUser, lookupErr := h.Repo.GetUserByOIDCIdentity(ctx, normIssuer, claims.Subject)
+				if lookupErr == nil {
+					user = existingUser
+				} else {
+					h.Logger.Error("Failed to provision OIDC user after conflict fallback", "error", createErr, "lookup_error", lookupErr)
+					utils.RespondWithError(w, http.StatusInternalServerError, "Failed to provision user")
+					return
+				}
+			} else {
+				h.Logger.Error("Failed to provision OIDC user", "error", createErr)
+				utils.RespondWithError(w, http.StatusInternalServerError, "Failed to provision user")
+				return
+			}
+		} else {
+			user = createdUser
+			h.Auditor.Log(ctx, "user.jit_provision", "oidc", user.Username, map[string]any{
+				"issuer":  normIssuer,
+				"subject": claims.Subject,
+			})
 		}
-
-		user = createdUser
-		h.Auditor.Log(ctx, "user.jit_provision", "oidc", user.Username, map[string]any{
-			"issuer":  normIssuer,
-			"subject": claims.Subject,
-		})
 	} else if err != nil {
 		h.Logger.Error("Failed to query OIDC identity", "error", err)
 		utils.RespondWithError(w, http.StatusInternalServerError, "Failed to query user identity")

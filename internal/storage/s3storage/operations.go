@@ -1,6 +1,7 @@
 package s3storage
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -8,11 +9,12 @@ import (
 	"github.com/minio/minio-go/v7"
 
 	"mediahub_oss/internal/shared/customerrors"
+	"mediahub_oss/internal/shared/ulid"
 	"mediahub_oss/internal/storage"
 )
 
 // Write uploads a file stream to the S3 bucket.
-func (s *S3StorageProvider) Write(ctx context.Context, dbID string, id int64, content io.Reader) (int64, error) {
+func (s *S3StorageProvider) Write(ctx context.Context, dbID ulid.ULID, id int64, content io.Reader) (int64, error) {
 	objectKey := getObjectKey(dbID, id)
 	size := getStreamSize(content)
 	info, err := s.client.PutObject(ctx, s.bucket, objectKey, content, size, minio.PutObjectOptions{
@@ -26,7 +28,7 @@ func (s *S3StorageProvider) Write(ctx context.Context, dbID string, id int64, co
 }
 
 // WritePreview uploads a preview file stream to the S3 bucket.
-func (s *S3StorageProvider) WritePreview(ctx context.Context, dbID string, id int64, preview io.Reader) (int64, error) {
+func (s *S3StorageProvider) WritePreview(ctx context.Context, dbID ulid.ULID, id int64, preview io.Reader) (int64, error) {
 	objectKey := getPreviewObjectKey(dbID, id)
 	size := getStreamSize(preview)
 	info, err := s.client.PutObject(ctx, s.bucket, objectKey, preview, size, minio.PutObjectOptions{
@@ -40,7 +42,7 @@ func (s *S3StorageProvider) WritePreview(ctx context.Context, dbID string, id in
 }
 
 // Stat retrieves metadata about the main file without downloading the content.
-func (s *S3StorageProvider) Stat(ctx context.Context, dbID string, id int64) (storage.FileInfo, error) {
+func (s *S3StorageProvider) Stat(ctx context.Context, dbID ulid.ULID, id int64) (storage.FileInfo, error) {
 	objectKey := getObjectKey(dbID, id)
 	info, err := s.client.StatObject(ctx, s.bucket, objectKey, minio.StatObjectOptions{})
 	if err != nil {
@@ -56,7 +58,7 @@ func (s *S3StorageProvider) Stat(ctx context.Context, dbID string, id int64) (st
 }
 
 // StatPreview retrieves metadata about the preview file without downloading the content.
-func (s *S3StorageProvider) StatPreview(ctx context.Context, dbID string, id int64) (storage.FileInfo, error) {
+func (s *S3StorageProvider) StatPreview(ctx context.Context, dbID ulid.ULID, id int64) (storage.FileInfo, error) {
 	objectKey := getPreviewObjectKey(dbID, id)
 	info, err := s.client.StatObject(ctx, s.bucket, objectKey, minio.StatObjectOptions{})
 	if err != nil {
@@ -72,7 +74,16 @@ func (s *S3StorageProvider) StatPreview(ctx context.Context, dbID string, id int
 }
 
 // Read retrieves a stream of the file content, supporting range requests.
-func (s *S3StorageProvider) Read(ctx context.Context, dbID string, id int64, offset int64, length int64) (io.ReadCloser, error) {
+func (s *S3StorageProvider) Read(ctx context.Context, dbID ulid.ULID, id int64, offset int64, length int64) (io.ReadCloser, error) {
+	if offset < 0 {
+		return nil, fmt.Errorf("%w: offset must be non-negative", customerrors.ErrValidation)
+	}
+	if length == 0 {
+		if _, err := s.Stat(ctx, dbID, id); err != nil {
+			return nil, err
+		}
+		return io.NopCloser(bytes.NewReader(nil)), nil
+	}
 	objectKey := getObjectKey(dbID, id)
 
 	opts := minio.GetObjectOptions{}
@@ -102,7 +113,7 @@ func (s *S3StorageProvider) Read(ctx context.Context, dbID string, id int64, off
 }
 
 // ReadPreview retrieves a stream of the preview file content.
-func (s *S3StorageProvider) ReadPreview(ctx context.Context, dbID string, id int64) (io.ReadCloser, error) {
+func (s *S3StorageProvider) ReadPreview(ctx context.Context, dbID ulid.ULID, id int64) (io.ReadCloser, error) {
 	objectKey := getPreviewObjectKey(dbID, id)
 	obj, err := s.client.GetObject(ctx, s.bucket, objectKey, minio.GetObjectOptions{})
 	if err != nil {

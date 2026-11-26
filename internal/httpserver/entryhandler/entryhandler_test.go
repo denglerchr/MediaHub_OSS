@@ -10,18 +10,17 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"mediahub_oss/internal/httpserver/entryhandler"
 	"mediahub_oss/internal/httpserver/utils"
 	"mediahub_oss/internal/processing"
 	repo "mediahub_oss/internal/repository"
-	"mediahub_oss/internal/repository/migrations"
-	_ "mediahub_oss/internal/repository/migrations/sqlite"
 	"mediahub_oss/internal/repository/sqlite"
+	"mediahub_oss/internal/shared/ulid"
+	"mediahub_oss/internal/storage"
 	"mediahub_oss/internal/storage/localstorage"
-
-	"github.com/pressly/goose/v3"
 )
 
 func setupTestEnvironment(t *testing.T) (*sqlite.SQLiteRepository, *localstorage.LocalStorage, *entryhandler.EntryHandler, repo.Database) {
@@ -34,11 +33,7 @@ func setupTestEnvironment(t *testing.T) (*sqlite.SQLiteRepository, *localstorage
 		t.Fatalf("failed to create repo: %v", err)
 	}
 
-	if err := goose.SetDialect("sqlite3"); err != nil {
-		t.Fatalf("failed to set goose dialect: %v", err)
-	}
-	goose.SetBaseFS(migrations.EmbedFS)
-	if err := goose.Up(r.DB, "sqlite"); err != nil {
+	if err := r.MigrateUp(ctx); err != nil {
 		t.Fatalf("failed to run migrations: %v", err)
 	}
 
@@ -83,6 +78,11 @@ func TestQueryEntries_InvalidQueryParamsReturn400(t *testing.T) {
 		{"invalid offset", "/api/database/" + db.ID.String() + "/entries?offset=abc"},
 		{"invalid tstart", "/api/database/" + db.ID.String() + "/entries?tstart=foo"},
 		{"invalid tend", "/api/database/" + db.ID.String() + "/entries?tend=bar"},
+		{"invalid idstart", "/api/database/" + db.ID.String() + "/entries?idstart=foo"},
+		{"invalid idend", "/api/database/" + db.ID.String() + "/entries?idend=bar"},
+		{"negative idstart", "/api/database/" + db.ID.String() + "/entries?idstart=-1"},
+		{"negative idend", "/api/database/" + db.ID.String() + "/entries?idend=-5"},
+		{"inverted id range", "/api/database/" + db.ID.String() + "/entries?idstart=10&idend=5"},
 	}
 
 	for _, tt := range tests {
@@ -96,6 +96,66 @@ func TestQueryEntries_InvalidQueryParamsReturn400(t *testing.T) {
 
 			if w.Code != http.StatusBadRequest {
 				t.Errorf("expected status 400 for %s, got %d", tt.url, w.Code)
+			}
+		})
+	}
+}
+
+func TestQueryEntries_IDRangeFilter(t *testing.T) {
+	r, _, handler, db := setupTestEnvironment(t)
+	defer r.Close()
+	ctx := context.Background()
+
+	for i := int64(1); i <= 5; i++ {
+		if _, err := r.CreateEntry(ctx, db, repo.Entry{
+			ID:          i,
+			FileName:    "item.jpg",
+			MimeType:    "image/jpeg",
+			Size:        100,
+			Status:      repo.EntryStatusReady,
+			MediaFields: map[string]any{"width": 100, "height": 100},
+		}); err != nil {
+			t.Fatalf("CreateEntry %d failed: %v", i, err)
+		}
+	}
+
+	cases := []struct {
+		name    string
+		query   string
+		wantIDs []int64
+	}{
+		{"idstart only", "sort_by=id&order=asc&idstart=3", []int64{3, 4, 5}},
+		{"idend only", "sort_by=id&order=asc&idend=2", []int64{1, 2}},
+		{"both inclusive", "sort_by=id&order=asc&idstart=2&idend=4", []int64{2, 3, 4}},
+		{"descending with idend", "sort_by=id&order=desc&idend=3&limit=2", []int64{3, 2}},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "/api/database/"+db.ID.String()+"/entries?"+tc.query, nil)
+			req.SetPathValue("database_id", db.ID.String())
+			req = req.WithContext(context.WithValue(req.Context(), utils.UserKey, &repo.User{Username: "admin", IsAdmin: true}))
+			w := httptest.NewRecorder()
+
+			handler.QueryEntries(w, req)
+
+			if w.Code != http.StatusOK {
+				t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+			}
+
+			var got []struct {
+				ID int64 `json:"id"`
+			}
+			if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+				t.Fatalf("failed to unmarshal response: %v", err)
+			}
+			if len(got) != len(tc.wantIDs) {
+				t.Fatalf("got %d entries, want %d (%v)", len(got), len(tc.wantIDs), got)
+			}
+			for i, wantID := range tc.wantIDs {
+				if got[i].ID != wantID {
+					t.Errorf("got[%d].ID = %d, want %d", i, got[i].ID, wantID)
+				}
 			}
 		})
 	}
@@ -199,7 +259,7 @@ func TestDeleteEntries_SuccessAndPartialSuccess(t *testing.T) {
 	}
 
 	// Write dummy file to storage
-	_, _ = store.Write(ctx, db.ID.String(), entry.ID, bytes.NewReader([]byte("test")))
+	_, _ = store.Write(ctx, db.ID, entry.ID, bytes.NewReader([]byte("test")))
 
 	// Bulk delete
 	deleteReq := entryhandler.BulkDeleteRequest{
@@ -325,4 +385,109 @@ func TestSearchEntries_CoordinateFilters(t *testing.T) {
 	if w.Code != http.StatusBadRequest {
 		t.Errorf("expected status 400 for sorting by coordinate field, got %d", w.Code)
 	}
+}
+
+type spyPreviewStorage struct {
+	storage.StorageProvider
+	readPreviewCalled bool
+}
+
+func (s *spyPreviewStorage) ReadPreview(ctx context.Context, dbID ulid.ULID, id int64) (io.ReadCloser, error) {
+	s.readPreviewCalled = true
+	return nil, os.ErrNotExist
+}
+
+func TestGetEntryPreview_InvalidDatabaseIDReturns400WithoutCallingStorage(t *testing.T) {
+	for _, badID := range []string{"previews", ".."} {
+		t.Run(badID, func(t *testing.T) {
+			spy := &spyPreviewStorage{}
+			handler := &entryhandler.EntryHandler{
+				Storage: spy,
+				Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+			}
+
+			req := httptest.NewRequest(http.MethodGet, "/api/database/invalid/entry/1/preview", nil)
+			req.SetPathValue("database_id", badID)
+			req.SetPathValue("id", "1")
+			w := httptest.NewRecorder()
+
+			handler.GetEntryPreview(w, req)
+
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("expected status 400 for %q, got %d: %s", badID, w.Code, w.Body.String())
+			}
+			if spy.readPreviewCalled {
+				t.Fatalf("expected storage.ReadPreview not to be called for invalid database_id %q", badID)
+			}
+		})
+	}
+}
+
+func TestSearchEntries_ExceedsMaxQueryLimitReturns400(t *testing.T) {
+	r, _, handler, db := setupTestEnvironment(t)
+	defer r.Close()
+
+	bodyBytes, _ := json.Marshal(map[string]any{
+		"pagination": map[string]any{"limit": repo.MaxQueryLimit + 1},
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/database/"+db.ID.String()+"/entries/search", bytes.NewReader(bodyBytes))
+	req.SetPathValue("database_id", db.ID.String())
+	req = req.WithContext(context.WithValue(req.Context(), utils.UserKey, &repo.User{Username: "admin", IsAdmin: true}))
+	w := httptest.NewRecorder()
+
+	handler.SearchEntries(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 Bad Request when limit > MaxQueryLimit, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestEntryHandler_OversizedJSONBodiesReturn413(t *testing.T) {
+	r, _, handler, db := setupTestEnvironment(t)
+	defer r.Close()
+
+	oversized := strings.Repeat("a", int(utils.MaxJSONBodyBytes)+16)
+	bigPayload := `{"filename":"` + oversized + `"}`
+	userCtx := context.WithValue(context.Background(), utils.UserKey, &repo.User{Username: "admin", IsAdmin: true})
+
+	t.Run("PatchEntry 413", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPatch, "/api/database/"+db.ID.String()+"/entry/1", strings.NewReader(bigPayload)).WithContext(userCtx)
+		req.SetPathValue("database_id", db.ID.String())
+		req.SetPathValue("id", "1")
+		w := httptest.NewRecorder()
+		handler.PatchEntry(w, req)
+		if w.Code != http.StatusRequestEntityTooLarge {
+			t.Fatalf("expected 413, got %d", w.Code)
+		}
+	})
+
+	t.Run("DeleteEntries 413", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPost, "/api/database/"+db.ID.String()+"/entries/delete", strings.NewReader(bigPayload)).WithContext(userCtx)
+		req.SetPathValue("database_id", db.ID.String())
+		w := httptest.NewRecorder()
+		handler.DeleteEntries(w, req)
+		if w.Code != http.StatusRequestEntityTooLarge {
+			t.Fatalf("expected 413, got %d", w.Code)
+		}
+	})
+
+	t.Run("SearchEntries 413", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPost, "/api/database/"+db.ID.String()+"/entries/search", strings.NewReader(bigPayload)).WithContext(userCtx)
+		req.SetPathValue("database_id", db.ID.String())
+		w := httptest.NewRecorder()
+		handler.SearchEntries(w, req)
+		if w.Code != http.StatusRequestEntityTooLarge {
+			t.Fatalf("expected 413, got %d", w.Code)
+		}
+	})
+
+	t.Run("ExportEntries 413", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPost, "/api/database/"+db.ID.String()+"/entries/export", strings.NewReader(bigPayload)).WithContext(userCtx)
+		req.SetPathValue("database_id", db.ID.String())
+		w := httptest.NewRecorder()
+		handler.ExportEntries(w, req)
+		if w.Code != http.StatusRequestEntityTooLarge {
+			t.Fatalf("expected 413, got %d", w.Code)
+		}
+	})
 }

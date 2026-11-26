@@ -12,6 +12,7 @@ import (
 
 	repo "mediahub_oss/internal/repository"
 	"mediahub_oss/internal/shared"
+	"mediahub_oss/internal/shared/ulid"
 
 	"github.com/Masterminds/squirrel"
 )
@@ -113,7 +114,7 @@ func newTestPostgresRepo(handler func(query string, args []driver.NamedValue) (t
 
 func TestPostgres_GetEntry_Pre1970AndEpochTimestamps(t *testing.T) {
 	ctx := context.Background()
-	dbID := repo.ULID("01HGFB9Z5W7ABCDEFGHJKMNPQR")
+	dbID := ulid.MustParse("01HGFB9Z5W7ABCDEFGHJKMNPQR")
 
 	t1950Noon := time.Date(1950, 1, 1, 12, 0, 0, 0, time.UTC)
 	t1950Midnight := time.UnixMilli(-631152000000).UTC() // 1950-01-01T00:00:00Z
@@ -306,7 +307,7 @@ func TestPostgres_GetLogs_Pre1970AndEpochTimestamps(t *testing.T) {
 
 func TestPostgres_UpdateEntryMetadata_TimestampHandling(t *testing.T) {
 	ctx := context.Background()
-	dbID := repo.ULID("01HGFB9Z5W7ABCDEFGHJKMNPQR")
+	dbID := ulid.MustParse("01HGFB9Z5W7ABCDEFGHJKMNPQR")
 
 	t.Run("zero timestamp omits timestamp column from UPDATE", func(t *testing.T) {
 		var recorded []tsStubRecordedQuery

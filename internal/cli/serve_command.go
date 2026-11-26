@@ -18,11 +18,7 @@ import (
 	uh "mediahub_oss/internal/httpserver/userhandler"
 	"mediahub_oss/internal/repository"
 	"mediahub_oss/internal/repository/migrations"
-	"mediahub_oss/internal/repository/postgres"
-	"mediahub_oss/internal/repository/sqlite"
 	"mediahub_oss/internal/storage"
-	"mediahub_oss/internal/storage/localstorage"
-	"mediahub_oss/internal/storage/s3storage"
 	"net/http"
 	"os"
 	"os/signal"
@@ -159,6 +155,9 @@ func serve(globalOptions *GlobalOptions, frontendFS fs.FS) error {
 
 	cfg := globalOptions.Conf
 	logger := globalOptions.Logger
+	if err := config.EnsureJWTSecret(globalOptions.CfgFilePath, cfg, logger); err != nil {
+		return err
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 
 	logger.Info("Bootstrapping MediaHub server...")
@@ -242,7 +241,6 @@ func buildHandlers(cfg *config.Config, repo repository.Repository, storageProvid
 
 	oidcCfg := th.OIDCConfig{
 		Enabled:           cfg.Auth.OIDC.Enabled,
-		DisableLoginPage:  cfg.Auth.OIDC.DisableLoginPage,
 		DefaultUserRights: cfg.Auth.OIDC.DefaultUserRights,
 		IssuerURL:         cfg.Auth.OIDC.IssuerURL,
 		ClientID:          cfg.Auth.OIDC.ClientID,
@@ -256,7 +254,6 @@ func buildHandlers(cfg *config.Config, repo repository.Repository, storageProvid
 	}
 
 	infoH := ih.NewInfoHandler(
-		logger,
 		docs.SwaggerInfo.Version,
 		svcs.mediaConverter,
 		cfg.Auth.OIDC.Enabled,
@@ -279,13 +276,14 @@ func buildHandlers(cfg *config.Config, repo repository.Repository, storageProvid
 			MaxSyncUploadSizeBytes: int64(serverCfg.MaxSyncUploadSize),
 			MediaConverter:         svcs.mediaConverter,
 			Processor:              svcs.processor,
+			Imports:                svcs.importManager,
 		},
 		DatabaseHandler: dbh.DatabaseHandler{
 			Logger:      logger,
 			Auditor:     svcs.auditLogger,
 			Repo:        repo,
 			Storage:     storageProvider,
-			HouseKeeper: *svcs.houseKeeper,
+			HouseKeeper: svcs.houseKeeper,
 		},
 		UserHandler: uh.UserHandler{
 			Logger:  logger,
@@ -372,41 +370,6 @@ func handleInitialMigration(ctx context.Context, repo repository.Repository, log
 	}
 
 	return nil
-}
-
-// initRepository sets up the database connection based on the configuration.
-func initRepository(dbCfg config.DatabaseConfig) (repository.Repository, error) {
-	switch dbCfg.Driver {
-	case "sqlite":
-		return sqlite.NewRepository(dbCfg.Source)
-	case "postgres":
-		return postgres.NewRepository(dbCfg.Source, dbCfg.MaxOpenConns, dbCfg.MaxIdleConns)
-	default:
-		return nil, fmt.Errorf("unsupported database driver, must be `sqlite` or `postgres`: %s", dbCfg.Driver)
-	}
-}
-
-// initStorage sets up the file storage provider based on the configuration.
-func initStorage(storageCfg config.StorageConfig) (storage.StorageProvider, error) {
-	switch storageCfg.Type {
-	case "local":
-		return &localstorage.LocalStorage{RootPath: storageCfg.Local.Root}, nil
-	case "s3":
-		s3prov, err := s3storage.NewS3StorageProvider(s3storage.Config{
-			Endpoint:  storageCfg.S3.Endpoint,
-			Region:    storageCfg.S3.Region,
-			Bucket:    storageCfg.S3.Bucket,
-			AccessKey: storageCfg.S3.AccessKey,
-			SecretKey: storageCfg.S3.SecretKey,
-			UseSSL:    storageCfg.S3.UseSSL,
-		})
-		if err != nil {
-			return nil, err
-		}
-		return s3prov, nil
-	default:
-		return nil, fmt.Errorf("unsupported storage type, must be `local` or `s3`: %s", storageCfg.Type)
-	}
 }
 
 // processInitConfig checks for the init_config flag and applies the one-time configuration if present.

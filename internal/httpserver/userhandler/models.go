@@ -38,7 +38,7 @@ type UpdateUserPayload struct {
 
 // UserResponse is the JSON structure returned by the /api/me and /api/users endpoints.
 type UserResponse struct {
-	ID          repository.ULID         `json:"id"`
+	ID          repository.ULID         `json:"id" swaggertype:"string"`
 	Username    string                  `json:"username"`
 	IsAdmin     bool                    `json:"is_admin"`
 	AccountType repository.AccountType `json:"account_type"`

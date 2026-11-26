@@ -2,11 +2,58 @@ package databasehandler
 
 import (
 	"fmt"
+	"mediahub_oss/internal/httpserver/utils"
 	"mediahub_oss/internal/repository"
 	"mediahub_oss/internal/shared"
+	"mediahub_oss/internal/shared/ulid"
+	"net/http"
+	"strconv"
 	"strings"
 	"time"
 )
+
+func parseFieldIDParam(w http.ResponseWriter, r *http.Request) (int, bool) {
+	fieldIDStr := r.PathValue("field_id")
+	fieldID, err := strconv.Atoi(fieldIDStr)
+	if err != nil {
+		utils.RespondWithError(w, http.StatusBadRequest, "Invalid field_id path parameter")
+		return 0, false
+	}
+	return fieldID, true
+}
+
+func mapCustomFieldToDTO(cf repository.CustomFieldDef) DatabaseCustomField {
+	idVal := cf.ID
+	isIndexedVal := cf.IsIndexed
+	return DatabaseCustomField{
+		ID:        &idVal,
+		Name:      cf.Name,
+		Type:      cf.Type.String(),
+		IsIndexed: &isIndexedVal,
+	}
+}
+
+func mapCustomFieldsToDTO(fields []repository.CustomFieldDef) []DatabaseCustomField {
+	res := make([]DatabaseCustomField, len(fields))
+	for i, cf := range fields {
+		res[i] = mapCustomFieldToDTO(cf)
+	}
+	return res
+}
+
+func parseDatabaseIDParam(w http.ResponseWriter, r *http.Request) (repository.ULID, bool) {
+	id := r.PathValue("database_id")
+	if id == "" {
+		utils.RespondWithError(w, http.StatusBadRequest, "Missing required path parameter: database_id")
+		return repository.ULID{}, false
+	}
+	dbID, err := ulid.Parse(id)
+	if err != nil {
+		utils.RespondWithError(w, http.StatusBadRequest, "Invalid database_id path parameter")
+		return repository.ULID{}, false
+	}
+	return dbID, true
+}
 
 // toModel parses the string-based API payload into the Repository model
 func (dbc DatabaseCreatePayload) toModel() (repository.Database, error) {
@@ -21,6 +68,11 @@ func (dbc DatabaseCreatePayload) toModel() (repository.Database, error) {
 		customFields[i] = modelCF
 	}
 
+	hk, err := dbc.Housekeeping.toModel()
+	if err != nil {
+		return repository.Database{}, err
+	}
+
 	// create return object (ID will be generated automatically by the repository)
 	return repository.Database{
 		Name:        dbc.Name,
@@ -30,7 +82,7 @@ func (dbc DatabaseCreatePayload) toModel() (repository.Database, error) {
 			CreatePreview:  dbc.Config.CreatePreview,
 			AutoConversion: dbc.Config.AutoConversion,
 		},
-		Housekeeping: dbc.Housekeeping.toModel(),
+		Housekeeping: hk,
 		CustomFields: customFields,
 		Stats: repository.DatabaseStats{
 			EntryCount:          0,
@@ -92,14 +144,17 @@ func (upd DatabaseUpdatePayload) getConfig() repository.DatabaseConfig {
 }
 
 // Extract the housekeeping part from the payload and return the repository type
-func (upd DatabaseUpdatePayload) getHK(lastHKRun time.Time) repository.DatabaseHK {
-	hk := upd.Housekeeping.toModel()
+func (upd DatabaseUpdatePayload) getHK(lastHKRun time.Time) (repository.DatabaseHK, error) {
+	hk, err := upd.Housekeeping.toModel()
+	if err != nil {
+		return repository.DatabaseHK{}, err
+	}
 	hk.LastHkRun = lastHKRun
-	return hk
+	return hk, nil
 }
 
 // toModel parses the string-based API payload into the uint64-based Repository model, applying defaults.
-func (hk HousekeepingPayload) toModel() repository.DatabaseHK {
+func (hk HousekeepingPayload) toModel() (repository.DatabaseHK, error) {
 	var dbHk repository.DatabaseHK
 
 	// Default: "1h"
@@ -107,46 +162,38 @@ func (hk HousekeepingPayload) toModel() repository.DatabaseHK {
 	if intervalStr == "" {
 		intervalStr = "1h"
 	}
-	if dur, err := shared.ParseDuration(intervalStr); err == nil {
-		dbHk.Interval = dur
+	dur, err := shared.ParseDuration(intervalStr)
+	if err != nil {
+		return repository.DatabaseHK{}, fmt.Errorf("invalid housekeeping.interval: %w", err)
 	}
+	dbHk.Interval = dur
 
 	// Default: "100G"
 	diskSpaceStr := hk.DiskSpace
 	if diskSpaceStr == "" {
 		diskSpaceStr = "100G"
 	}
-	if size, err := shared.ParseSize(diskSpaceStr); err == nil {
-		dbHk.DiskSpace = size
+	size, err := shared.ParseSize(diskSpaceStr)
+	if err != nil {
+		return repository.DatabaseHK{}, fmt.Errorf("invalid housekeeping.disk_space: %w", err)
 	}
+	dbHk.DiskSpace = size
 
 	// Default: "0"
 	maxAgeStr := hk.MaxAge
 	if maxAgeStr == "" {
 		maxAgeStr = "0"
 	}
-	if age, err := shared.ParseDuration(maxAgeStr); err == nil {
-		dbHk.MaxAge = age
+	age, err := shared.ParseDuration(maxAgeStr)
+	if err != nil {
+		return repository.DatabaseHK{}, fmt.Errorf("invalid housekeeping.max_age: %w", err)
 	}
+	dbHk.MaxAge = age
 
-	return dbHk
+	return dbHk, nil
 }
 
 func mapToDatabaseResponse(db repository.Database) DatabaseResponse {
-
-	// convert from repository model to package internal model
-	customFields := make([]DatabaseCustomField, len(db.CustomFields))
-	for i, cf := range db.CustomFields {
-		idVal := cf.ID
-		isIndexedVal := cf.IsIndexed
-		customFields[i] = DatabaseCustomField{
-			ID:        &idVal,
-			Name:      cf.Name,
-			Type:      cf.Type.String(),
-			IsIndexed: &isIndexedVal,
-		}
-	}
-
 	// create return object
 	return DatabaseResponse{
 		ID:          db.ID.String(),
@@ -162,7 +209,7 @@ func mapToDatabaseResponse(db repository.Database) DatabaseResponse {
 			DiskSpace: shared.BytesToString(db.Housekeeping.DiskSpace),
 			MaxAge:    shared.DurationToString(db.Housekeeping.MaxAge),
 		},
-		CustomFields: customFields,
+		CustomFields: mapCustomFieldsToDTO(db.CustomFields),
 		Stats: DatabaseResponseStats{
 			EntryCount:          db.Stats.EntryCount,
 			TotalDiskSpaceBytes: db.Stats.TotalDiskSpaceBytes,

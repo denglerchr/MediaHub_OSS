@@ -5,13 +5,8 @@ import (
 	"fmt"
 	"log/slog"
 
-	"mediahub_oss/internal/cli/config"
 	"mediahub_oss/internal/repository"
-	"mediahub_oss/internal/repository/postgres"
-	"mediahub_oss/internal/repository/sqlite"
 	"mediahub_oss/internal/storage"
-	"mediahub_oss/internal/storage/localstorage"
-	"mediahub_oss/internal/storage/s3storage"
 )
 
 // RecoveryService handles maintenance tasks to fix data inconsistencies.
@@ -22,65 +17,14 @@ type RecoveryService struct {
 	dryRun  bool
 }
 
-// NewRecoveryService initializes the necessary repository and storage providers based on the config.
-func NewRecoveryService(conf *config.Config, logger *slog.Logger, dryRun bool) (*RecoveryService, error) {
-	var repo repository.Repository
-	var err error
-
-	// 1. Initialize the Repository based on the config driver
-	switch conf.Database.Driver {
-	case "sqlite":
-		repo, err = sqlite.NewRepository(conf.Database.Source)
-		if err != nil {
-			return nil, fmt.Errorf("failed to initialize sqlite repository: %w", err)
-		}
-	case "postgres":
-		repo, err = postgres.NewRepository(conf.Database.Source, conf.Database.MaxOpenConns, conf.Database.MaxIdleConns)
-		if err != nil {
-			return nil, fmt.Errorf("failed to initialize postgres repository: %w", err)
-		}
-	default:
-		return nil, fmt.Errorf("unsupported database driver: %s", conf.Database.Driver)
-	}
-
-	// 2. Initialize the Storage Provider based on the config type
-	var storageProvider storage.StorageProvider
-	switch conf.Storage.Type {
-	case "local":
-		storageProvider = &localstorage.LocalStorage{
-			RootPath: conf.Storage.Local.Root,
-		}
-	case "s3":
-		s3prov, err := s3storage.NewS3StorageProvider(s3storage.Config{
-			Endpoint:  conf.Storage.S3.Endpoint,
-			Region:    conf.Storage.S3.Region,
-			Bucket:    conf.Storage.S3.Bucket,
-			AccessKey: conf.Storage.S3.AccessKey,
-			SecretKey: conf.Storage.S3.SecretKey,
-			UseSSL:    conf.Storage.S3.UseSSL,
-		})
-		if err != nil {
-			return nil, fmt.Errorf("failed to initialize s3 storage: %w", err)
-		}
-		storageProvider = s3prov
-	default:
-		return nil, fmt.Errorf("unsupported storage type: %s", conf.Storage.Type)
-	}
-
+// NewRecoveryService constructs a RecoveryService with pre-initialized dependencies.
+func NewRecoveryService(repo repository.Repository, storage storage.StorageProvider, logger *slog.Logger, dryRun bool) *RecoveryService {
 	return &RecoveryService{
 		repo:    repo,
-		storage: storageProvider,
+		storage: storage,
 		logger:  logger,
 		dryRun:  dryRun,
-	}, nil
-}
-
-// Close cleans up underlying connections, like the database pool.
-func (s *RecoveryService) Close() error {
-	if s.repo != nil {
-		return s.repo.Close()
 	}
-	return nil
 }
 
 // GetMigrationVersion retrieves the current database schema version.
@@ -89,4 +33,21 @@ func (s *RecoveryService) GetMigrationVersion(ctx context.Context) (int, error) 
 		return 0, fmt.Errorf("repository is not initialized")
 	}
 	return s.repo.GetMigrationVersion(ctx)
+}
+
+const recoveryDeleteBatchSize = 500
+
+func chunkIDs(ids []int64, size int) [][]int64 {
+	if len(ids) == 0 {
+		return nil
+	}
+	if size <= 0 {
+		size = recoveryDeleteBatchSize
+	}
+	chunks := make([][]int64, 0, (len(ids)+size-1)/size)
+	for start := 0; start < len(ids); start += size {
+		end := min(start+size, len(ids))
+		chunks = append(chunks, ids[start:end])
+	}
+	return chunks
 }

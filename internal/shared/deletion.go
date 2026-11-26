@@ -5,8 +5,19 @@ import (
 	"errors"
 	"fmt"
 	"mediahub_oss/internal/repository"
+	"mediahub_oss/internal/shared/customerrors"
 	"mediahub_oss/internal/storage"
+	"time"
 )
+
+const deletionCleanupTimeout = 15 * time.Second
+
+func detachedCleanupContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithTimeout(context.WithoutCancel(ctx), deletionCleanupTimeout)
+}
 
 // DeleteSafe safely deletes a single entry from the DB and storage using a 2-Phase approach.
 // Returns the entry data of the deleted file and any error if encountered.
@@ -20,22 +31,25 @@ func DeleteSafe(ctx context.Context, repo repository.Repository, storage storage
 
 	// PHASE 2: STORAGE DELETION
 	// Attempt to delete the main file from storage
-	err := storage.Delete(ctx, dbID.String(), id)
+	err := storage.Delete(ctx, dbID, id)
+
+	cleanupCtx, cancel := detachedCleanupContext(ctx)
+	defer cancel()
 
 	if err != nil {
 		// PHASE 3: ROLLBACK
 		// Storage deletion failed, revert stuck file to Error status so admins can investigate
-		_ = repo.UpdateEntriesStatus(ctx, dbID, []int64{id}, repository.EntryStatusError)
+		_ = repo.UpdateEntriesStatus(cleanupCtx, dbID, []int64{id}, repository.EntryStatusError)
 
 		return repository.DeletedEntryMeta{}, err
 	}
 
 	// We only try to delete the preview if the main file deletion succeeded
-	_ = storage.DeletePreview(ctx, dbID.String(), id)
+	_ = storage.DeletePreview(cleanupCtx, dbID, id)
 
 	// PHASE 3: COMMIT
 	// Hard delete the record that was successfully wiped from disk
-	deletedMeta, deleteErr := repo.DeleteEntry(ctx, dbID, id)
+	deletedMeta, deleteErr := repo.DeleteEntry(cleanupCtx, dbID, id)
 	if deleteErr != nil {
 		return repository.DeletedEntryMeta{}, deleteErr
 	}
@@ -57,11 +71,14 @@ func DeleteMultipleSafe(ctx context.Context, repo repository.Repository, storage
 	}
 
 	// PHASE 2: STORAGE DELETION
-	delResult, err := storage.DeleteMultiple(ctx, dbID.String(), ids)
+	delResult, err := storage.DeleteMultiple(ctx, dbID, ids)
+
+	cleanupCtx, cancel := detachedCleanupContext(ctx)
+	defer cancel()
 
 	// We only try to delete previews for the files where the main file deletion succeeded
 	if len(delResult.Success) > 0 {
-		_, _ = storage.DeleteMultiplePreviews(ctx, dbID.String(), delResult.Success)
+		_, _ = storage.DeleteMultiplePreviews(cleanupCtx, dbID, delResult.Success)
 	}
 
 	// PHASE 3: COMMIT OR ROLLBACK
@@ -70,13 +87,13 @@ func DeleteMultipleSafe(ctx context.Context, repo repository.Repository, storage
 
 	// Commit: Hard delete the records that were successfully wiped from disk
 	if len(delResult.Success) > 0 {
-		deletedMeta, newerr = repo.DeleteEntries(ctx, dbID, delResult.Success)
+		deletedMeta, newerr = repo.DeleteEntries(cleanupCtx, dbID, delResult.Success)
 		err = errors.Join(err, newerr)
 	}
 
 	// Rollback: Revert stuck files to Error status so admins can investigate
 	if len(delResult.Failed) > 0 {
-		_ = repo.UpdateEntriesStatus(ctx, dbID, delResult.Failed, repository.EntryStatusError)
+		_ = repo.UpdateEntriesStatus(cleanupCtx, dbID, delResult.Failed, repository.EntryStatusError)
 	}
 
 	return deletedMeta, err
@@ -87,7 +104,13 @@ func DeleteMultipleSafe(ctx context.Context, repo repository.Repository, storage
 // the record first (or despite a failed wipe) would leave orphaned files that no
 // reconciliation tool could ever rediscover.
 func DeleteDatabaseSafe(ctx context.Context, repo repository.Repository, storage storage.StorageProvider, dbID repository.ULID) error {
-	if storageErr := storage.DeleteDatabase(ctx, dbID.String()); storageErr != nil {
+	if dbID.IsZero() {
+		return fmt.Errorf("%w: database id is required", customerrors.ErrValidation)
+	}
+	if _, err := repo.GetDatabase(ctx, dbID); err != nil {
+		return err
+	}
+	if storageErr := storage.DeleteDatabase(ctx, dbID); storageErr != nil {
 		return fmt.Errorf("storage deletion failed, database record kept for retry: %w", storageErr)
 	}
 	return repo.DeleteDatabase(ctx, dbID)

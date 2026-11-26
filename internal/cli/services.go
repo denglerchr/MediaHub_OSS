@@ -7,6 +7,7 @@ import (
 	"mediahub_oss/internal/cli/config"
 	"mediahub_oss/internal/housekeeping"
 	"mediahub_oss/internal/httpserver/auth"
+	eh "mediahub_oss/internal/httpserver/entryhandler"
 	"mediahub_oss/internal/logging/audit"
 	"mediahub_oss/internal/media/ffmpeg"
 	"mediahub_oss/internal/processing"
@@ -23,6 +24,7 @@ type backgroundServices struct {
 	auditLogger    audit.AuditLogger
 	authMiddleware *auth.AuthMiddleware
 	processor      *processing.Processor
+	importManager  *eh.ImportManager
 }
 
 // initServices validates configuration, initializes dependencies, and starts background workers.
@@ -43,7 +45,7 @@ func initServices(ctx context.Context, cfg *config.Config, repo repository.Repos
 	}
 
 	hk := housekeeping.NewHouseKeeper(repo, storageProvider, logger, auditRetention)
-	go hk.StartScheduler(ctx)
+	hk.StartScheduler(ctx)
 
 	auditLogger := audit.NewAuditLogger(cfg.Logging.Audit.Enabled, cfg.Logging.Audit.Type, logger, repo)
 	authMiddleware := auth.NewAuthMiddleware(repo, cfg.Auth.JWT.Secret)
@@ -51,23 +53,36 @@ func initServices(ctx context.Context, cfg *config.Config, repo repository.Repos
 	proc := processing.NewProcessor(repo, storageProvider, converter, serverCfg.NFfmpegAsync, serverCfg.NFfmpegTotal, logger)
 	go proc.StartQueueMonitor(ctx)
 
+	importManager := eh.NewImportManager(2)
+
 	return &backgroundServices{
 		houseKeeper:    hk,
 		mediaConverter: converter,
 		auditLogger:    auditLogger,
 		authMiddleware: authMiddleware,
 		processor:      proc,
+		importManager:  importManager,
 	}, nil
 }
 
-// closeServices gracefully shuts down running background services.
+// closeServices gracefully shuts down running background services in dependency order.
 func (s *backgroundServices) closeServices() {
 	if s == nil {
 		return
 	}
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	if s.importManager != nil {
+		_ = s.importManager.Shutdown(shutdownCtx)
+	}
+	if s.processor != nil {
+		_ = s.processor.Shutdown(shutdownCtx)
+	}
+	if s.houseKeeper != nil {
+		_ = s.houseKeeper.Shutdown(shutdownCtx)
+	}
 	if s.mediaConverter != nil {
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
 		_ = s.mediaConverter.Shutdown(shutdownCtx)
 	}
 	if s.authMiddleware != nil {

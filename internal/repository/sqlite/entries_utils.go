@@ -16,6 +16,7 @@ type colKind int
 const (
 	colKindStandardMedia colKind = iota
 	colKindCustomScalar
+	colKindCustomBool
 	colKindCustomCoordLat
 	colKindCustomCoordLng
 )
@@ -47,14 +48,18 @@ func newEntryScanner(rows *sql.Rows, customFields []repo.CustomFieldDef) (entryS
 	}
 
 	scalarMap := make(map[string]string)
+	boolMap := make(map[string]string)
 	coordLatMap := make(map[string]string)
 	coordLngMap := make(map[string]string)
 
 	for _, cf := range customFields {
-		if cf.Type.IsCoordinate() {
+		switch cf.Type {
+		case repo.CustomFieldTypeCoordinate:
 			coordLatMap[fmt.Sprintf("%s%d_lat", customFieldsPrefix, cf.ID)] = cf.Name
 			coordLngMap[fmt.Sprintf("%s%d_lng", customFieldsPrefix, cf.ID)] = cf.Name
-		} else {
+		case repo.CustomFieldTypeBoolean:
+			boolMap[fmt.Sprintf("%s%d", customFieldsPrefix, cf.ID)] = cf.Name
+		default:
 			scalarMap[fmt.Sprintf("%s%d", customFieldsPrefix, cf.ID)] = cf.Name
 		}
 	}
@@ -91,6 +96,9 @@ func newEntryScanner(rows *sql.Rows, customFields []repo.CustomFieldDef) (entryS
 			s.colKinds[i] = colKindCustomCoordLng
 			s.cleanNames[i] = name
 			s.coordIdx[i] = getCoordIdx(name)
+		} else if name, ok := boolMap[colName]; ok {
+			s.colKinds[i] = colKindCustomBool
+			s.cleanNames[i] = name
 		} else if name, ok := scalarMap[colName]; ok {
 			s.colKinds[i] = colKindCustomScalar
 			s.cleanNames[i] = name
@@ -137,6 +145,8 @@ func (s entryScanner) scan(rows *sql.Rows) (repo.Entry, error) {
 			idx := s.coordIdx[i]
 			s.coords[idx].lng = asFloat64(val)
 			s.coords[idx].hasLng = true
+		case colKindCustomBool:
+			entry.CustomFields[s.cleanNames[i]] = asBool(val)
 		case colKindCustomScalar:
 			if b, ok := val.([]byte); ok {
 				val = string(b)
@@ -250,6 +260,48 @@ func asInt64(val any) int64 {
 	return 0
 }
 
+func asBool(val any) bool {
+	switch v := val.(type) {
+	case bool:
+		return v
+	case int64:
+		return v != 0
+	case int:
+		return v != 0
+	case int32:
+		return v != 0
+	case int16:
+		return v != 0
+	case int8:
+		return v != 0
+	case uint64:
+		return v != 0
+	case uint:
+		return v != 0
+	case float64:
+		return v != 0
+	case float32:
+		return v != 0
+	case []byte:
+		return parseBoolString(string(v))
+	case string:
+		return parseBoolString(v)
+	default:
+		return false
+	}
+}
+
+func parseBoolString(s string) bool {
+	trimmed := strings.TrimSpace(s)
+	if b, err := strconv.ParseBool(trimmed); err == nil {
+		return b
+	}
+	if n, err := strconv.ParseInt(trimmed, 10, 64); err == nil {
+		return n != 0
+	}
+	return false
+}
+
 // Helper to safely extract a string from the database interface
 func asString(val any) string {
 	switch v := val.(type) {
@@ -270,6 +322,9 @@ func (r *SQLiteRepository) scanEntryRow(rows *sql.Rows, customFields []repo.Cust
 	}
 
 	if !rows.Next() {
+		if err := rows.Err(); err != nil {
+			return repo.Entry{}, err
+		}
 		return repo.Entry{}, customerrors.ErrNotFound
 	}
 
@@ -299,37 +354,15 @@ func (r *SQLiteRepository) scanEntryRows(rows *sql.Rows, customFields []repo.Cus
 	return entries, nil
 }
 
-// validateAndFormatSearchField prevents SQL injection by ensuring a field name exists.
-func (r *SQLiteRepository) validateAndFormatSearchField(field string, customFields []repo.CustomFieldDef) (string, error) {
-	// 1. Whitelist Standard Fields
-	standardFields := map[string]bool{
-		"id": true, "timestamp": true, "created_at": true, "updated_at": true,
-		"filesize": true, "preview_filesize": true, "filename": true, "status": true, "mime_type": true,
-	}
-	if standardFields[field] {
-		return fmt.Sprintf(`"%s"`, field), nil
-	}
-
-	// 2. Whitelist Known Media Fields (dynamically from the repository)
+func (r *SQLiteRepository) isAllowedMediaField(field string) bool {
 	for _, fields := range r.MediaFields {
 		for _, mediaField := range fields {
 			if mediaField.Name == field {
-				return fmt.Sprintf(`"%s"`, field), nil
+				return true
 			}
 		}
 	}
-
-	// 3. Whitelist dynamically generated Custom Fields
-	for _, cf := range customFields {
-		if cf.Name == field {
-			if cf.Type.IsCoordinate() {
-				return "", fmt.Errorf("field '%s' is a coordinate field and cannot be used with scalar operators", field)
-			}
-			return fmt.Sprintf(`"%s%d"`, customFieldsPrefix, cf.ID), nil
-		}
-	}
-
-	return "", fmt.Errorf("field '%s' is not allowed or does not exist", field)
+	return false
 }
 
 // mapCustomFieldsToSQLiteColumns maps entry custom fields into the target SQL column-data map.
@@ -364,12 +397,4 @@ func mapCustomFieldsToSQLiteColumns(
 		}
 	}
 	return nil
-}
-
-// isValidOperator checks if the requested SQL operator is whitelisted.
-func isValidOperator(op string) bool {
-	valid := map[string]bool{
-		"=": true, "!=": true, ">": true, ">=": true, "<": true, "<=": true, "LIKE": true, "ILIKE": true,
-	}
-	return valid[strings.ToUpper(op)]
 }

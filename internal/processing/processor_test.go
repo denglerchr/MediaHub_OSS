@@ -13,14 +13,11 @@ import (
 
 	"mediahub_oss/internal/media"
 	repo "mediahub_oss/internal/repository"
-	"mediahub_oss/internal/repository/migrations"
-	_ "mediahub_oss/internal/repository/migrations/sqlite"
 	"mediahub_oss/internal/repository/sqlite"
 	"mediahub_oss/internal/shared/customerrors"
+	"mediahub_oss/internal/shared/ulid"
 	"mediahub_oss/internal/storage"
 	"mediahub_oss/internal/storage/localstorage"
-
-	"github.com/pressly/goose/v3"
 )
 
 // ---------------------------------------------------------------------------
@@ -120,7 +117,7 @@ type failingPreviewStorage struct {
 	*localstorage.LocalStorage
 }
 
-func (f *failingPreviewStorage) WritePreview(ctx context.Context, dbID string, entryID int64, data io.Reader) (int64, error) {
+func (f *failingPreviewStorage) WritePreview(ctx context.Context, dbID ulid.ULID, entryID int64, data io.Reader) (int64, error) {
 	return 0, errors.New("simulated storage failure on preview write")
 }
 
@@ -145,7 +142,7 @@ type failingWriteStorage struct {
 	*localstorage.LocalStorage
 }
 
-func (f *failingWriteStorage) Write(ctx context.Context, dbID string, entryID int64, data io.Reader) (int64, error) {
+func (f *failingWriteStorage) Write(ctx context.Context, dbID ulid.ULID, entryID int64, data io.Reader) (int64, error) {
 	return 0, errors.New("simulated storage write failure")
 }
 
@@ -154,7 +151,7 @@ type failingReadStorage struct {
 	failRead bool
 }
 
-func (f *failingReadStorage) Read(ctx context.Context, dbID string, entryID int64, offset int64, length int64) (io.ReadCloser, error) {
+func (f *failingReadStorage) Read(ctx context.Context, dbID ulid.ULID, entryID int64, offset int64, length int64) (io.ReadCloser, error) {
 	if f.failRead {
 		return nil, errors.New("simulated transient storage read failure")
 	}
@@ -188,11 +185,7 @@ func setupTestProcessor(t *testing.T, conv media.MediaConverter, customStore sto
 		t.Fatalf("failed to create repo: %v", err)
 	}
 
-	if err := goose.SetDialect("sqlite3"); err != nil {
-		t.Fatalf("failed to set goose dialect: %v", err)
-	}
-	goose.SetBaseFS(migrations.EmbedFS)
-	if err := goose.Up(r.DB, "sqlite"); err != nil {
+	if err := r.MigrateUp(context.Background()); err != nil {
 		t.Fatalf("failed to run migrations: %v", err)
 	}
 
@@ -390,7 +383,7 @@ func TestProcessIncomingEntry_SmallFileSyncSuccess(t *testing.T) {
 	}
 
 	// The stored file must contain the (mock-)converted bytes.
-	stream, err := proc.Storage.Read(context.Background(), db.ID.String(), entry.ID, 0, -1)
+	stream, err := proc.Storage.Read(context.Background(), db.ID, entry.ID, 0, -1)
 	if err != nil {
 		t.Fatalf("failed to read stored file: %v", err)
 	}
@@ -520,7 +513,7 @@ func TestProcessIncomingEntry_QueuesWhenSlotsExhausted(t *testing.T) {
 	}
 
 	// The original file must be stored so a queue worker can pick it up.
-	if _, err := proc.Storage.Stat(context.Background(), db.ID.String(), entry.ID); err != nil {
+	if _, err := proc.Storage.Stat(context.Background(), db.ID, entry.ID); err != nil {
 		t.Errorf("expected queued file in storage, got err: %v", err)
 	}
 }
@@ -758,11 +751,7 @@ func TestGenerateAndStorePreview_StorageErrorDoesNotHang(t *testing.T) {
 	}
 	defer r.Close()
 
-	if err := goose.SetDialect("sqlite3"); err != nil {
-		t.Fatalf("failed to set goose dialect: %v", err)
-	}
-	goose.SetBaseFS(migrations.EmbedFS)
-	if err := goose.Up(r.DB, "sqlite"); err != nil {
+	if err := r.MigrateUp(context.Background()); err != nil {
 		t.Fatalf("failed to run migrations: %v", err)
 	}
 
@@ -780,7 +769,7 @@ func TestGenerateAndStorePreview_StorageErrorDoesNotHang(t *testing.T) {
 
 	doneChan := make(chan error, 1)
 	go func() {
-		_, err := proc.generateAndStorePreview(context.Background(), db, 123, "image/jpeg",
+		_, err := proc.generateAndStorePreview(context.Background(), db, 123,
 			func(ctx context.Context, w io.Writer) error {
 				return conv.CreatePreviewFromStream(ctx, strings.NewReader("sample image data"), w, "image/jpeg")
 			})
@@ -804,7 +793,7 @@ func TestGenerateAndStorePreview_PartialPreviewIsDiscardedOnGeneratorError(t *te
 
 	const entryID = int64(42)
 
-	_, err := proc.generateAndStorePreview(context.Background(), db, entryID, "image/jpeg",
+	_, err := proc.generateAndStorePreview(context.Background(), db, entryID,
 		func(ctx context.Context, w io.Writer) error {
 			return conv.CreatePreviewFromStream(ctx, strings.NewReader("image data"), w, "image/jpeg")
 		})
@@ -814,7 +803,7 @@ func TestGenerateAndStorePreview_PartialPreviewIsDiscardedOnGeneratorError(t *te
 
 	// The partially generated preview must not be left behind in storage:
 	// otherwise it would be served to clients despite PreviewSize == 0.
-	if _, err := proc.Storage.StatPreview(context.Background(), db.ID.String(), entryID); !errors.Is(err, customerrors.ErrNotFound) {
+	if _, err := proc.Storage.StatPreview(context.Background(), db.ID, entryID); !errors.Is(err, customerrors.ErrNotFound) {
 		t.Fatalf("expected no preview file in storage after generator failure, got err: %v", err)
 	}
 }
@@ -903,7 +892,7 @@ func TestFinalizeEntryFile_FailurePreservesStorage(t *testing.T) {
 		t.Fatalf("failed to queue file: %v", err)
 	}
 
-	if _, err := proc.Storage.Stat(context.Background(), db.ID.String(), queuedEntry.ID); err != nil {
+	if _, err := proc.Storage.Stat(context.Background(), db.ID, queuedEntry.ID); err != nil {
 		t.Fatalf("expected queued file in storage before worker failure, got err: %v", err)
 	}
 
@@ -917,7 +906,7 @@ func TestFinalizeEntryFile_FailurePreservesStorage(t *testing.T) {
 	if updated.Status != repo.EntryStatusError {
 		t.Fatalf("expected EntryStatusError, got %v", updated.Status)
 	}
-	if _, err := proc.Storage.Stat(context.Background(), db.ID.String(), queuedEntry.ID); err != nil {
+	if _, err := proc.Storage.Stat(context.Background(), db.ID, queuedEntry.ID); err != nil {
 		t.Fatalf("expected raw file in storage to be preserved after worker conversion failure, got err: %v", err)
 	}
 	if updated.Size == 0 {
@@ -970,7 +959,7 @@ func TestFinalizeEntryFile_FinalUpdateFailurePreservesStorage(t *testing.T) {
 	if updated.Status != repo.EntryStatusError {
 		t.Fatalf("expected EntryStatusError, got %v", updated.Status)
 	}
-	if _, err := proc.Storage.Stat(context.Background(), db.ID.String(), queuedEntry.ID); err != nil {
+	if _, err := proc.Storage.Stat(context.Background(), db.ID, queuedEntry.ID); err != nil {
 		t.Fatalf("expected stored file to be preserved after final update failure, got err: %v", err)
 	}
 	if updated.Size == 0 {
@@ -1020,7 +1009,7 @@ func TestRunClaimedEntry_TransientReadErrorRequeues(t *testing.T) {
 	}
 
 	store.failRead = false
-	if _, err := proc.Storage.Stat(context.Background(), db.ID.String(), queuedEntry.ID); err != nil {
+	if _, err := proc.Storage.Stat(context.Background(), db.ID, queuedEntry.ID); err != nil {
 		t.Fatalf("expected queued file to be preserved in storage, got err: %v", err)
 	}
 
@@ -1250,8 +1239,8 @@ func TestStartQueueMonitor_ContextCancel(t *testing.T) {
 
 func TestRetryRegistry_ScopedByDatabaseAndEntryID(t *testing.T) {
 	rr := newRetryRegistry()
-	db1 := repo.ULID("01ARZ3NDEKTSV4RRFFQ69G5FAV")
-	db2 := repo.ULID("01ARZ3NDEKTSV4RRFFQ69G5FAW")
+	db1 := ulid.MustParse("01ARZ3NDEKTSV4RRFFQ69G5FAV")
+	db2 := ulid.MustParse("01ARZ3NDEKTSV4RRFFQ69G5FAW")
 
 	rr.noteClaimFailure(db1, 1)
 
@@ -1442,7 +1431,7 @@ func TestProcessIncomingEntry_SyncPassthroughWithPreviewHoldsSlotAndStreamsFromS
 	}
 
 	// Verify the preview content was streamed from the stored file.
-	prevStream, err := proc.Storage.ReadPreview(context.Background(), previewDB.ID.String(), entry1.ID)
+	prevStream, err := proc.Storage.ReadPreview(context.Background(), previewDB.ID, entry1.ID)
 	if err != nil {
 		t.Fatalf("failed to read preview from storage: %v", err)
 	}
@@ -1606,10 +1595,10 @@ func TestFinalizeEntryFile_StorageCleanupOnErrNotFound(t *testing.T) {
 	}
 
 	// Verify that neither the main file nor preview file are orphaned in storage.
-	if _, statErr := proc.Storage.Stat(ctx, db.ID.String(), entry.ID); !errors.Is(statErr, customerrors.ErrNotFound) {
+	if _, statErr := proc.Storage.Stat(ctx, db.ID, entry.ID); !errors.Is(statErr, customerrors.ErrNotFound) {
 		t.Errorf("expected main file to be deleted from storage on ErrNotFound, got err: %v", statErr)
 	}
-	if _, statErr := proc.Storage.StatPreview(ctx, db.ID.String(), entry.ID); !errors.Is(statErr, customerrors.ErrNotFound) {
+	if _, statErr := proc.Storage.StatPreview(ctx, db.ID, entry.ID); !errors.Is(statErr, customerrors.ErrNotFound) {
 		t.Errorf("expected preview file to be deleted from storage on ErrNotFound, got err: %v", statErr)
 	}
 }
@@ -1629,7 +1618,7 @@ func TestGeneratePreviewInBackground_StorageCleanupOnErrNotFound(t *testing.T) {
 	}
 
 	// Write main file to storage so preview generation can stream from it.
-	if _, err := proc.Storage.Write(ctx, db.ID.String(), entry.ID, strings.NewReader("dummy image data")); err != nil {
+	if _, err := proc.Storage.Write(ctx, db.ID, entry.ID, strings.NewReader("dummy image data")); err != nil {
 		t.Fatalf("failed to write main file: %v", err)
 	}
 
@@ -1644,7 +1633,7 @@ func TestGeneratePreviewInBackground_StorageCleanupOnErrNotFound(t *testing.T) {
 	proc.generatePreviewInBackground(db, entry, nil, "image/jpeg")
 
 	// Verify that the preview file was not orphaned in storage.
-	if _, statErr := proc.Storage.StatPreview(ctx, db.ID.String(), entry.ID); !errors.Is(statErr, customerrors.ErrNotFound) {
+	if _, statErr := proc.Storage.StatPreview(ctx, db.ID, entry.ID); !errors.Is(statErr, customerrors.ErrNotFound) {
 		t.Errorf("expected preview to be deleted from storage when UpdateEntry fails, got err: %v", statErr)
 	}
 }
@@ -1714,7 +1703,7 @@ func TestGeneratePreviewInBackground_PreservesConcurrentFileNameEdit(t *testing.
 		t.Fatalf("failed to create preliminary entry: %v", err)
 	}
 
-	if _, err := proc.Storage.Write(ctx, db.ID.String(), entry.ID, strings.NewReader("dummy image data")); err != nil {
+	if _, err := proc.Storage.Write(ctx, db.ID, entry.ID, strings.NewReader("dummy image data")); err != nil {
 		t.Fatalf("failed to write main file: %v", err)
 	}
 
@@ -1741,5 +1730,453 @@ func TestGeneratePreviewInBackground_PreservesConcurrentFileNameEdit(t *testing.
 	}
 	if finalEntry.Status != repo.EntryStatusReady {
 		t.Errorf("expected Status = Ready, got %v", finalEntry.Status)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Reliability fixes: retry backoff retention, Shutdown, cleanupCtx, bounded preview
+// ---------------------------------------------------------------------------
+
+func TestRetryRegistry_BackoffSurvivesPruneUntilRetentionExpires(t *testing.T) {
+	rr := newRetryRegistry()
+	dbID := ulid.MustParse("01ARZ3NDEKTSV4RRFFQ69G5FAV")
+	const entryID = int64(7)
+	key := retryEntryKey{dbID: dbID, entryID: entryID}
+
+	expectedDelays := []time.Duration{
+		30 * time.Second,
+		60 * time.Second,
+		120 * time.Second,
+		240 * time.Second,
+		300 * time.Second,
+		300 * time.Second,
+	}
+
+	for i, wantDelay := range expectedDelays {
+		if i > 0 {
+			// Simulate nextTry having just elapsed (still well within retryEntryRetention).
+			rr.mu.Lock()
+			info := rr.claims[key]
+			info.nextTry = time.Now().Add(-time.Second)
+			rr.claims[key] = info
+			rr.mu.Unlock()
+
+			rr.prune()
+
+			rr.mu.Lock()
+			kept, ok := rr.claims[key]
+			rr.mu.Unlock()
+			if !ok {
+				t.Fatalf("attempt %d: expected retry entry to survive prune within retention window", i)
+			}
+			if kept.attempts != i {
+				t.Fatalf("attempt %d: expected attempts=%d after prune, got %d", i, i, kept.attempts)
+			}
+		}
+
+		before := time.Now()
+		rr.noteClaimFailure(dbID, entryID)
+
+		rr.mu.Lock()
+		info, ok := rr.claims[key]
+		rr.mu.Unlock()
+		if !ok {
+			t.Fatalf("attempt %d: expected retry entry to be recorded", i+1)
+		}
+		if info.attempts != i+1 {
+			t.Fatalf("expected attempts=%d, got %d", i+1, info.attempts)
+		}
+		if info.nextTry.Before(before.Add(wantDelay-time.Second)) || info.nextTry.After(time.Now().Add(wantDelay+time.Second)) {
+			t.Fatalf("attempt %d: expected delay ~%v, got %v", i+1, wantDelay, time.Until(info.nextTry))
+		}
+	}
+
+	// Once nextTry + retryEntryRetention has elapsed, prune must drop the entry.
+	rr.mu.Lock()
+	info := rr.claims[key]
+	info.nextTry = time.Now().Add(-(retryEntryRetention + time.Second))
+	rr.claims[key] = info
+	rr.mu.Unlock()
+
+	rr.prune()
+
+	rr.mu.Lock()
+	_, ok := rr.claims[key]
+	rr.mu.Unlock()
+	if ok {
+		t.Fatal("expected retry entry to be pruned after retryEntryRetention elapsed")
+	}
+}
+
+type shutdownBlockingConverter struct {
+	*testMockConverter
+	started       chan struct{}
+	startOnce     sync.Once
+	unblock       chan struct{}
+	ignoreCtxDone bool
+	mu            sync.Mutex
+	convertCtxErr error
+}
+
+func (c *shutdownBlockingConverter) ConvertFile(ctx context.Context, inputPath string, outputPath string, inputMimeType string, opts media.ConversionOptions) error {
+	c.startOnce.Do(func() {
+		close(c.started)
+	})
+	if c.ignoreCtxDone {
+		<-c.unblock
+	} else {
+		select {
+		case <-ctx.Done():
+			c.mu.Lock()
+			c.convertCtxErr = ctx.Err()
+			c.mu.Unlock()
+			return ctx.Err()
+		case <-c.unblock:
+		}
+	}
+	return c.testMockConverter.ConvertFile(ctx, inputPath, outputPath, inputMimeType, opts)
+}
+
+func TestProcessor_ShutdownDrainsWorkersAndRefusesNewWork(t *testing.T) {
+	conv := &shutdownBlockingConverter{
+		testMockConverter: &testMockConverter{
+			canConvertCheck: media.ConversionCheck{CanConvert: true, NeedsConversion: true},
+		},
+		started: make(chan struct{}),
+		unblock: make(chan struct{}),
+	}
+	proc, r, db := setupTestProcessor(t, conv, nil)
+	defer r.Close()
+	db.NMaxQueued = 10
+
+	monitorDone := make(chan struct{})
+	go func() {
+		defer close(monitorDone)
+		proc.StartQueueMonitor(context.Background())
+	}()
+
+	payload := []byte("async-shutdown-payload")
+	tempPath := writeTempFile(t, "mh-shutdown-*.jpg", payload)
+	file, err := os.Open(tempPath)
+	if err != nil {
+		t.Fatalf("failed to open temp file: %v", err)
+	}
+
+	entry, synchronous, err := proc.ProcessIncomingEntry(context.Background(), db,
+		EntryRequest{Timestamp: time.Now().UnixMilli(), FileName: "photo.jpg"},
+		file, "image/jpeg", "photo.jpg")
+	if err != nil {
+		t.Fatalf("ProcessIncomingEntry failed: %v", err)
+	}
+	if synchronous {
+		t.Fatal("expected async upload")
+	}
+
+	select {
+	case <-conv.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for background worker to start")
+	}
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := proc.Shutdown(shutdownCtx); err != nil {
+		t.Fatalf("Shutdown failed: %v", err)
+	}
+
+	select {
+	case <-monitorDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected StartQueueMonitor to exit on Shutdown")
+	}
+
+	conv.mu.Lock()
+	ctxErr := conv.convertCtxErr
+	conv.mu.Unlock()
+	if !errors.Is(ctxErr, context.Canceled) {
+		t.Fatalf("expected worker context to be canceled by Shutdown, got %v", ctxErr)
+	}
+
+	updated, err := r.GetEntry(context.Background(), db.ID, entry.ID)
+	if err != nil {
+		t.Fatalf("failed to get entry after Shutdown: %v", err)
+	}
+	if updated.Status != repo.EntryStatusError {
+		t.Fatalf("expected canceled async upload to transition to EntryStatusError, got %v", updated.Status)
+	}
+
+	// New uploads and queue dispatches must be refused after Shutdown.
+	_, _, err = proc.ProcessIncomingEntry(context.Background(), db,
+		EntryRequest{Timestamp: time.Now().UnixMilli(), FileName: "after.jpg"},
+		strings.NewReader("after shutdown"), "image/jpeg", "after.jpg")
+	if !errors.Is(err, customerrors.ErrUnavailable) {
+		t.Fatalf("expected ErrUnavailable for sync upload after Shutdown, got %v", err)
+	}
+
+	afterPath := writeTempFile(t, "mh-after-shutdown-*.jpg", []byte("after"))
+	defer os.Remove(afterPath)
+	afterFile, err := os.Open(afterPath)
+	if err != nil {
+		t.Fatalf("failed to open after-shutdown temp file: %v", err)
+	}
+	defer afterFile.Close()
+	_, _, err = proc.ProcessIncomingEntry(context.Background(), db,
+		EntryRequest{Timestamp: time.Now().UnixMilli(), FileName: "after-async.jpg"},
+		afterFile, "image/jpeg", "after-async.jpg")
+	if !errors.Is(err, customerrors.ErrUnavailable) {
+		t.Fatalf("expected ErrUnavailable for async upload after Shutdown, got %v", err)
+	}
+
+	// Any pre-existing queued entry must not be dispatched after Shutdown.
+	queuedEntry, err := proc.createPreliminaryEntry(context.Background(), db,
+		EntryRequest{Timestamp: time.Now().UnixMilli(), FileName: "queued.jpg"}, passthroughPlan(), false)
+	if err != nil {
+		t.Fatalf("failed to create entry: %v", err)
+	}
+	queuedEntry, err = r.EnqueueEntry(context.Background(), db.ID, queuedEntry, db.NMaxQueued)
+	if err != nil {
+		t.Fatalf("failed to enqueue entry: %v", err)
+	}
+	proc.noteQueuedEntry()
+	proc.dispatchQueuedWorkers(context.Background())
+
+	stillQueued, err := r.GetEntry(context.Background(), db.ID, queuedEntry.ID)
+	if err != nil {
+		t.Fatalf("failed to fetch queued entry: %v", err)
+	}
+	if stillQueued.Status != repo.EntryStatusQueued {
+		t.Fatalf("expected queued entry to remain EntryStatusQueued after Shutdown, got %v", stillQueued.Status)
+	}
+}
+
+func TestProcessor_ShutdownTimeoutReturnsContextErr(t *testing.T) {
+	conv := &shutdownBlockingConverter{
+		testMockConverter: &testMockConverter{
+			canConvertCheck: media.ConversionCheck{CanConvert: true, NeedsConversion: true},
+		},
+		started:       make(chan struct{}),
+		unblock:       make(chan struct{}),
+		ignoreCtxDone: true,
+	}
+	proc, r, db := setupTestProcessor(t, conv, nil)
+	defer r.Close()
+
+	tempPath := writeTempFile(t, "mh-shutdown-timeout-*.jpg", []byte("blocking-payload"))
+	file, err := os.Open(tempPath)
+	if err != nil {
+		t.Fatalf("failed to open temp file: %v", err)
+	}
+
+	if _, _, err := proc.ProcessIncomingEntry(context.Background(), db,
+		EntryRequest{Timestamp: time.Now().UnixMilli(), FileName: "photo.jpg"},
+		file, "image/jpeg", "photo.jpg"); err != nil {
+		t.Fatalf("ProcessIncomingEntry failed: %v", err)
+	}
+
+	select {
+	case <-conv.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for worker to start")
+	}
+
+	shortCtx, cancel := context.WithTimeout(context.Background(), 40*time.Millisecond)
+	defer cancel()
+	if err := proc.Shutdown(shortCtx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected context.DeadlineExceeded from Shutdown, got %v", err)
+	}
+
+	close(conv.unblock)
+	if err := proc.Shutdown(context.Background()); err != nil {
+		t.Fatalf("expected second Shutdown after worker unblock to succeed, got %v", err)
+	}
+}
+
+func TestRunClaimedEntry_RequeuesCleanlyOnShutdownCancel(t *testing.T) {
+	conv := &testMockConverter{
+		canConvertCheck: media.ConversionCheck{CanConvert: true, NeedsConversion: false},
+	}
+	proc, r, db := setupTestProcessor(t, conv, nil)
+	defer r.Close()
+
+	proc.NFfmpegAsync = 0
+	db.NMaxQueued = 10
+
+	queuedEntry, err := proc.queueIncomingFile(context.Background(), strings.NewReader("queued payload"), db,
+		EntryRequest{Timestamp: time.Now().UnixMilli(), FileName: "photo.jpg"}, passthroughPlan())
+	if err != nil {
+		t.Fatalf("failed to queue file: %v", err)
+	}
+
+	claimed, err := r.ClaimQueuedEntry(context.Background(), db.ID, queuedEntry.ID)
+	if err != nil || !claimed {
+		t.Fatalf("failed to claim entry: claimed=%v err=%v", claimed, err)
+	}
+	claimedEntry, err := r.GetEntry(context.Background(), db.ID, queuedEntry.ID)
+	if err != nil {
+		t.Fatalf("failed to get claimed entry: %v", err)
+	}
+
+	// Simulate Shutdown having canceled workerCtx before runClaimedEntry finalizes.
+	if err := proc.Shutdown(context.Background()); err != nil {
+		t.Fatalf("Shutdown failed: %v", err)
+	}
+	proc.runClaimedEntry(proc.workerContext(), db.ID, claimedEntry)
+
+	updated, err := r.GetEntry(context.Background(), db.ID, queuedEntry.ID)
+	if err != nil {
+		t.Fatalf("failed to fetch entry: %v", err)
+	}
+	if updated.Status != repo.EntryStatusQueued {
+		t.Fatalf("expected EntryStatusQueued on shutdown requeue, got %v", updated.Status)
+	}
+	if proc.retries.claimDeferred(db.ID, queuedEntry.ID) {
+		t.Fatal("expected shutdown requeue not to record retry backoff")
+	}
+}
+
+type ctxCheckingStorage struct {
+	*localstorage.LocalStorage
+	cancelOnWrite     context.CancelFunc
+	writeErr          error
+	mu                sync.Mutex
+	writePreviewCalls int
+}
+
+func (s *ctxCheckingStorage) Write(ctx context.Context, dbID ulid.ULID, entryID int64, data io.Reader) (int64, error) {
+	if s.cancelOnWrite != nil {
+		s.cancelOnWrite()
+		return 0, s.writeErr
+	}
+	return s.LocalStorage.Write(ctx, dbID, entryID, data)
+}
+
+func (s *ctxCheckingStorage) Delete(ctx context.Context, dbID ulid.ULID, entryID int64) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return s.LocalStorage.Delete(ctx, dbID, entryID)
+}
+
+func (s *ctxCheckingStorage) WritePreview(ctx context.Context, dbID ulid.ULID, entryID int64, data io.Reader) (int64, error) {
+	s.mu.Lock()
+	s.writePreviewCalls++
+	s.mu.Unlock()
+	return s.LocalStorage.WritePreview(ctx, dbID, entryID, data)
+}
+
+type ctxCheckingRepo struct {
+	repo.Repository
+}
+
+func (r *ctxCheckingRepo) UpdateEntry(ctx context.Context, dbID repo.ULID, entry repo.Entry) (repo.Entry, error) {
+	if err := ctx.Err(); err != nil {
+		return repo.Entry{}, err
+	}
+	return r.Repository.UpdateEntry(ctx, dbID, entry)
+}
+
+func (r *ctxCheckingRepo) DeleteEntry(ctx context.Context, dbID repo.ULID, id int64) (repo.DeletedEntryMeta, error) {
+	if err := ctx.Err(); err != nil {
+		return repo.DeletedEntryMeta{}, err
+	}
+	return r.Repository.DeleteEntry(ctx, dbID, id)
+}
+
+func (r *ctxCheckingRepo) UpdateEntriesStatus(ctx context.Context, dbID repo.ULID, ids []int64, status repo.EntryStatus) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return r.Repository.UpdateEntriesStatus(ctx, dbID, ids, status)
+}
+
+func TestFailUploadEntry_CanceledContextStillCleansUpStorageAndDB(t *testing.T) {
+	conv := &testMockConverter{}
+	store := &ctxCheckingStorage{LocalStorage: &localstorage.LocalStorage{RootPath: t.TempDir()}}
+	proc, r, db := setupTestProcessor(t, conv, store)
+	defer r.Close()
+	proc.Repo = &ctxCheckingRepo{Repository: r}
+
+	entry, err := proc.createPreliminaryEntry(context.Background(), db,
+		EntryRequest{Timestamp: time.Now().UnixMilli(), FileName: "partial.jpg"}, passthroughPlan(), true)
+	if err != nil {
+		t.Fatalf("createPreliminaryEntry failed: %v", err)
+	}
+	if _, err := store.LocalStorage.Write(context.Background(), db.ID, entry.ID, strings.NewReader("partial")); err != nil {
+		t.Fatalf("Write failed: %v", err)
+	}
+
+	canceledCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	proc.failUploadEntry(canceledCtx, db, entry, errors.New("client disconnected"))
+
+	if _, statErr := store.LocalStorage.Stat(context.Background(), db.ID, entry.ID); !errors.Is(statErr, customerrors.ErrNotFound) {
+		t.Fatalf("expected stored file to be deleted despite canceled ctx, got err: %v", statErr)
+	}
+
+	updated, err := r.GetEntry(context.Background(), db.ID, entry.ID)
+	if err != nil {
+		t.Fatalf("GetEntry failed: %v", err)
+	}
+	if updated.Status != repo.EntryStatusError {
+		t.Fatalf("expected EntryStatusError despite canceled ctx, got %v", updated.Status)
+	}
+}
+
+func TestQueueIncomingFile_CanceledContextStillCleansUpOnWriteFailure(t *testing.T) {
+	conv := &testMockConverter{
+		canConvertCheck: media.ConversionCheck{CanConvert: true, NeedsConversion: true},
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	store := &ctxCheckingStorage{
+		LocalStorage:  &localstorage.LocalStorage{RootPath: t.TempDir()},
+		cancelOnWrite: cancel,
+		writeErr:      context.Canceled,
+	}
+	proc, r, db := setupTestProcessor(t, conv, store)
+	defer r.Close()
+	proc.Repo = &ctxCheckingRepo{Repository: r}
+	db.NMaxQueued = 10
+
+	_, err := proc.queueIncomingFile(ctx, strings.NewReader("payload"), db,
+		EntryRequest{Timestamp: time.Now().UnixMilli(), FileName: "queued.jpg"}, conversionPlan())
+	if err == nil {
+		t.Fatal("expected error from queueIncomingFile when Write fails")
+	}
+
+	entries, err := r.GetEntries(context.Background(), db.ID, repo.QueryOptions{})
+	if err != nil {
+		t.Fatalf("GetEntries failed: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("expected preliminary entry to be deleted despite canceled ctx, found %d entries", len(entries))
+	}
+}
+
+func TestGenerateAndStorePreview_ExceedsMaxBytesDoesNotWriteStorage(t *testing.T) {
+	conv := &testMockConverter{}
+	store := &ctxCheckingStorage{LocalStorage: &localstorage.LocalStorage{RootPath: t.TempDir()}}
+	proc, r, db := setupTestProcessor(t, conv, store)
+	defer r.Close()
+
+	const entryID = int64(77)
+	_, err := proc.generateAndStorePreview(context.Background(), db, entryID, func(ctx context.Context, w io.Writer) error {
+		_, writeErr := w.Write(make([]byte, maxPreviewBytes+1))
+		return writeErr
+	})
+	if !errors.Is(err, errPreviewTooLarge) {
+		t.Fatalf("expected error wrapping errPreviewTooLarge, got %v", err)
+	}
+
+	store.mu.Lock()
+	calls := store.writePreviewCalls
+	store.mu.Unlock()
+	if calls != 0 {
+		t.Fatalf("expected Storage.WritePreview not to be called when preview exceeds maxPreviewBytes, got %d calls", calls)
+	}
+	if _, statErr := store.StatPreview(context.Background(), db.ID, entryID); !errors.Is(statErr, customerrors.ErrNotFound) {
+		t.Fatalf("expected no preview stored in backend, got err: %v", statErr)
 	}
 }

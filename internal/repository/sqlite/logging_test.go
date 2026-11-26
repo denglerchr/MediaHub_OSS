@@ -6,12 +6,8 @@ import (
 	"time"
 
 	repo "mediahub_oss/internal/repository"
-	"mediahub_oss/internal/repository/migrations"
-	_ "mediahub_oss/internal/repository/migrations/sqlite"
 	"mediahub_oss/internal/repository/sqlite"
 	"mediahub_oss/internal/shared"
-
-	"github.com/pressly/goose/v3"
 )
 
 func TestGetLogs_TimeFilterEpochAndHistorical(t *testing.T) {
@@ -23,11 +19,7 @@ func TestGetLogs_TimeFilterEpochAndHistorical(t *testing.T) {
 	}
 	defer r.Close()
 
-	if err := goose.SetDialect("sqlite3"); err != nil {
-		t.Fatalf("failed to set goose dialect: %v", err)
-	}
-	goose.SetBaseFS(migrations.EmbedFS)
-	if err := goose.Up(r.DB, "sqlite"); err != nil {
+	if err := r.MigrateUp(context.Background()); err != nil {
 		t.Fatalf("failed to run migrations: %v", err)
 	}
 
@@ -160,11 +152,7 @@ func TestLogAudit_SuccessAndError(t *testing.T) {
 	}
 
 	// Apply migrations
-	if err := goose.SetDialect("sqlite3"); err != nil {
-		t.Fatalf("failed to set goose dialect: %v", err)
-	}
-	goose.SetBaseFS(migrations.EmbedFS)
-	if err := goose.Up(r.DB, "sqlite"); err != nil {
+	if err := r.MigrateUp(context.Background()); err != nil {
 		t.Fatalf("failed to run migrations: %v", err)
 	}
 
@@ -189,5 +177,42 @@ func TestLogAudit_SuccessAndError(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatalf("expected LogAudit to return error on closed DB, got nil")
+	}
+}
+
+func TestSQLite_GetLogs_IDRange(t *testing.T) {
+	ctx := context.Background()
+
+	r, err := sqlite.NewRepository(":memory:")
+	if err != nil {
+		t.Fatalf("failed to create repo: %v", err)
+	}
+	defer r.Close()
+
+	if err := r.MigrateUp(ctx); err != nil {
+		t.Fatalf("failed to run migrations: %v", err)
+	}
+
+	for i := 1; i <= 5; i++ {
+		if err := r.LogAudit(ctx, repo.AuditLog{
+			Action:   "TEST_ACTION",
+			Actor:    "admin",
+			Resource: "system",
+		}); err != nil {
+			t.Fatalf("LogAudit %d failed: %v", i, err)
+		}
+	}
+
+	logs, err := r.GetLogs(ctx, repo.QueryOptions{Order: "asc", IDStart: 2, IDEnd: 4})
+	if err != nil {
+		t.Fatalf("GetLogs ID range failed: %v", err)
+	}
+	if len(logs) != 3 {
+		t.Fatalf("expected 3 logs, got %d", len(logs))
+	}
+	for i, wantID := range []int64{2, 3, 4} {
+		if logs[i].ID != wantID {
+			t.Errorf("logs[%d].ID = %d, want %d", i, logs[i].ID, wantID)
+		}
 	}
 }

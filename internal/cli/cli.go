@@ -8,7 +8,6 @@ import (
 
 	conf "mediahub_oss/internal/cli/config"
 	"mediahub_oss/internal/logging"
-	_ "mediahub_oss/internal/repository/migrations/sqlite"
 
 	"github.com/spf13/cobra"
 )
@@ -47,6 +46,7 @@ func NewRootCMD(frontendFS fs.FS) *cobra.Command {
 					cfgPath = envPath
 				}
 			}
+			globalOptions.CfgFilePath = cfgPath
 
 			// Load the base configuration from the TOML file
 			loadedConfig, err := conf.LoadConfig(cfgPath)

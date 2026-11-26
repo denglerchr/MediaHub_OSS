@@ -23,6 +23,7 @@ func TestGetLogs_InvalidQueryParamsReturn400(t *testing.T) {
 		url  string
 	}{
 		{"invalid limit", "/api/audit?limit=abc"},
+		{"excessive limit", "/api/audit?limit=100000"},
 		{"invalid offset", "/api/audit?offset=xyz"},
 		{"invalid tstart", "/api/audit?tstart=not-a-number"},
 		{"invalid tend", "/api/audit?tend=foo"},

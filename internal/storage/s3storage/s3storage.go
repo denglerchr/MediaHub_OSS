@@ -8,6 +8,8 @@ import (
 
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
+
+	"mediahub_oss/internal/shared/ulid"
 )
 
 type Config struct {
@@ -54,13 +56,13 @@ func NewS3StorageProvider(cfg Config) (*S3StorageProvider, error) {
 }
 
 // Helper to construct main object key (e.g. "01HGFB9Z5W7ABCDEFGHJKMNPQR/10/10232")
-func getObjectKey(dbID string, id int64) string {
-	return fmt.Sprintf("%s/%d/%d", dbID, id/1000, id)
+func getObjectKey(dbID ulid.ULID, id int64) string {
+	return fmt.Sprintf("%s/%d/%d", dbID.String(), id/1000, id)
 }
 
 // Helper to construct preview object key (e.g. "previews/01HGFB9Z5W7ABCDEFGHJKMNPQR/10/10232")
-func getPreviewObjectKey(dbID string, id int64) string {
-	return fmt.Sprintf("previews/%s/%d/%d", dbID, id/1000, id)
+func getPreviewObjectKey(dbID ulid.ULID, id int64) string {
+	return fmt.Sprintf("previews/%s/%d/%d", dbID.String(), id/1000, id)
 }
 
 func isNotFoundError(err error) bool {

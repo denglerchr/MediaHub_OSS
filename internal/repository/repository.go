@@ -71,7 +71,6 @@ type Repository interface {
 	EnqueueEntry(ctx context.Context, dbID ULID, entry Entry, maxQueued int) (Entry, error)
 	UpdateEntriesStatus(ctx context.Context, dbID ULID, entryIDs []int64, status EntryStatus) error
 	ClaimQueuedEntry(ctx context.Context, dbID ULID, entryID int64) (bool, error)
-	GetEntriesByStatus(ctx context.Context, dbID ULID, status EntryStatus, limit uint64) ([]Entry, error)
 	CountEntriesByStatus(ctx context.Context, dbID ULID, status EntryStatus) (int64, error)
 	DeleteEntry(ctx context.Context, dbID ULID, id int64) (DeletedEntryMeta, error)
 	DeleteEntries(ctx context.Context, dbID ULID, entryIDs []int64) ([]DeletedEntryMeta, error)
@@ -86,7 +85,6 @@ type Repository interface {
 	GetUserByID(ctx context.Context, id ULID) (User, error)
 	GetUserByUsername(ctx context.Context, username string) (User, error)
 	SetUserPermissions(ctx context.Context, permissions UserPermissions) error // create or update or delete (in case of empty Roles)
-	GetUserPermissions(ctx context.Context, userID ULID, dbID ULID) (UserPermissions, error)
 	GetAllUserPermissions(ctx context.Context, userID ULID) ([]UserPermissions, error)
 
 	// OIDC
@@ -96,6 +94,7 @@ type Repository interface {
 	// Token
 	StoreRefreshToken(ctx context.Context, userID ULID, tokenHash string, validDuration time.Duration) error // TODO adapt implementations
 	ValidateRefreshToken(ctx context.Context, tokenHash string) (ULID, error)
+	ConsumeRefreshToken(ctx context.Context, tokenHash string) (ULID, error)
 	DeleteRefreshToken(ctx context.Context, tokenHash string) error
 	DeleteExpiredRefreshTokens(ctx context.Context) (int64, error)
 	DeleteAllRefreshTokensForUser(ctx context.Context, userID ULID) error

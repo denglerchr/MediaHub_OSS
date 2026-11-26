@@ -522,7 +522,7 @@ const docTemplate = `{
                         "BasicAuth": []
                     }
                 ],
-                "description": "Retrieves a paginated list of entries from a specific database. Only supports time-based filters.",
+                "description": "Retrieves a paginated list of entries from a specific database. Supports time-based and ID-range filters.",
                 "produces": [
                     "application/json"
                 ],
@@ -580,6 +580,20 @@ const docTemplate = `{
                         "format": "int64",
                         "description": "End timestamp (Unix milliseconds)",
                         "name": "tend",
+                        "in": "query"
+                    },
+                    {
+                        "type": "integer",
+                        "format": "int64",
+                        "description": "Inclusive start entry ID (id \u003e= idstart)",
+                        "name": "idstart",
+                        "in": "query"
+                    },
+                    {
+                        "type": "integer",
+                        "format": "int64",
+                        "description": "Inclusive end entry ID (id \u003c= idend)",
+                        "name": "idend",
                         "in": "query"
                     }
                 ],
@@ -3022,6 +3036,9 @@ const docTemplate = `{
                     "type": "string"
                 },
                 "code_verifier": {
+                    "type": "string"
+                },
+                "nonce": {
                     "type": "string"
                 },
                 "redirect_uri": {

@@ -8,15 +8,20 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"mediahub_oss/internal/media"
 	repo "mediahub_oss/internal/repository"
+	"mediahub_oss/internal/repository/migrations"
+	"mediahub_oss/internal/repository/sqlutil"
 	"mediahub_oss/internal/shared/customerrors"
+	"mediahub_oss/internal/shared/ulid"
 
 	"github.com/Masterminds/squirrel"
 	"github.com/lib/pq"
+	"github.com/pressly/goose/v3"
 )
 
 // TestInterfaceImplementation verifies PostgresRepository implements repository.Repository interface.
@@ -46,7 +51,7 @@ func TestBuildDynamicTableSchema(t *testing.T) {
 		{ID: 6, Name: "location", Type: repo.CustomFieldTypeCoordinate, IsIndexed: true},
 	}
 
-	sql, err := r.BuildDynamicTableSchema("01HGFB9Z5W7ABCDEFGHJKMNPQR", "image", customFields)
+	sql, err := r.BuildDynamicTableSchema(ulid.MustParse("01HGFB9Z5W7ABCDEFGHJKMNPQR"), "image", customFields)
 	if err != nil {
 		t.Fatalf("expected no error, got: %v", err)
 	}
@@ -57,8 +62,8 @@ func TestBuildDynamicTableSchema(t *testing.T) {
 	if !strings.Contains(sql, `"cf_0" TEXT`) {
 		t.Errorf("expected cf_0 column in SQL, got: %s", sql)
 	}
-	if !strings.Contains(sql, `"cf_1" INTEGER`) {
-		t.Errorf("expected cf_1 column in SQL, got: %s", sql)
+	if !strings.Contains(sql, `"cf_1" BIGINT`) {
+		t.Errorf("expected cf_1 BIGINT column in SQL, got: %s", sql)
 	}
 	if !strings.Contains(sql, `"cf_2" DOUBLE PRECISION`) {
 		t.Errorf("expected cf_2 column in SQL, got: %s", sql)
@@ -69,8 +74,8 @@ func TestBuildDynamicTableSchema(t *testing.T) {
 	if !strings.Contains(sql, `"cf_4" DOUBLE PRECISION`) {
 		t.Errorf("expected cf_4 column in SQL, got: %s", sql)
 	}
-	if !strings.Contains(sql, `"cf_5" INTEGER`) {
-		t.Errorf("expected cf_5 column in SQL, got: %s", sql)
+	if !strings.Contains(sql, `"cf_5" BIGINT`) {
+		t.Errorf("expected cf_5 BIGINT column in SQL, got: %s", sql)
 	}
 	if !strings.Contains(sql, `"cf_6" POINT`) {
 		t.Errorf("expected cf_6 POINT column in SQL, got: %s", sql)
@@ -87,7 +92,7 @@ func TestBuildIndexesSQL_Coordinate(t *testing.T) {
 		{ID: 2, Name: "rating", Type: repo.CustomFieldTypeReal, IsIndexed: false},
 	}
 
-	sqls := BuildIndexesSQL("01HGFB9Z5W7ABCDEFGHJKMNPQR", customFields)
+	sqls := BuildIndexesSQL(ulid.MustParse("01HGFB9Z5W7ABCDEFGHJKMNPQR"), customFields)
 	foundGist := false
 	foundBtree := false
 	for _, s := range sqls {
@@ -123,22 +128,46 @@ func TestPQUniqueViolation(t *testing.T) {
 	}
 }
 
+func TestPQUndefinedTable(t *testing.T) {
+	if isPQUndefinedTable(nil) {
+		t.Errorf("expected isPQUndefinedTable(nil) to return false")
+	}
+	if !isPQUndefinedTable(&pq.Error{Code: "42P01"}) {
+		t.Errorf("expected isPQUndefinedTable to return true for 42P01")
+	}
+	if isPQUndefinedTable(&pq.Error{Code: "23505"}) {
+		t.Errorf("expected isPQUndefinedTable to return false for 23505")
+	}
+	if !isPQUndefinedTable(errors.New(`pq: relation "entries_123" does not exist`)) {
+		t.Errorf("expected isPQUndefinedTable to return true for 'does not exist'")
+	}
+	if !isPQUndefinedTable(errors.New("ERROR: UNDEFINED_TABLE")) {
+		t.Errorf("expected isPQUndefinedTable to return true for 'undefined_table'")
+	}
+	if isPQUndefinedTable(errors.New("some other error")) {
+		t.Errorf("expected isPQUndefinedTable to return false for unrelated error")
+	}
+}
+
 func TestValidOperator(t *testing.T) {
 	validOps := []string{"=", "!=", ">", ">=", "<", "<=", "LIKE", "ILIKE", "like", "ilike"}
 	for _, op := range validOps {
-		if !isValidOperator(op) {
+		if !sqlutil.IsValidSearchOperator(op) {
 			t.Errorf("expected operator %s to be valid", op)
 		}
 	}
 
-	if isValidOperator("DROP") {
+	if sqlutil.IsValidSearchOperator("DROP") {
 		t.Errorf("expected invalid operator to return false")
 	}
 }
 
 func TestMapToPostgresType(t *testing.T) {
 	tests := map[string]string{
-		"INTEGER":    "INTEGER",
+		"INTEGER":    "BIGINT",
+		"INT":        "BIGINT",
+		"INT32":      "INTEGER",
+		"UINT32":     "INTEGER",
 		"REAL":       "DOUBLE PRECISION",
 		"TEXT":       "TEXT",
 		"BOOLEAN":    "BOOLEAN",
@@ -505,45 +534,11 @@ func TestPostgresRepository_InvalidULIDValidation(t *testing.T) {
 	}
 	ctx := t.Context()
 
-	invalidID := repo.ULID("invalid-ulid")
-
-	if _, err := r.BuildDynamicTableSchema("invalid-ulid", "image", nil); !errors.Is(err, customerrors.ErrValidation) {
+	if _, err := r.BuildDynamicTableSchema(repo.ULID{}, "image", nil); !errors.Is(err, customerrors.ErrValidation) {
 		t.Errorf("expected ErrValidation from BuildDynamicTableSchema, got: %v", err)
 	}
 
-	if _, err := r.GetDatabase(ctx, invalidID); !errors.Is(err, customerrors.ErrValidation) {
-		t.Errorf("expected ErrValidation from GetDatabase, got: %v", err)
-	}
-
-	if err := r.DeleteDatabase(ctx, invalidID); !errors.Is(err, customerrors.ErrValidation) {
-		t.Errorf("expected ErrValidation from DeleteDatabase, got: %v", err)
-	}
-
-	if _, err := r.GetDatabaseStats(ctx, invalidID); !errors.Is(err, customerrors.ErrValidation) {
-		t.Errorf("expected ErrValidation from GetDatabaseStats, got: %v", err)
-	}
-
-	if _, err := r.GetCustomFields(ctx, invalidID); !errors.Is(err, customerrors.ErrValidation) {
-		t.Errorf("expected ErrValidation from GetCustomFields, got: %v", err)
-	}
-
-	if _, err := r.GetEntries(ctx, invalidID, repo.QueryOptions{Limit: 10}); !errors.Is(err, customerrors.ErrValidation) {
-		t.Errorf("expected ErrValidation from GetEntries, got: %v", err)
-	}
-
-	if _, err := r.CreateEntry(ctx, repo.Database{ID: invalidID, ContentType: "image"}, repo.Entry{MimeType: "image/jpeg"}); !errors.Is(err, customerrors.ErrValidation) {
-		t.Errorf("expected ErrValidation from CreateEntry, got: %v", err)
-	}
-
-	if _, err := r.HouseKeepingWasCalled(ctx, invalidID); !errors.Is(err, customerrors.ErrValidation) {
-		t.Errorf("expected ErrValidation from HouseKeepingWasCalled, got: %v", err)
-	}
-
-	if _, err := r.EnqueueEntry(ctx, invalidID, repo.Entry{ID: 1}, 10); !errors.Is(err, customerrors.ErrValidation) {
-		t.Errorf("expected ErrValidation from EnqueueEntry with invalid ULID, got: %v", err)
-	}
-
-	validID := repo.ULID("01HGFB9Z5W7ABCDEFGHJKMNPQR")
+	validID := ulid.MustParse("01HGFB9Z5W7ABCDEFGHJKMNPQR")
 	if _, err := r.EnqueueEntry(ctx, validID, repo.Entry{ID: 1}, 0); !errors.Is(err, customerrors.ErrUnavailable) {
 		t.Errorf("expected ErrUnavailable from EnqueueEntry with maxQueued=0, got: %v", err)
 	}
@@ -559,8 +554,10 @@ type lockRecQuery struct {
 }
 
 type lockRecRecorder struct {
-	queries []lockRecQuery
-	inTx    bool
+	queries      []lockRecQuery
+	inTx         bool
+	customFields [][]driver.Value
+	lockTableErr error
 }
 
 type lockRecDriver struct{}
@@ -606,6 +603,9 @@ func (c *lockRecConn) CheckNamedValue(nv *driver.NamedValue) error {
 
 func (c *lockRecConn) ExecContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Result, error) {
 	c.rec.queries = append(c.rec.queries, lockRecQuery{sql: query, inTx: c.rec.inTx})
+	if strings.HasPrefix(query, "LOCK TABLE ") && c.rec.lockTableErr != nil {
+		return nil, c.rec.lockTableErr
+	}
 	return &lockRecResult{rowsAffected: 1}, nil
 }
 
@@ -638,6 +638,7 @@ func (c *lockRecConn) QueryContext(ctx context.Context, query string, args []dri
 	case strings.Contains(query, "FROM database_custom_fields"):
 		return &lockRecRows{
 			cols: []string{"field_id", "name", "type", "is_indexed"},
+			data: c.rec.customFields,
 		}, nil
 	default:
 		return nil, fmt.Errorf("unexpected query in lockRecConn: %s", query)
@@ -694,7 +695,7 @@ func newRecordingPostgresRepo(t *testing.T) (*PostgresRepository, *lockRecRecord
 }
 
 func TestPostgres_LockingQueries(t *testing.T) {
-	dbID := repo.ULID("01HGFB9Z5W7ABCDEFGHJKMNPQR")
+	dbID := ulid.MustParse("01HGFB9Z5W7ABCDEFGHJKMNPQR")
 	entriesTable := `"entries_` + dbID.String() + `"`
 	ctx := t.Context()
 
@@ -774,7 +775,7 @@ func TestPostgres_LockingQueries(t *testing.T) {
 		}
 	})
 
-	t.Run("AddCustomField locks database row FOR UPDATE before querying custom fields", func(t *testing.T) {
+	t.Run("AddCustomField locks entries table ACCESS EXCLUSIVE before database row FOR UPDATE", func(t *testing.T) {
 		r, rec := newRecordingPostgresRepo(t)
 		_, err := r.AddCustomField(ctx, dbID, repo.CustomFieldDef{
 			Name:      "artist",
@@ -785,20 +786,540 @@ func TestPostgres_LockingQueries(t *testing.T) {
 			t.Fatalf("AddCustomField failed: %v", err)
 		}
 
-		lockIdx, fieldsIdx := -1, -1
+		expectedLockTable := fmt.Sprintf(`LOCK TABLE %s IN ACCESS EXCLUSIVE MODE`, entriesTable)
+		tableLockIdx, dbLockIdx, fieldsIdx := -1, -1, -1
 		for i, q := range rec.queries {
+			if q.inTx && q.sql == expectedLockTable {
+				tableLockIdx = i
+			}
 			if q.inTx && q.sql == "SELECT 1 FROM databases WHERE id = $1 FOR UPDATE" {
-				lockIdx = i
+				dbLockIdx = i
 			}
 			if q.inTx && strings.Contains(q.sql, "FROM database_custom_fields") {
 				fieldsIdx = i
 			}
 		}
-		if lockIdx == -1 || fieldsIdx == -1 {
-			t.Fatalf("missing expected queries (lockIdx=%d, fieldsIdx=%d), got: %+v", lockIdx, fieldsIdx, rec.queries)
+		if tableLockIdx == -1 || dbLockIdx == -1 || fieldsIdx == -1 {
+			t.Fatalf("missing expected queries (tableLockIdx=%d, dbLockIdx=%d, fieldsIdx=%d), got: %+v", tableLockIdx, dbLockIdx, fieldsIdx, rec.queries)
 		}
-		if lockIdx >= fieldsIdx {
-			t.Fatalf("expected database FOR UPDATE lock (%d) before querying database_custom_fields (%d), got queries: %+v", lockIdx, fieldsIdx, rec.queries)
+		if !(tableLockIdx < dbLockIdx && dbLockIdx < fieldsIdx) {
+			t.Fatalf("expected LOCK TABLE (%d) -> database FOR UPDATE (%d) -> query database_custom_fields (%d), got queries: %+v", tableLockIdx, dbLockIdx, fieldsIdx, rec.queries)
 		}
 	})
+
+	t.Run("DeleteCustomField locks entries table ACCESS EXCLUSIVE before database row FOR UPDATE", func(t *testing.T) {
+		r, rec := newRecordingPostgresRepo(t)
+		rec.customFields = [][]driver.Value{{int64(0), "artist", "TEXT", true}}
+		if err := r.DeleteCustomField(ctx, dbID, 0); err != nil {
+			t.Fatalf("DeleteCustomField failed: %v", err)
+		}
+
+		expectedLockTable := fmt.Sprintf(`LOCK TABLE %s IN ACCESS EXCLUSIVE MODE`, entriesTable)
+		tableLockIdx, dbLockIdx := -1, -1
+		for i, q := range rec.queries {
+			if q.inTx && q.sql == expectedLockTable {
+				tableLockIdx = i
+			}
+			if q.inTx && q.sql == "SELECT 1 FROM databases WHERE id = $1 FOR UPDATE" {
+				dbLockIdx = i
+			}
+		}
+		if tableLockIdx == -1 || dbLockIdx == -1 {
+			t.Fatalf("missing expected queries (tableLockIdx=%d, dbLockIdx=%d), got: %+v", tableLockIdx, dbLockIdx, rec.queries)
+		}
+		if tableLockIdx >= dbLockIdx {
+			t.Fatalf("expected LOCK TABLE (%d) before database FOR UPDATE (%d), got queries: %+v", tableLockIdx, dbLockIdx, rec.queries)
+		}
+	})
+
+	t.Run("UpdateCustomField uses SHARE lock when enabling index", func(t *testing.T) {
+		r, rec := newRecordingPostgresRepo(t)
+		rec.customFields = [][]driver.Value{{int64(0), "artist", "TEXT", false}}
+		enableIdx := true
+		if _, err := r.UpdateCustomField(ctx, dbID, 0, nil, &enableIdx); err != nil {
+			t.Fatalf("UpdateCustomField failed: %v", err)
+		}
+
+		expectedLockTable := fmt.Sprintf(`LOCK TABLE %s IN SHARE MODE`, entriesTable)
+		tableLockIdx, dbLockIdx := -1, -1
+		for i, q := range rec.queries {
+			if q.inTx && q.sql == expectedLockTable {
+				tableLockIdx = i
+			}
+			if q.inTx && q.sql == "SELECT 1 FROM databases WHERE id = $1 FOR UPDATE" {
+				dbLockIdx = i
+			}
+		}
+		if tableLockIdx == -1 || dbLockIdx == -1 {
+			t.Fatalf("missing expected queries (tableLockIdx=%d, dbLockIdx=%d), got: %+v", tableLockIdx, dbLockIdx, rec.queries)
+		}
+		if tableLockIdx >= dbLockIdx {
+			t.Fatalf("expected LOCK TABLE SHARE (%d) before database FOR UPDATE (%d), got queries: %+v", tableLockIdx, dbLockIdx, rec.queries)
+		}
+	})
+
+	t.Run("UpdateCustomField uses ACCESS EXCLUSIVE lock when disabling index", func(t *testing.T) {
+		r, rec := newRecordingPostgresRepo(t)
+		rec.customFields = [][]driver.Value{{int64(0), "artist", "TEXT", true}}
+		disableIdx := false
+		if _, err := r.UpdateCustomField(ctx, dbID, 0, nil, &disableIdx); err != nil {
+			t.Fatalf("UpdateCustomField failed: %v", err)
+		}
+
+		expectedLockTable := fmt.Sprintf(`LOCK TABLE %s IN ACCESS EXCLUSIVE MODE`, entriesTable)
+		tableLockIdx, dbLockIdx := -1, -1
+		for i, q := range rec.queries {
+			if q.inTx && q.sql == expectedLockTable {
+				tableLockIdx = i
+			}
+			if q.inTx && q.sql == "SELECT 1 FROM databases WHERE id = $1 FOR UPDATE" {
+				dbLockIdx = i
+			}
+		}
+		if tableLockIdx == -1 || dbLockIdx == -1 {
+			t.Fatalf("missing expected queries (tableLockIdx=%d, dbLockIdx=%d), got: %+v", tableLockIdx, dbLockIdx, rec.queries)
+		}
+		if tableLockIdx >= dbLockIdx {
+			t.Fatalf("expected LOCK TABLE ACCESS EXCLUSIVE (%d) before database FOR UPDATE (%d), got queries: %+v", tableLockIdx, dbLockIdx, rec.queries)
+		}
+	})
+
+	t.Run("UpdateCustomField skips LOCK TABLE when isIndexed is nil", func(t *testing.T) {
+		r, rec := newRecordingPostgresRepo(t)
+		rec.customFields = [][]driver.Value{{int64(0), "artist", "TEXT", false}}
+		newName := "creator"
+		if _, err := r.UpdateCustomField(ctx, dbID, 0, &newName, nil); err != nil {
+			t.Fatalf("UpdateCustomField rename failed: %v", err)
+		}
+
+		dbLockFound := false
+		for _, q := range rec.queries {
+			if strings.HasPrefix(q.sql, "LOCK TABLE ") {
+				t.Fatalf("unexpected LOCK TABLE query on rename-only UpdateCustomField: %s", q.sql)
+			}
+			if q.inTx && q.sql == "SELECT 1 FROM databases WHERE id = $1 FOR UPDATE" {
+				dbLockFound = true
+			}
+		}
+		if !dbLockFound {
+			t.Fatalf("expected SELECT 1 FROM databases WHERE id = $1 FOR UPDATE, got queries: %+v", rec.queries)
+		}
+	})
+
+	t.Run("CustomField LOCK TABLE undefined_table 42P01 returns ErrNotFound", func(t *testing.T) {
+		undefinedErr := &pq.Error{Code: "42P01"}
+
+		r1, rec1 := newRecordingPostgresRepo(t)
+		rec1.lockTableErr = undefinedErr
+		if _, err := r1.AddCustomField(ctx, dbID, repo.CustomFieldDef{Name: "artist", Type: repo.CustomFieldTypeText}); !errors.Is(err, customerrors.ErrNotFound) {
+			t.Fatalf("AddCustomField: expected ErrNotFound for 42P01, got %v", err)
+		}
+
+		r2, rec2 := newRecordingPostgresRepo(t)
+		rec2.lockTableErr = undefinedErr
+		if err := r2.DeleteCustomField(ctx, dbID, 0); !errors.Is(err, customerrors.ErrNotFound) {
+			t.Fatalf("DeleteCustomField: expected ErrNotFound for 42P01, got %v", err)
+		}
+
+		r3, rec3 := newRecordingPostgresRepo(t)
+		rec3.lockTableErr = undefinedErr
+		enableIdx := true
+		if _, err := r3.UpdateCustomField(ctx, dbID, 0, nil, &enableIdx); !errors.Is(err, customerrors.ErrNotFound) {
+			t.Fatalf("UpdateCustomField: expected ErrNotFound for 42P01, got %v", err)
+		}
+	})
+}
+
+func TestPostgres_NewMigrationProvider(t *testing.T) {
+	r, _ := newRecordingPostgresRepo(t)
+
+	provider, err := r.newMigrationProvider()
+	if err != nil {
+		t.Fatalf("newMigrationProvider failed: %v", err)
+	}
+	if provider == nil {
+		t.Fatal("expected non-nil goose provider")
+	}
+
+	sources := provider.ListSources()
+	if len(sources) == 0 {
+		t.Fatal("expected embedded postgres migrations to be discovered, got 0")
+	}
+
+	versions := make([]int64, 0, len(sources))
+	for _, s := range sources {
+		if s.Type != goose.TypeSQL {
+			t.Errorf("expected SQL migration source, got %s (version %d)", s.Type, s.Version)
+		}
+		if s.Version < 3003 {
+			t.Errorf("unexpected non-postgres migration version %d (%s)", s.Version, s.Path)
+		}
+		versions = append(versions, s.Version)
+	}
+
+	if versions[len(versions)-1] != int64(migrations.RequiredVersion) {
+		t.Errorf("expected latest discovered postgres migration version %d, got %d (all: %v)", migrations.RequiredVersion, versions[len(versions)-1], versions)
+	}
+}
+
+type pgHandlerFunc func(ctx context.Context, inTx bool, query string, args []driver.NamedValue) (driver.Rows, driver.Result, error)
+
+type pgMockConnector struct {
+	mu      sync.Mutex
+	queries []lockRecQuery
+	handler pgHandlerFunc
+}
+
+func (c *pgMockConnector) Connect(_ context.Context) (driver.Conn, error) {
+	return &pgMockConn{c: c}, nil
+}
+
+func (c *pgMockConnector) Driver() driver.Driver { return &lockRecDriver{} }
+
+type pgMockConn struct {
+	c    *pgMockConnector
+	inTx bool
+}
+
+func (m *pgMockConn) Prepare(_ string) (driver.Stmt, error) {
+	return nil, errors.New("Prepare not implemented")
+}
+func (m *pgMockConn) Close() error              { return nil }
+func (m *pgMockConn) Begin() (driver.Tx, error) { return m.BeginTx(context.Background(), driver.TxOptions{}) }
+func (m *pgMockConn) BeginTx(_ context.Context, _ driver.TxOptions) (driver.Tx, error) {
+	m.inTx = true
+	return &pgMockTx{m: m}, nil
+}
+func (m *pgMockConn) CheckNamedValue(_ *driver.NamedValue) error { return nil }
+
+func (m *pgMockConn) ExecContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Result, error) {
+	m.c.mu.Lock()
+	m.c.queries = append(m.c.queries, lockRecQuery{sql: query, inTx: m.inTx})
+	m.c.mu.Unlock()
+	_, res, err := m.c.handler(ctx, m.inTx, query, args)
+	if err != nil {
+		return nil, err
+	}
+	if res != nil {
+		return res, nil
+	}
+	return &lockRecResult{rowsAffected: 1}, nil
+}
+
+func (m *pgMockConn) QueryContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Rows, error) {
+	m.c.mu.Lock()
+	m.c.queries = append(m.c.queries, lockRecQuery{sql: query, inTx: m.inTx})
+	m.c.mu.Unlock()
+	rows, _, err := m.c.handler(ctx, m.inTx, query, args)
+	return rows, err
+}
+
+type pgMockTx struct{ m *pgMockConn }
+
+func (tx *pgMockTx) Commit() error {
+	tx.m.inTx = false
+	return nil
+}
+func (tx *pgMockTx) Rollback() error {
+	tx.m.inTx = false
+	return nil
+}
+
+func newMockPostgresRepo(t *testing.T, handler pgHandlerFunc) (*PostgresRepository, *pgMockConnector) {
+	t.Helper()
+	conn := &pgMockConnector{handler: handler}
+	db := sql.OpenDB(conn)
+	t.Cleanup(func() { _ = db.Close() })
+	return &PostgresRepository{
+		DB:              db,
+		Builder:         squirrel.StatementBuilder.PlaceholderFormat(squirrel.Dollar),
+		AllowedStatuses: repo.GetAllEntryStatuses(),
+	}, conn
+}
+
+func TestPostgres_LastAdminProtection(t *testing.T) {
+	ctx := t.Context()
+	admin1 := ulid.MustParse("01HGFB9Z5W7ABCDEFGHJKMNP01")
+	admin2 := ulid.MustParse("01HGFB9Z5W7ABCDEFGHJKMNP02")
+	member := ulid.MustParse("01HGFB9Z5W7ABCDEFGHJKMNP03")
+	missing := ulid.MustParse("01HGFB9Z5W7ABCDEFGHJKMNP99")
+
+	t.Run("DeleteUser rejects deleting sole admin with ErrConflict", func(t *testing.T) {
+		r, conn := newMockPostgresRepo(t, func(_ context.Context, inTx bool, query string, _ []driver.NamedValue) (driver.Rows, driver.Result, error) {
+			if strings.Contains(query, "FOR UPDATE") {
+				if !inTx {
+					t.Errorf("expected FOR UPDATE inside transaction")
+				}
+				return &lockRecRows{
+					cols: []string{"id", "is_admin"},
+					data: [][]driver.Value{{admin1.String(), true}},
+				}, nil, nil
+			}
+			return nil, nil, fmt.Errorf("unexpected query: %s", query)
+		})
+
+		err := r.DeleteUser(ctx, admin1)
+		if !errors.Is(err, customerrors.ErrConflict) {
+			t.Fatalf("expected ErrConflict, got: %v", err)
+		}
+		if len(conn.queries) != 1 || !strings.Contains(conn.queries[0].sql, "ORDER BY id FOR UPDATE") {
+			t.Fatalf("expected single lock query before aborting, got: %+v", conn.queries)
+		}
+	})
+
+	t.Run("DeleteUser succeeds when two admins exist", func(t *testing.T) {
+		r, conn := newMockPostgresRepo(t, func(_ context.Context, inTx bool, query string, _ []driver.NamedValue) (driver.Rows, driver.Result, error) {
+			if strings.Contains(query, "FOR UPDATE") {
+				return &lockRecRows{
+					cols: []string{"id", "is_admin"},
+					data: [][]driver.Value{
+						{admin1.String(), true},
+						{admin2.String(), true},
+					},
+				}, nil, nil
+			}
+			if strings.HasPrefix(query, "DELETE FROM users") && inTx {
+				return nil, &lockRecResult{rowsAffected: 1}, nil
+			}
+			return nil, nil, fmt.Errorf("unexpected query: %s", query)
+		})
+
+		if err := r.DeleteUser(ctx, admin1); err != nil {
+			t.Fatalf("expected DeleteUser with 2 admins to succeed, got: %v", err)
+		}
+		if len(conn.queries) != 2 {
+			t.Fatalf("expected lock + delete queries, got: %+v", conn.queries)
+		}
+	})
+
+	t.Run("DeleteUser returns ErrNotFound when user missing", func(t *testing.T) {
+		r, _ := newMockPostgresRepo(t, func(_ context.Context, _ bool, query string, _ []driver.NamedValue) (driver.Rows, driver.Result, error) {
+			if strings.Contains(query, "FOR UPDATE") {
+				return &lockRecRows{
+					cols: []string{"id", "is_admin"},
+					data: [][]driver.Value{{admin1.String(), true}},
+				}, nil, nil
+			}
+			return nil, nil, fmt.Errorf("unexpected query: %s", query)
+		})
+
+		err := r.DeleteUser(ctx, missing)
+		if !errors.Is(err, customerrors.ErrNotFound) {
+			t.Fatalf("expected ErrNotFound, got: %v", err)
+		}
+	})
+
+	t.Run("UpdateUser rejects demoting sole admin with ErrConflict", func(t *testing.T) {
+		r, _ := newMockPostgresRepo(t, func(_ context.Context, _ bool, query string, _ []driver.NamedValue) (driver.Rows, driver.Result, error) {
+			if strings.Contains(query, "FOR UPDATE") {
+				return &lockRecRows{
+					cols: []string{"id", "is_admin"},
+					data: [][]driver.Value{{admin1.String(), true}},
+				}, nil, nil
+			}
+			return nil, nil, fmt.Errorf("unexpected query: %s", query)
+		})
+
+		_, err := r.UpdateUser(ctx, repo.User{
+			ID:       admin1,
+			Username: "admin",
+			IsAdmin:  false,
+		})
+		if !errors.Is(err, customerrors.ErrConflict) {
+			t.Fatalf("expected ErrConflict, got: %v", err)
+		}
+	})
+
+	t.Run("UpdateUser maps unique violation to ErrUserExists and allows demoting when 2 admins", func(t *testing.T) {
+		rConflict, _ := newMockPostgresRepo(t, func(_ context.Context, _ bool, query string, _ []driver.NamedValue) (driver.Rows, driver.Result, error) {
+			if strings.Contains(query, "FOR UPDATE") {
+				return &lockRecRows{
+					cols: []string{"id", "is_admin"},
+					data: [][]driver.Value{
+						{admin1.String(), true},
+						{member.String(), false},
+					},
+				}, nil, nil
+			}
+			if strings.HasPrefix(query, "UPDATE users") {
+				return nil, nil, &pq.Error{Code: "23505"}
+			}
+			return nil, nil, fmt.Errorf("unexpected query: %s", query)
+		})
+
+		if _, err := rConflict.UpdateUser(ctx, repo.User{ID: member, Username: "admin"}); !errors.Is(err, customerrors.ErrUserExists) {
+			t.Fatalf("expected ErrUserExists, got: %v", err)
+		}
+
+		rDemote, _ := newMockPostgresRepo(t, func(_ context.Context, inTx bool, query string, _ []driver.NamedValue) (driver.Rows, driver.Result, error) {
+			if strings.Contains(query, "FOR UPDATE") {
+				return &lockRecRows{
+					cols: []string{"id", "is_admin"},
+					data: [][]driver.Value{
+						{admin1.String(), true},
+						{admin2.String(), true},
+					},
+				}, nil, nil
+			}
+			if strings.HasPrefix(query, "UPDATE users") && inTx {
+				return nil, &lockRecResult{rowsAffected: 1}, nil
+			}
+			return nil, nil, fmt.Errorf("unexpected query: %s", query)
+		})
+
+		if _, err := rDemote.UpdateUser(ctx, repo.User{ID: admin1, Username: "admin1", IsAdmin: false}); err != nil {
+			t.Fatalf("expected demote with 2 admins to succeed, got: %v", err)
+		}
+	})
+}
+
+func TestPostgres_ConsumeRefreshToken(t *testing.T) {
+	ctx := t.Context()
+	userID := ulid.MustParse("01HGFB9Z5W7ABCDEFGHJKMNP01")
+
+	t.Run("valid token atomically deletes and returns user ID", func(t *testing.T) {
+		r, conn := newMockPostgresRepo(t, func(_ context.Context, _ bool, query string, args []driver.NamedValue) (driver.Rows, driver.Result, error) {
+			if !strings.Contains(query, "DELETE FROM refresh_tokens") || !strings.Contains(query, "clock_timestamp()") || !strings.Contains(query, "RETURNING user_id") {
+				t.Fatalf("unexpected ConsumeRefreshToken SQL: %s", query)
+			}
+			if len(args) != 1 || args[0].Value != "hash-ok" {
+				t.Fatalf("unexpected args: %+v", args)
+			}
+			return &lockRecRows{
+				cols: []string{"user_id"},
+				data: [][]driver.Value{{userID.String()}},
+			}, nil, nil
+		})
+
+		got, err := r.ConsumeRefreshToken(ctx, "hash-ok")
+		if err != nil {
+			t.Fatalf("ConsumeRefreshToken failed: %v", err)
+		}
+		if got != userID {
+			t.Errorf("expected %s, got %s", userID, got)
+		}
+		if len(conn.queries) != 1 {
+			t.Errorf("expected single atomic SQL query, got %d", len(conn.queries))
+		}
+	})
+
+	t.Run("missing or expired token returns ErrNotFound", func(t *testing.T) {
+		r, _ := newMockPostgresRepo(t, func(_ context.Context, _ bool, _ string, _ []driver.NamedValue) (driver.Rows, driver.Result, error) {
+			return &lockRecRows{cols: []string{"user_id"}, data: nil}, nil, nil
+		})
+
+		_, err := r.ConsumeRefreshToken(ctx, "hash-missing")
+		if !errors.Is(err, customerrors.ErrNotFound) {
+			t.Fatalf("expected ErrNotFound, got: %v", err)
+		}
+	})
+}
+
+func TestPostgres_CreateOIDCUser_Hardening(t *testing.T) {
+	ctx := t.Context()
+	existingID := ulid.MustParse("01HGFB9Z5W7ABCDEFGHJKMNP77")
+
+	t.Run("escaped LIKE, server clock, and retry up to 5 attempts returning ErrUserExists", func(t *testing.T) {
+		var attempts int
+		r, conn := newMockPostgresRepo(t, func(_ context.Context, _ bool, query string, args []driver.NamedValue) (driver.Rows, driver.Result, error) {
+			switch {
+			case strings.Contains(query, "SELECT username FROM users"):
+				if !strings.Contains(query, `LIKE $2 ESCAPE '\'`) {
+					t.Errorf("expected escaped LIKE with $2 placeholder in Postgres query, got: %s", query)
+				}
+				if len(args) < 2 || args[1].Value != `user\_a\_%` {
+					t.Errorf("expected escaped LIKE arg 'user\\_a\\_%%', got: %+v", args)
+				}
+				return &lockRecRows{cols: []string{"username"}, data: nil}, nil, nil
+			case strings.HasPrefix(query, "INSERT INTO users"):
+				attempts++
+				return nil, nil, &pq.Error{Code: "23505"}
+			default:
+				return nil, nil, fmt.Errorf("unexpected query: %s", query)
+			}
+		})
+
+		_, err := r.CreateOIDCUser(ctx, repo.CreateOIDCUserParams{
+			Issuer:            "https://issuer",
+			Subject:           "sub-1",
+			PreferredUsername: "user_a",
+		})
+		if !errors.Is(err, customerrors.ErrUserExists) {
+			t.Fatalf("expected ErrUserExists after exhausted retries, got: %v", err)
+		}
+		if attempts != maxCreateOIDCUserAttempts {
+			t.Errorf("expected %d attempts, got %d", maxCreateOIDCUserAttempts, attempts)
+		}
+		_ = conn
+	})
+
+	t.Run("duplicate identity on user_oidc_identities falls back to GetUserByOIDCIdentity", func(t *testing.T) {
+		r, _ := newMockPostgresRepo(t, func(_ context.Context, inTx bool, query string, _ []driver.NamedValue) (driver.Rows, driver.Result, error) {
+			switch {
+			case strings.Contains(query, "SELECT username FROM users"):
+				return &lockRecRows{cols: []string{"username"}, data: nil}, nil, nil
+			case strings.HasPrefix(query, "INSERT INTO users"):
+				return nil, &lockRecResult{rowsAffected: 1}, nil
+			case strings.HasPrefix(query, "INSERT INTO user_oidc_identities"):
+				if !strings.Contains(query, "clock_timestamp()") {
+					t.Errorf("expected clock_timestamp() for created_at, got: %s", query)
+				}
+				return nil, nil, &pq.Error{Code: "23505"}
+			case strings.Contains(query, "JOIN user_oidc_identities"):
+				if inTx {
+					t.Errorf("expected GetUserByOIDCIdentity outside rolled-back tx")
+				}
+				return &lockRecRows{
+					cols: []string{"id", "username", "password_hash", "is_admin", "account_type"},
+					data: [][]driver.Value{{existingID.String(), "user_a", "OIDC_ACCOUNT_NO_PASSWORD", false, int64(repo.AccountTypeOIDC)}},
+				}, nil, nil
+			default:
+				return nil, nil, fmt.Errorf("unexpected query: %s", query)
+			}
+		})
+
+		user, err := r.CreateOIDCUser(ctx, repo.CreateOIDCUserParams{
+			Issuer:            "https://issuer",
+			Subject:           "sub-dup",
+			PreferredUsername: "user_a",
+		})
+		if err != nil {
+			t.Fatalf("expected fallback to existing OIDC user, got: %v", err)
+		}
+		if user.ID != existingID || user.Username != "user_a" {
+			t.Errorf("unexpected user returned: %+v", user)
+		}
+	})
+}
+
+type errNextRows struct {
+	cols []string
+	err  error
+}
+
+func (r *errNextRows) Columns() []string { return r.cols }
+func (r *errNextRows) Close() error      { return nil }
+func (r *errNextRows) Next(_ []driver.Value) error {
+	return r.err
+}
+
+func TestPostgres_ScanEntryRow_PropagatesRowsError(t *testing.T) {
+	ctx := t.Context()
+	dbID := ulid.MustParse("01HGFB9Z5W7ABCDEFGHJKMNPQR")
+	sentinelErr := errors.New("stream read aborted")
+
+	r, _ := newMockPostgresRepo(t, func(_ context.Context, _ bool, query string, _ []driver.NamedValue) (driver.Rows, driver.Result, error) {
+		if strings.Contains(query, "FROM database_custom_fields") {
+			return &lockRecRows{cols: []string{"field_id", "name", "type", "is_indexed"}, data: nil}, nil, nil
+		}
+		return &errNextRows{cols: []string{"id"}, err: sentinelErr}, nil, nil
+	})
+
+	_, err := r.GetEntry(ctx, dbID, 1)
+	if !errors.Is(err, sentinelErr) {
+		t.Fatalf("expected propagated stream error %v, got: %v", sentinelErr, err)
+	}
+	if errors.Is(err, customerrors.ErrNotFound) {
+		t.Fatalf("expected error not to be masked as ErrNotFound")
+	}
 }

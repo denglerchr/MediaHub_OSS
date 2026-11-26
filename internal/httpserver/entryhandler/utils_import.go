@@ -2,6 +2,7 @@ package entryhandler
 
 import (
 	"archive/zip"
+	"bytes"
 	"context"
 	"encoding/csv"
 	"errors"
@@ -17,8 +18,90 @@ import (
 	"mediahub_oss/internal/shared/customerrors"
 )
 
+const (
+	maxImportUploadBytes            int64 = 2 << 30  // 2 GiB
+	maxImportCSVBytes               int64 = 64 << 20 // 64 MiB
+	maxImportMemberBytes            int64 = 2 << 30  // 2 GiB
+	maxImportPreviewBytes           int64 = 16 << 20 // 16 MiB
+	maxImportTotalUncompressedBytes int64 = 10 << 30 // 10 GiB
+)
+
+var (
+	errImportLimitExceeded        = errors.New("import member uncompressed size limit exceeded")
+	errImportArchiveLimitExceeded = errors.New("import archive total uncompressed size limit exceeded")
+)
+
+type importSizeLimits struct {
+	csvBytes               int64
+	memberBytes            int64
+	previewBytes           int64
+	totalUncompressedBytes int64
+}
+
+func defaultImportSizeLimits() importSizeLimits {
+	return importSizeLimits{
+		csvBytes:               maxImportCSVBytes,
+		memberBytes:            maxImportMemberBytes,
+		previewBytes:           maxImportPreviewBytes,
+		totalUncompressedBytes: maxImportTotalUncompressedBytes,
+	}
+}
+
+type boundedArchiveReader struct {
+	r          io.Reader
+	maxMember  int64
+	memberRead int64
+	totalRead  *int64
+	maxTotal   int64
+}
+
+func (b *boundedArchiveReader) Read(p []byte) (int, error) {
+	if b.memberRead >= b.maxMember {
+		var probe [1]byte
+		for range 8 {
+			n, err := b.r.Read(probe[:])
+			if n > 0 {
+				return 0, fmt.Errorf("%w: member exceeds %d bytes", errImportLimitExceeded, b.maxMember)
+			}
+			if err != nil {
+				return 0, err
+			}
+		}
+		return 0, io.EOF
+	}
+	remainingTotal := b.maxTotal - *b.totalRead
+	if remainingTotal <= 0 {
+		var probe [1]byte
+		for range 8 {
+			n, err := b.r.Read(probe[:])
+			if n > 0 {
+				return 0, fmt.Errorf("%w: archive exceeds %d total bytes", errImportArchiveLimitExceeded, b.maxTotal)
+			}
+			if err != nil {
+				return 0, err
+			}
+		}
+		return 0, io.EOF
+	}
+	allowed := b.maxMember - b.memberRead
+	if remainingTotal < allowed {
+		allowed = remainingTotal
+	}
+	if int64(len(p)) > allowed {
+		p = p[:allowed]
+	}
+	n, err := b.r.Read(p)
+	b.memberRead += int64(n)
+	*b.totalRead += int64(n)
+	return n, err
+}
+
 // processImportJob handles the asynchronous extraction and database insertion for bulk imports.
 func (h *EntryHandler) processImportJob(ctx context.Context, db repo.Database, username string, tempZipPath string, config ImportConfigPayload) {
+	h.processImportJobWithLimits(ctx, db, username, tempZipPath, config, defaultImportSizeLimits())
+}
+
+func (h *EntryHandler) processImportJobWithLimits(ctx context.Context, db repo.Database, username string, tempZipPath string, config ImportConfigPayload, limits importSizeLimits) {
 	defer os.Remove(tempZipPath)
 
 	h.Logger.Info("Background import job started", "database_id", db.ID, "user", username, "mode", config.Mode)
@@ -38,7 +121,7 @@ func (h *EntryHandler) processImportJob(ctx context.Context, db repo.Database, u
 		return
 	}
 
-	// 3. Open and Parse entries.csv
+	// 3. Open and Parse entries.csv with bounded streaming reader
 	csvFile, err := csvZipFile.Open()
 	if err != nil {
 		h.Logger.Error("Import failed: Could not read entries.csv", "database_id", db.ID, "error", err)
@@ -46,7 +129,15 @@ func (h *EntryHandler) processImportJob(ctx context.Context, db repo.Database, u
 	}
 	defer csvFile.Close()
 
-	csvReader := csv.NewReader(csvFile)
+	var totalBytesRead int64
+	boundedCSV := &boundedArchiveReader{
+		r:         csvFile,
+		maxMember: limits.csvBytes,
+		totalRead: &totalBytesRead,
+		maxTotal:  limits.totalUncompressedBytes,
+	}
+
+	csvReader := csv.NewReader(boundedCSV)
 	headers, err := csvReader.Read()
 	if err != nil {
 		h.Logger.Error("Import failed: Could not read CSV headers", "database_id", db.ID, "error", err)
@@ -63,18 +154,35 @@ func (h *EntryHandler) processImportJob(ctx context.Context, db repo.Database, u
 	var successCount, skipCount, errorCount int
 
 	for rowNum := 2; ; rowNum++ {
+		if ctx.Err() != nil {
+			h.Logger.Info("Background import job cancelled", "database_id", db.ID, "error", ctx.Err())
+			return
+		}
+
 		row, err := csvReader.Read()
 		if err == io.EOF {
 			break
 		}
 		if err != nil {
+			if errors.Is(err, errImportLimitExceeded) || errors.Is(err, errImportArchiveLimitExceeded) {
+				h.Logger.Error("Import aborted: entries.csv exceeded size limit", "database_id", db.ID, "row", rowNum, "error", err)
+				return
+			}
 			h.Logger.Warn("Import warning: Could not read CSV row", "row", rowNum, "error", err)
 			errorCount++
 			continue
 		}
 
-		skipped, err := h.processImportRow(ctx, db, rowNum, row, headers, config, zipFiles)
+		skipped, err := h.processImportRowWithLimits(ctx, db, rowNum, row, headers, config, zipFiles, &totalBytesRead, limits)
 		if err != nil {
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				h.Logger.Info("Background import job cancelled during row processing", "database_id", db.ID, "row", rowNum, "error", err)
+				return
+			}
+			if errors.Is(err, errImportArchiveLimitExceeded) {
+				h.Logger.Error("Import aborted: archive exceeded total uncompressed size limit", "database_id", db.ID, "row", rowNum, "error", err)
+				return
+			}
 			// Check if we need a hard abort due to unmapped fields
 			if errors.Is(err, customerrors.ErrUnmappedFieldAbort) {
 				h.Logger.Error("Import aborted: Unmapped field encountered", "database_id", db.ID, "row", rowNum)
@@ -137,6 +245,14 @@ func (h *EntryHandler) validateCSVHeaders(headers []string) error {
 
 // processImportRow coordinates the database and storage insertions for a single CSV row.
 func (h *EntryHandler) processImportRow(ctx context.Context, db repo.Database, rowNum int, row []string, headers []string, config ImportConfigPayload, zipFiles map[string]*zip.File) (bool, error) {
+	var totalBytesRead int64
+	return h.processImportRowWithLimits(ctx, db, rowNum, row, headers, config, zipFiles, &totalBytesRead, defaultImportSizeLimits())
+}
+
+func (h *EntryHandler) processImportRowWithLimits(ctx context.Context, db repo.Database, rowNum int, row []string, headers []string, config ImportConfigPayload, zipFiles map[string]*zip.File, totalBytesRead *int64, limits importSizeLimits) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
 
 	// 1. Parse Standard Fields
 	entry, err := h.parseStandardFields(row)
@@ -180,20 +296,39 @@ func (h *EntryHandler) processImportRow(ctx context.Context, db repo.Database, r
 		return false, fmt.Errorf("failed to create temporary file for extraction: %w", err)
 	}
 	tempFilePath := tempMediaFile.Name()
-	defer os.Remove(tempFilePath) // Ensure it is cleaned up when this row finishes
+	defer func() {
+		_ = tempMediaFile.Close()
+		_ = os.Remove(tempFilePath) // Ensure it is cleaned up when this row finishes
+	}()
 
-	// Spool the zipped content into the temp file
+	remaining := limits.totalUncompressedBytes - *totalBytesRead
+	if remaining <= 0 {
+		return false, fmt.Errorf("%w: archive exceeds %d bytes", errImportArchiveLimitExceeded, limits.totalUncompressedBytes)
+	}
+	memberCap := limits.memberBytes
+	hitArchiveCap := false
+	if remaining < memberCap {
+		memberCap = remaining
+		hitArchiveCap = true
+	}
+
+	// Spool the zipped content into the temp file with strict size cap
 	srcZipStream, err := mainFileZipped.Open()
 	if err != nil {
-		tempMediaFile.Close()
 		return false, fmt.Errorf("failed to open zip entry %s: %w", mainZipPath, err)
 	}
-	if _, err := io.Copy(tempMediaFile, srcZipStream); err != nil {
-		srcZipStream.Close()
-		tempMediaFile.Close()
+	nCopied, err := io.Copy(tempMediaFile, io.LimitReader(srcZipStream, memberCap+1))
+	_ = srcZipStream.Close()
+	*totalBytesRead += nCopied
+	if err != nil {
 		return false, fmt.Errorf("failed to extract file from zip to disk: %w", err)
 	}
-	srcZipStream.Close()
+	if nCopied > memberCap {
+		if hitArchiveCap {
+			return false, fmt.Errorf("%w: archive exceeds %d total bytes", errImportArchiveLimitExceeded, limits.totalUncompressedBytes)
+		}
+		return false, fmt.Errorf("%w: %s exceeds %d bytes", errImportLimitExceeded, mainZipPath, limits.memberBytes)
+	}
 
 	// Sync to disk to ensure ffprobe can read it properly
 	tempMediaFile.Sync()
@@ -214,18 +349,17 @@ func (h *EntryHandler) processImportRow(ctx context.Context, db repo.Database, r
 	entry.PreviewSize = 0
 	savedEntry, err := h.Repo.CreateEntry(ctx, db, entry)
 	if err != nil {
-		tempMediaFile.Close()
 		return false, fmt.Errorf("failed to insert entry in database: %w", err)
 	}
 
 	// 7. Write Main File to Storage
 	// Rewind the temp file so we can stream it to the final storage location
 	tempMediaFile.Seek(0, io.SeekStart)
-	writtenSize, err := h.Storage.Write(ctx, db.ID.String(), savedEntry.ID, tempMediaFile)
+	writtenSize, err := h.Storage.Write(ctx, db.ID, savedEntry.ID, tempMediaFile)
 	tempMediaFile.Close() // Close the handle now that storage has consumed it
 
 	if err != nil {
-		_ = h.Storage.Delete(ctx, db.ID.String(), savedEntry.ID)
+		_ = h.Storage.Delete(ctx, db.ID, savedEntry.ID)
 		_, _ = h.Repo.DeleteEntry(ctx, db.ID, savedEntry.ID) // Rollback DB on storage failure
 		return false, fmt.Errorf("failed to write main file to storage: %w", err)
 	}
@@ -233,16 +367,43 @@ func (h *EntryHandler) processImportRow(ctx context.Context, db repo.Database, r
 	// 8. Write Preview to Storage (if it exists in the archive)
 	var writtenPreviewSize int64 = 0
 	if previewZipped, exists := zipFiles[previewZipPath]; exists {
+		remaining = limits.totalUncompressedBytes - *totalBytesRead
+		if remaining <= 0 {
+			_ = h.Storage.Delete(ctx, db.ID, savedEntry.ID)
+			_, _ = h.Repo.DeleteEntry(ctx, db.ID, savedEntry.ID)
+			return false, fmt.Errorf("%w: archive exceeds %d total bytes", errImportArchiveLimitExceeded, limits.totalUncompressedBytes)
+		}
+		previewCap := limits.previewBytes
+		hitPreviewArchiveCap := false
+		if remaining < previewCap {
+			previewCap = remaining
+			hitPreviewArchiveCap = true
+		}
+
 		pSrcFile, err := previewZipped.Open()
 		if err != nil {
 			h.Logger.Warn("Import warning: Failed to open preview zip entry", "row", rowNum, "path", previewZipPath, "error", err)
 		} else {
-			pWritten, err := h.Storage.WritePreview(ctx, db.ID.String(), savedEntry.ID, pSrcFile)
-			pSrcFile.Close()
-			if err != nil {
-				h.Logger.Warn("Import warning: Failed to write preview file to storage", "row", rowNum, "error", err)
+			var previewBuf bytes.Buffer
+			pCopied, pErr := io.Copy(&previewBuf, io.LimitReader(pSrcFile, previewCap+1))
+			_ = pSrcFile.Close()
+			*totalBytesRead += pCopied
+			if pErr != nil {
+				h.Logger.Warn("Import warning: Failed to read preview zip entry", "row", rowNum, "path", previewZipPath, "error", pErr)
+			} else if pCopied > previewCap {
+				_ = h.Storage.Delete(ctx, db.ID, savedEntry.ID)
+				_, _ = h.Repo.DeleteEntry(ctx, db.ID, savedEntry.ID)
+				if hitPreviewArchiveCap {
+					return false, fmt.Errorf("%w: archive exceeds %d total bytes", errImportArchiveLimitExceeded, limits.totalUncompressedBytes)
+				}
+				return false, fmt.Errorf("%w: preview %s exceeds %d bytes", errImportLimitExceeded, previewZipPath, limits.previewBytes)
 			} else {
-				writtenPreviewSize = pWritten
+				pWritten, wErr := h.Storage.WritePreview(ctx, db.ID, savedEntry.ID, bytes.NewReader(previewBuf.Bytes()))
+				if wErr != nil {
+					h.Logger.Warn("Import warning: Failed to write preview file to storage", "row", rowNum, "error", wErr)
+				} else {
+					writtenPreviewSize = pWritten
+				}
 			}
 		}
 	}
@@ -252,8 +413,8 @@ func (h *EntryHandler) processImportRow(ctx context.Context, db repo.Database, r
 	savedEntry.Size = uint64(writtenSize)
 	savedEntry.PreviewSize = uint64(writtenPreviewSize)
 	if _, err := h.Repo.UpdateEntry(ctx, db.ID, savedEntry); err != nil {
-		_ = h.Storage.Delete(ctx, db.ID.String(), savedEntry.ID)
-		_ = h.Storage.DeletePreview(ctx, db.ID.String(), savedEntry.ID)
+		_ = h.Storage.Delete(ctx, db.ID, savedEntry.ID)
+		_ = h.Storage.DeletePreview(ctx, db.ID, savedEntry.ID)
 		_, _ = h.Repo.DeleteEntry(ctx, db.ID, savedEntry.ID)
 		return false, fmt.Errorf("failed to finalize entry in database: %w", err)
 	}

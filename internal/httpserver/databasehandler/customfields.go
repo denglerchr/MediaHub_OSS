@@ -1,28 +1,24 @@
 package databasehandler
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
-	"strconv"
 	"strings"
 
 	"mediahub_oss/internal/httpserver/utils"
-	"mediahub_oss/internal/repository"
 	"mediahub_oss/internal/shared/customerrors"
 )
 
 // GetFields retrieves all custom fields for a database.
 func (h *DatabaseHandler) GetFields(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	dbID := r.PathValue("database_id")
-	if dbID == "" {
-		utils.RespondWithError(w, http.StatusBadRequest, "Missing required path parameter: database_id")
+	dbID, ok := parseDatabaseIDParam(w, r)
+	if !ok {
 		return
 	}
 
-	fields, err := h.Repo.GetCustomFields(ctx, repository.ULID(dbID))
+	fields, err := h.Repo.GetCustomFields(ctx, dbID)
 	if err != nil {
 		if errors.Is(err, customerrors.ErrNotFound) {
 			utils.RespondWithError(w, http.StatusNotFound, "Database not found.")
@@ -32,17 +28,7 @@ func (h *DatabaseHandler) GetFields(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resp := make([]DatabaseCustomField, len(fields))
-	for i, f := range fields {
-		idVal := f.ID
-		isIndexedVal := f.IsIndexed
-		resp[i] = DatabaseCustomField{
-			ID:        &idVal,
-			Name:      f.Name,
-			Type:      f.Type.String(),
-			IsIndexed: &isIndexedVal,
-		}
-	}
+	resp := mapCustomFieldsToDTO(fields)
 
 	utils.RespondWithJSON(w, http.StatusOK, resp)
 }
@@ -50,15 +36,14 @@ func (h *DatabaseHandler) GetFields(w http.ResponseWriter, r *http.Request) {
 // AddField adds a custom field.
 func (h *DatabaseHandler) AddField(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	dbID := r.PathValue("database_id")
-	if dbID == "" {
-		utils.RespondWithError(w, http.StatusBadRequest, "Missing required path parameter: database_id")
+	dbID, ok := parseDatabaseIDParam(w, r)
+	if !ok {
 		return
 	}
 
 	var payload DatabaseCustomField
-	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-		utils.RespondWithError(w, http.StatusBadRequest, "Invalid JSON payload")
+	if status, msg := utils.DecodeJSONBody(w, r, &payload); status != 0 {
+		utils.RespondWithError(w, status, msg)
 		return
 	}
 
@@ -76,7 +61,7 @@ func (h *DatabaseHandler) AddField(w http.ResponseWriter, r *http.Request) {
 		utils.RespondWithError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	added, err := h.Repo.AddCustomField(ctx, repository.ULID(dbID), modelField)
+	added, err := h.Repo.AddCustomField(ctx, dbID, modelField)
 	if err != nil {
 		if errors.Is(err, customerrors.ErrNotFound) {
 			utils.RespondWithError(w, http.StatusNotFound, "Database not found.")
@@ -94,31 +79,19 @@ func (h *DatabaseHandler) AddField(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	idVal := added.ID
-	isIndexedVal := added.IsIndexed
-	resp := DatabaseCustomField{
-		ID:        &idVal,
-		Name:      added.Name,
-		Type:      added.Type.String(),
-		IsIndexed: &isIndexedVal,
-	}
-
-	utils.RespondWithJSON(w, http.StatusCreated, resp)
+	utils.RespondWithJSON(w, http.StatusCreated, mapCustomFieldToDTO(added))
 }
 
 // UpdateField updates a custom field.
 func (h *DatabaseHandler) UpdateField(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	dbID := r.PathValue("database_id")
-	if dbID == "" {
-		utils.RespondWithError(w, http.StatusBadRequest, "Missing required path parameter: database_id")
+	dbID, ok := parseDatabaseIDParam(w, r)
+	if !ok {
 		return
 	}
 
-	fieldIDStr := r.PathValue("field_id")
-	fieldID, err := strconv.Atoi(fieldIDStr)
-	if err != nil {
-		utils.RespondWithError(w, http.StatusBadRequest, "Invalid field_id path parameter")
+	fieldID, ok := parseFieldIDParam(w, r)
+	if !ok {
 		return
 	}
 
@@ -126,8 +99,8 @@ func (h *DatabaseHandler) UpdateField(w http.ResponseWriter, r *http.Request) {
 		Name      *string `json:"name"`
 		IsIndexed *bool   `json:"is_indexed"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-		utils.RespondWithError(w, http.StatusBadRequest, "Invalid JSON payload")
+	if status, msg := utils.DecodeJSONBody(w, r, &payload); status != 0 {
+		utils.RespondWithError(w, status, msg)
 		return
 	}
 
@@ -143,7 +116,7 @@ func (h *DatabaseHandler) UpdateField(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	updated, err := h.Repo.UpdateCustomField(ctx, repository.ULID(dbID), fieldID, payload.Name, payload.IsIndexed)
+	updated, err := h.Repo.UpdateCustomField(ctx, dbID, fieldID, payload.Name, payload.IsIndexed)
 	if err != nil {
 		if errors.Is(err, customerrors.ErrNotFound) {
 			utils.RespondWithError(w, http.StatusNotFound, "Database or field not found.")
@@ -157,36 +130,24 @@ func (h *DatabaseHandler) UpdateField(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	idVal := updated.ID
-	isIndexedVal := updated.IsIndexed
-	resp := DatabaseCustomField{
-		ID:        &idVal,
-		Name:      updated.Name,
-		Type:      updated.Type.String(),
-		IsIndexed: &isIndexedVal,
-	}
-
-	utils.RespondWithJSON(w, http.StatusOK, resp)
+	utils.RespondWithJSON(w, http.StatusOK, mapCustomFieldToDTO(updated))
 }
 
 // DeleteField deletes a custom field.
 func (h *DatabaseHandler) DeleteField(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	dbID := r.PathValue("database_id")
-	if dbID == "" {
-		utils.RespondWithError(w, http.StatusBadRequest, "Missing required path parameter: database_id")
+	dbID, ok := parseDatabaseIDParam(w, r)
+	if !ok {
 		return
 	}
 
-	fieldIDStr := r.PathValue("field_id")
-	fieldID, err := strconv.Atoi(fieldIDStr)
-	if err != nil {
-		utils.RespondWithError(w, http.StatusBadRequest, "Invalid field_id path parameter")
+	fieldID, ok := parseFieldIDParam(w, r)
+	if !ok {
 		return
 	}
 
 	// Fetch current fields to find the name for response message
-	fields, err := h.Repo.GetCustomFields(ctx, repository.ULID(dbID))
+	fields, err := h.Repo.GetCustomFields(ctx, dbID)
 	if err != nil {
 		if errors.Is(err, customerrors.ErrNotFound) {
 			utils.RespondWithError(w, http.StatusNotFound, "Database not found.")
@@ -208,7 +169,7 @@ func (h *DatabaseHandler) DeleteField(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	err = h.Repo.DeleteCustomField(ctx, repository.ULID(dbID), fieldID)
+	err = h.Repo.DeleteCustomField(ctx, dbID, fieldID)
 	if err != nil {
 		if errors.Is(err, customerrors.ErrNotFound) {
 			utils.RespondWithError(w, http.StatusNotFound, "Database or field not found.")
@@ -218,7 +179,7 @@ func (h *DatabaseHandler) DeleteField(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	db, err := h.Repo.GetDatabase(ctx, repository.ULID(dbID))
+	db, err := h.Repo.GetDatabase(ctx, dbID)
 	dbName := "Database"
 	if err == nil {
 		dbName = db.Name

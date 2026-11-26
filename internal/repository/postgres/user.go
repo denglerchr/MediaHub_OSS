@@ -6,21 +6,21 @@ import (
 	"errors"
 	"fmt"
 	repo "mediahub_oss/internal/repository"
-	"mediahub_oss/internal/shared"
 	"mediahub_oss/internal/shared/customerrors"
+	"mediahub_oss/internal/shared/ulid"
 
 	"github.com/Masterminds/squirrel"
 )
 
 // CreateUser inserts a new user into the database and returns the populated user object (with ID).
 func (r *PostgresRepository) CreateUser(ctx context.Context, user repo.User) (repo.User, error) {
-	if user.ID == "" {
-		user.ID = repo.ULID(shared.GenerateULID())
+	if user.ID.IsZero() {
+		user.ID = ulid.New()
 	}
 
 	query, args, err := r.Builder.Insert("users").
 		Columns("id", "username", "password_hash", "is_admin", "account_type").
-		Values(user.ID.String(), user.Username, user.PasswordHash, user.IsAdmin, uint8(user.AccountType)).
+		Values(user.ID, user.Username, user.PasswordHash, user.IsAdmin, uint8(user.AccountType)).
 		ToSql()
 	if err != nil {
 		return repo.User{}, fmt.Errorf("failed to build insert user query: %w", err)
@@ -56,16 +56,61 @@ func (r *PostgresRepository) CountAdminUsers(ctx context.Context) (int64, error)
 	return count, nil
 }
 
+func lockUserAndAdmins(ctx context.Context, tx *sql.Tx, targetID repo.ULID) (targetWasAdmin bool, adminCount int, err error) {
+	rows, err := tx.QueryContext(ctx, "SELECT id, is_admin FROM users WHERE is_admin = true OR id = $1 ORDER BY id FOR UPDATE", targetID)
+	if err != nil {
+		return false, 0, fmt.Errorf("failed to lock user and admins: %w", err)
+	}
+	defer rows.Close()
+
+	var found bool
+	for rows.Next() {
+		var id repo.ULID
+		var isAdmin bool
+		if err := rows.Scan(&id, &isAdmin); err != nil {
+			return false, 0, fmt.Errorf("failed to scan user admin row: %w", err)
+		}
+		if isAdmin {
+			adminCount++
+		}
+		if id == targetID {
+			found = true
+			targetWasAdmin = isAdmin
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return false, 0, fmt.Errorf("row iteration error: %w", err)
+	}
+	if !found {
+		return false, 0, customerrors.ErrNotFound
+	}
+	return targetWasAdmin, adminCount, nil
+}
+
 // DeleteUser removes a user from the database based on their ID.
 func (r *PostgresRepository) DeleteUser(ctx context.Context, id repo.ULID) error {
+	tx, err := r.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	targetWasAdmin, adminCount, err := lockUserAndAdmins(ctx, tx, id)
+	if err != nil {
+		return err
+	}
+	if targetWasAdmin && adminCount <= 1 {
+		return fmt.Errorf("%w: cannot remove the last admin user", customerrors.ErrConflict)
+	}
+
 	query, args, err := r.Builder.Delete("users").
-		Where(squirrel.Eq{"id": id.String()}).
+		Where(squirrel.Eq{"id": id}).
 		ToSql()
 	if err != nil {
 		return fmt.Errorf("failed to build delete user query: %w", err)
 	}
 
-	res, err := r.DB.ExecContext(ctx, query, args...)
+	res, err := tx.ExecContext(ctx, query, args...)
 	if err != nil {
 		return fmt.Errorf("failed to delete user: %w", err)
 	}
@@ -79,23 +124,41 @@ func (r *PostgresRepository) DeleteUser(ctx context.Context, id repo.ULID) error
 		return customerrors.ErrNotFound
 	}
 
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("failed to commit delete user transaction: %w", err)
+	}
+
 	return nil
 }
 
 // UpdateUser modifies the global properties of an existing user account.
 func (r *PostgresRepository) UpdateUser(ctx context.Context, user repo.User) (repo.User, error) {
+	tx, err := r.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return repo.User{}, fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	targetWasAdmin, adminCount, err := lockUserAndAdmins(ctx, tx, user.ID)
+	if err != nil {
+		return repo.User{}, err
+	}
+	if targetWasAdmin && !user.IsAdmin && adminCount <= 1 {
+		return repo.User{}, fmt.Errorf("%w: cannot demote the last admin user", customerrors.ErrConflict)
+	}
+
 	query, args, err := r.Builder.Update("users").
 		Set("username", user.Username).
 		Set("password_hash", user.PasswordHash).
 		Set("is_admin", user.IsAdmin).
 		Set("account_type", int(user.AccountType)).
-		Where(squirrel.Eq{"id": user.ID.String()}).
+		Where(squirrel.Eq{"id": user.ID}).
 		ToSql()
 	if err != nil {
 		return repo.User{}, fmt.Errorf("failed to build update user query: %w", err)
 	}
 
-	res, err := r.DB.ExecContext(ctx, query, args...)
+	res, err := tx.ExecContext(ctx, query, args...)
 	if err != nil {
 		if isPQUniqueViolation(err) {
 			return repo.User{}, customerrors.ErrUserExists
@@ -110,6 +173,10 @@ func (r *PostgresRepository) UpdateUser(ctx context.Context, user repo.User) (re
 
 	if rowsAffected == 0 {
 		return repo.User{}, customerrors.ErrNotFound
+	}
+
+	if err := tx.Commit(); err != nil {
+		return repo.User{}, fmt.Errorf("failed to commit update user transaction: %w", err)
 	}
 
 	return user, nil
@@ -138,12 +205,10 @@ func (r *PostgresRepository) GetUsers(ctx context.Context, accountType *repo.Acc
 	var users []repo.User
 	for rows.Next() {
 		var user repo.User
-		var idStr string
 		var accountTypeUint uint8
-		if err := rows.Scan(&idStr, &user.Username, &user.PasswordHash, &user.IsAdmin, &accountTypeUint); err != nil {
+		if err := rows.Scan(&user.ID, &user.Username, &user.PasswordHash, &user.IsAdmin, &accountTypeUint); err != nil {
 			return nil, fmt.Errorf("failed to scan user row: %w", err)
 		}
-		user.ID = repo.ULID(idStr)
 		user.AccountType = repo.AccountType(accountTypeUint)
 		users = append(users, user)
 	}
@@ -159,23 +224,21 @@ func (r *PostgresRepository) GetUsers(ctx context.Context, accountType *repo.Acc
 func (r *PostgresRepository) GetUserByID(ctx context.Context, id repo.ULID) (repo.User, error) {
 	query, args, err := r.Builder.Select("id", "username", "password_hash", "is_admin", "account_type").
 		From("users").
-		Where(squirrel.Eq{"id": id.String()}).
+		Where(squirrel.Eq{"id": id}).
 		ToSql()
 	if err != nil {
 		return repo.User{}, fmt.Errorf("failed to build get user by id query: %w", err)
 	}
 
 	var user repo.User
-	var idStr string
 	var accountTypeUint uint8
-	err = r.DB.QueryRowContext(ctx, query, args...).Scan(&idStr, &user.Username, &user.PasswordHash, &user.IsAdmin, &accountTypeUint)
+	err = r.DB.QueryRowContext(ctx, query, args...).Scan(&user.ID, &user.Username, &user.PasswordHash, &user.IsAdmin, &accountTypeUint)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return repo.User{}, customerrors.ErrNotFound
 		}
 		return repo.User{}, fmt.Errorf("failed to scan user by id: %w", err)
 	}
-	user.ID = repo.ULID(idStr)
 	user.AccountType = repo.AccountType(accountTypeUint)
 
 	return user, nil
@@ -192,16 +255,14 @@ func (r *PostgresRepository) GetUserByUsername(ctx context.Context, username str
 	}
 
 	var user repo.User
-	var idStr string
 	var accountTypeUint uint8
-	err = r.DB.QueryRowContext(ctx, query, args...).Scan(&idStr, &user.Username, &user.PasswordHash, &user.IsAdmin, &accountTypeUint)
+	err = r.DB.QueryRowContext(ctx, query, args...).Scan(&user.ID, &user.Username, &user.PasswordHash, &user.IsAdmin, &accountTypeUint)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return repo.User{}, customerrors.ErrNotFound
 		}
 		return repo.User{}, fmt.Errorf("failed to scan user by username: %w", err)
 	}
-	user.ID = repo.ULID(idStr)
 	user.AccountType = repo.AccountType(accountTypeUint)
 
 	return user, nil
@@ -211,7 +272,7 @@ func (r *PostgresRepository) GetUserByUsername(ctx context.Context, username str
 func (r *PostgresRepository) SetUserPermissions(ctx context.Context, permissions repo.UserPermissions) error {
 	if permissions.Roles == 0 {
 		query, args, err := r.Builder.Delete("database_permissions").
-			Where(squirrel.Eq{"user_id": permissions.UserID.String(), "database_id": permissions.DatabaseID.String()}).
+			Where(squirrel.Eq{"user_id": permissions.UserID, "database_id": permissions.DatabaseID}).
 			ToSql()
 		if err != nil {
 			return fmt.Errorf("failed to build delete permissions query: %w", err)
@@ -232,7 +293,7 @@ func (r *PostgresRepository) SetUserPermissions(ctx context.Context, permissions
 
 	query, args, err := r.Builder.Insert("database_permissions").
 		Columns("user_id", "database_id", "can_view", "can_create", "can_edit", "can_delete", "can_admin").
-		Values(permissions.UserID.String(), permissions.DatabaseID.String(), canView, canCreate, canEdit, canDelete, canAdmin).
+		Values(permissions.UserID, permissions.DatabaseID, canView, canCreate, canEdit, canDelete, canAdmin).
 		Suffix("ON CONFLICT (user_id, database_id) DO UPDATE SET can_view = EXCLUDED.can_view, can_create = EXCLUDED.can_create, can_edit = EXCLUDED.can_edit, can_delete = EXCLUDED.can_delete, can_admin = EXCLUDED.can_admin").
 		ToSql()
 	if err != nil {
@@ -247,37 +308,11 @@ func (r *PostgresRepository) SetUserPermissions(ctx context.Context, permissions
 	return nil
 }
 
-// GetUserPermissions retrieves the exact rights a user has for a specific database.
-func (r *PostgresRepository) GetUserPermissions(ctx context.Context, userID repo.ULID, dbID repo.ULID) (repo.UserPermissions, error) {
-	query, args, err := r.Builder.Select("can_view", "can_create", "can_edit", "can_delete", "can_admin").
-		From("database_permissions").
-		Where(squirrel.Eq{"user_id": userID.String(), "database_id": dbID.String()}).
-		ToSql()
-	if err != nil {
-		return repo.UserPermissions{}, fmt.Errorf("failed to build get permissions query: %w", err)
-	}
-
-	var canView, canCreate, canEdit, canDelete, canAdmin bool
-	err = r.DB.QueryRowContext(ctx, query, args...).Scan(&canView, &canCreate, &canEdit, &canDelete, &canAdmin)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return repo.UserPermissions{}, customerrors.ErrNotFound
-		}
-		return repo.UserPermissions{}, fmt.Errorf("failed to scan user permissions: %w", err)
-	}
-
-	return repo.UserPermissions{
-		UserID:     userID,
-		DatabaseID: dbID,
-		Roles:      repo.NewAccessGrant(canView, canCreate, canEdit, canDelete, canAdmin),
-	}, nil
-}
-
 // GetAllUserPermissions retrieves every specific database right assigned to a given user.
 func (r *PostgresRepository) GetAllUserPermissions(ctx context.Context, userID repo.ULID) ([]repo.UserPermissions, error) {
 	query, args, err := r.Builder.Select("database_id", "can_view", "can_create", "can_edit", "can_delete", "can_admin").
 		From("database_permissions").
-		Where(squirrel.Eq{"user_id": userID.String()}).
+		Where(squirrel.Eq{"user_id": userID}).
 		ToSql()
 	if err != nil {
 		return nil, fmt.Errorf("failed to build get all permissions query: %w", err)
@@ -291,16 +326,16 @@ func (r *PostgresRepository) GetAllUserPermissions(ctx context.Context, userID r
 
 	var permissions []repo.UserPermissions
 	for rows.Next() {
-		var dbIDStr string
+		var dbID repo.ULID
 		var canView, canCreate, canEdit, canDelete, canAdmin bool
 
-		if err := rows.Scan(&dbIDStr, &canView, &canCreate, &canEdit, &canDelete, &canAdmin); err != nil {
+		if err := rows.Scan(&dbID, &canView, &canCreate, &canEdit, &canDelete, &canAdmin); err != nil {
 			return nil, fmt.Errorf("failed to scan permissions row: %w", err)
 		}
 
 		permissions = append(permissions, repo.UserPermissions{
 			UserID:     userID,
-			DatabaseID: repo.ULID(dbIDStr),
+			DatabaseID: dbID,
 			Roles:      repo.NewAccessGrant(canView, canCreate, canEdit, canDelete, canAdmin),
 		})
 	}

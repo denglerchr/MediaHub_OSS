@@ -21,12 +21,8 @@ import (
 	"mediahub_oss/internal/media"
 	"mediahub_oss/internal/processing"
 	repo "mediahub_oss/internal/repository"
-	"mediahub_oss/internal/repository/migrations"
-	_ "mediahub_oss/internal/repository/migrations/sqlite"
 	"mediahub_oss/internal/repository/sqlite"
 	"mediahub_oss/internal/storage/localstorage"
-
-	"github.com/pressly/goose/v3"
 )
 
 type mockMediaConverter struct {
@@ -108,11 +104,7 @@ func TestPostEntry_LargeFileAsyncUploadWithCleanup(t *testing.T) {
 	}
 	defer r.Close()
 
-	if err := goose.SetDialect("sqlite3"); err != nil {
-		t.Fatalf("failed to set goose dialect: %v", err)
-	}
-	goose.SetBaseFS(migrations.EmbedFS)
-	if err := goose.Up(r.DB, "sqlite"); err != nil {
+	if err := r.MigrateUp(ctx); err != nil {
 		t.Fatalf("failed to run migrations: %v", err)
 	}
 
@@ -207,7 +199,7 @@ func TestPostEntry_LargeFileAsyncUploadWithCleanup(t *testing.T) {
 	}
 
 	// Verify file is stored properly and readable from storage
-	storedStream, err := store.Read(ctx, db.ID.String(), finalEntry.ID, 0, -1)
+	storedStream, err := store.Read(ctx, db.ID, finalEntry.ID, 0, -1)
 	if err != nil {
 		t.Fatalf("failed to read file from storage after async processing: %v", err)
 	}

@@ -9,12 +9,8 @@ import (
 	"time"
 
 	repo "mediahub_oss/internal/repository"
-	"mediahub_oss/internal/repository/migrations"
-	_ "mediahub_oss/internal/repository/migrations/sqlite"
 	"mediahub_oss/internal/repository/sqlite"
 	"mediahub_oss/internal/shared/customerrors"
-
-	"github.com/pressly/goose/v3"
 )
 
 func TestAPIKeysRepository(t *testing.T) {
@@ -28,11 +24,7 @@ func TestAPIKeysRepository(t *testing.T) {
 	defer r.Close()
 
 	// 2. Run all migrations up to latest (RequiredVersion = 3002)
-	if err := goose.SetDialect("sqlite3"); err != nil {
-		t.Fatalf("failed to set goose dialect: %v", err)
-	}
-	goose.SetBaseFS(migrations.EmbedFS)
-	if err := goose.Up(r.DB, "sqlite"); err != nil {
+	if err := r.MigrateUp(context.Background()); err != nil {
 		t.Fatalf("failed to run migrations: %v", err)
 	}
 
@@ -73,8 +65,8 @@ func TestAPIKeysRepository(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create api key 1: %v", err)
 	}
-	if createdKey1.ID == "" {
-		t.Errorf("expected generated ULID ID, got empty string")
+	if createdKey1.ID.IsZero() {
+		t.Errorf("expected generated ULID ID, got zero ULID")
 	}
 
 	// Create key2 that is expired

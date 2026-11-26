@@ -5,9 +5,6 @@ import (
 	"database/sql"
 	"testing"
 
-	"mediahub_oss/internal/repository/migrations"
-
-	"github.com/pressly/goose/v3"
 	_ "modernc.org/sqlite" // SQLite driver
 )
 
@@ -21,15 +18,14 @@ func TestMigration03001(t *testing.T) {
 	}
 	defer db.Close()
 
-	// 2. Set Goose dialect and filesystem
-	if err := goose.SetDialect("sqlite3"); err != nil {
-		t.Fatalf("failed to set goose dialect: %v", err)
+	// 2. Create isolated Goose migration provider
+	provider, err := NewProvider(db)
+	if err != nil {
+		t.Fatalf("failed to create migration provider: %v", err)
 	}
-	goose.SetBaseFS(migrations.EmbedFS)
-	Register()
 
 	// 3. Migrate UP to version 3000 (pre-ULID)
-	if err := goose.UpTo(db, "sqlite", 3000); err != nil {
+	if _, err := provider.UpTo(ctx, 3000); err != nil {
 		t.Fatalf("failed to migrate to version 3000: %v", err)
 	}
 
@@ -62,7 +58,7 @@ func TestMigration03001(t *testing.T) {
 	}
 
 	// 8. Run migration 3001 (Up)
-	if err := goose.UpTo(db, "sqlite", 3001); err != nil {
+	if _, err := provider.UpTo(ctx, 3001); err != nil {
 		t.Fatalf("failed to migrate to version 3001: %v", err)
 	}
 
@@ -117,7 +113,7 @@ func TestMigration03001(t *testing.T) {
 	}
 
 	// 11. Run migration 3001 (Down)
-	if err := goose.DownTo(db, "sqlite", 3000); err != nil {
+	if _, err := provider.DownTo(ctx, 3000); err != nil {
 		t.Fatalf("failed to migrate down to version 3000: %v", err)
 	}
 

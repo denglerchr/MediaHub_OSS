@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"math"
 	"os"
 	"time"
 
@@ -25,10 +26,25 @@ const dispatchBatchSize = 50
 // ctx is cancelled. It is intended to run once per node for the lifetime of the
 // process and must be called as a goroutine.
 func (p *Processor) StartQueueMonitor(ctx context.Context) {
+	if !p.tryTrackWorker() {
+		return
+	}
+	defer p.wg.Done()
+
+	workerCtx := p.workerContext()
+	monitorCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	stopAfter := context.AfterFunc(workerCtx, cancel)
+	defer stopAfter()
+
+	if monitorCtx.Err() != nil {
+		return
+	}
+
 	p.Logger.Info("Starting background queue monitor to scan for queued entries...")
 
 	// Initial scan at startup
-	p.dispatchQueuedWorkers(ctx)
+	p.dispatchQueuedWorkers(monitorCtx)
 
 	ticker := time.NewTicker(queueMonitorInterval)
 	defer ticker.Stop()
@@ -38,8 +54,11 @@ func (p *Processor) StartQueueMonitor(ctx context.Context) {
 		case <-ctx.Done():
 			p.Logger.Info("Stopping background queue monitor")
 			return
+		case <-workerCtx.Done():
+			p.Logger.Info("Stopping background queue monitor")
+			return
 		case <-ticker.C:
-			p.dispatchQueuedWorkers(ctx)
+			p.dispatchQueuedWorkers(monitorCtx)
 		}
 	}
 }
@@ -68,6 +87,10 @@ const (
 // arrive while a pass is running are recorded in needsRescan and cause exactly one
 // follow-up pass before the guard is handed off, so no trigger is ever lost.
 func (p *Processor) dispatchQueuedWorkers(ctx context.Context) {
+	if p.isShuttingDown() || ctx.Err() != nil {
+		return
+	}
+
 	p.needsRescan.Store(true)
 	if !p.isScanningQueue.CompareAndSwap(false, true) {
 		return
@@ -84,13 +107,13 @@ func (p *Processor) dispatchQueuedWorkers(ctx context.Context) {
 	}()
 
 	for {
-		if ctx.Err() != nil {
+		if p.isShuttingDown() || ctx.Err() != nil {
 			return
 		}
 
 		p.needsRescan.Store(false)
 
-		if p.runDispatchPass(ctx) && ctx.Err() == nil {
+		if p.runDispatchPass(ctx) && !p.isShuttingDown() && ctx.Err() == nil {
 			// The pass spawned workers and stopped with capacity to spare, so more
 			// queued entries may be dispatchable immediately.
 			continue
@@ -101,7 +124,7 @@ func (p *Processor) dispatchQueuedWorkers(ctx context.Context) {
 		// re-acquiring the guard here makes sure that trigger is never lost.
 		p.isScanningQueue.Store(false)
 		ownsGuard = false
-		if p.needsRescan.Load() && p.isScanningQueue.CompareAndSwap(false, true) {
+		if !p.isShuttingDown() && ctx.Err() == nil && p.needsRescan.Load() && p.isScanningQueue.CompareAndSwap(false, true) {
 			ownsGuard = true
 			continue
 		}
@@ -115,6 +138,10 @@ func (p *Processor) dispatchQueuedWorkers(ctx context.Context) {
 // stopped with capacity to spare. A false result ends the dispatch loop unless a
 // concurrent trigger requested a rescan.
 func (p *Processor) runDispatchPass(ctx context.Context) bool {
+	if p.isShuttingDown() || ctx.Err() != nil {
+		return false
+	}
+
 	// Bound the requeue backoff registry before scanning.
 	p.retries.prune()
 
@@ -139,7 +166,7 @@ func (p *Processor) runDispatchPass(ctx context.Context) bool {
 
 	spawned := 0
 	for _, dbID := range dbIDs {
-		if remaining <= 0 || ctx.Err() != nil {
+		if remaining <= 0 || p.isShuttingDown() || ctx.Err() != nil {
 			break
 		}
 
@@ -155,8 +182,8 @@ func (p *Processor) runDispatchPass(ctx context.Context) bool {
 }
 
 func (p *Processor) dispatchDatabaseQueue(ctx context.Context, dbID repo.ULID, remaining int) (spawned int, aborted bool) {
-	var lastID int64
-	for remaining > 0 && ctx.Err() == nil {
+	var nextIDStart int64
+	for remaining > 0 && !p.isShuttingDown() && ctx.Err() == nil {
 		limit := max(dispatchBatchSize, remaining)
 
 		entries, err := p.Repo.GetEntries(ctx, dbID, repo.QueryOptions{
@@ -164,7 +191,7 @@ func (p *Processor) dispatchDatabaseQueue(ctx context.Context, dbID repo.ULID, r
 			SortBy:   "id",
 			Order:    "asc",
 			Limit:    limit,
-			AfterID:  lastID,
+			IDStart:  nextIDStart,
 		})
 		if err != nil {
 			p.Logger.Error("Queue dispatch: Failed to get queued entries", "database_id", dbID.String(), "error", err)
@@ -174,9 +201,10 @@ func (p *Processor) dispatchDatabaseQueue(ctx context.Context, dbID repo.ULID, r
 			return spawned, false
 		}
 
+		var lastID int64
 		for _, entry := range entries {
 			lastID = entry.ID
-			if remaining <= 0 || ctx.Err() != nil {
+			if remaining <= 0 || p.isShuttingDown() || ctx.Err() != nil {
 				break
 			}
 			switch p.tryClaimAndSpawn(ctx, dbID, entry) {
@@ -192,9 +220,10 @@ func (p *Processor) dispatchDatabaseQueue(ctx context.Context, dbID repo.ULID, r
 			}
 		}
 
-		if len(entries) < limit {
+		if len(entries) < limit || lastID == math.MaxInt64 {
 			return spawned, false
 		}
+		nextIDStart = lastID + 1
 	}
 	return spawned, false
 }
@@ -204,6 +233,10 @@ func (p *Processor) dispatchDatabaseQueue(ctx context.Context, dbID repo.ULID, r
 // it. The slot reservation is rolled back if the claim fails or is lost to
 // another node, without triggering cascading dispatch passes.
 func (p *Processor) tryClaimAndSpawn(ctx context.Context, dbID repo.ULID, entry repo.Entry) claimOutcome {
+	if p.isShuttingDown() || ctx.Err() != nil {
+		return claimAborted
+	}
+
 	// Skip entries that recently failed and are still within their requeue
 	// backoff window; the dispatch pass moves on to the next candidate instead
 	// of hot-looping on the same broken entry.
@@ -226,10 +259,18 @@ func (p *Processor) tryClaimAndSpawn(ctx context.Context, dbID repo.ULID, entry 
 		return claimLost
 	}
 
+	if !p.tryTrackWorker() {
+		p.unreserveAsyncSlot()
+		p.requeueClaimedEntry(ctx, dbID, entry)
+		return claimAborted
+	}
+
 	p.Logger.Debug("Spawning background worker for claimed entry", "database_id", dbID.String(), "entry_id", entry.ID)
+	workerCtx := p.workerContext()
 	go func() {
+		defer p.wg.Done()
 		defer p.releaseAsyncSlot()
-		p.runClaimedEntry(context.Background(), dbID, entry)
+		p.runClaimedEntry(workerCtx, dbID, entry)
 	}()
 	return claimWon
 }
@@ -264,14 +305,14 @@ func (p *Processor) runClaimedEntry(ctx context.Context, dbID repo.ULID, entry r
 		}
 	}()
 
-	stream, err := p.Storage.Read(ctx, dbID.String(), entry.ID, 0, -1)
+	stream, err := p.Storage.Read(ctx, dbID, entry.ID, 0, -1)
 	if err != nil {
 		tempFile.Close()
 		p.Logger.Error("Worker: Failed to read queued file from storage", "entry", entry.ID, "error", err)
-		if errors.Is(err, customerrors.ErrNotFound) {
-			p.failProcessedEntry(ctx, dbID, entry)
-		} else {
+		if ctx.Err() != nil || p.isShuttingDown() || !errors.Is(err, customerrors.ErrNotFound) {
 			p.requeueClaimedEntry(ctx, dbID, entry)
+		} else {
+			p.failProcessedEntry(ctx, dbID, entry)
 		}
 		return
 	}
@@ -282,6 +323,11 @@ func (p *Processor) runClaimedEntry(ctx context.Context, dbID repo.ULID, entry r
 
 	if copyErr != nil || closeErr != nil {
 		p.Logger.Error("Worker: Failed to copy queued file to temp path", "entry", entry.ID, "copy_error", copyErr, "close_error", closeErr)
+		p.requeueClaimedEntry(ctx, dbID, entry)
+		return
+	}
+
+	if ctx.Err() != nil || p.isShuttingDown() {
 		p.requeueClaimedEntry(ctx, dbID, entry)
 		return
 	}
@@ -298,9 +344,15 @@ func (p *Processor) runClaimedEntry(ctx context.Context, dbID repo.ULID, entry r
 // failure) so it can be picked up again later. The entry enters a per-node
 // backoff window (see retry.go) so repeated failures cannot spin the dispatcher.
 func (p *Processor) requeueClaimedEntry(ctx context.Context, dbID repo.ULID, entry repo.Entry) {
+	cleanupCtx, cancel := cleanupContext(ctx)
+	defer cancel()
+
 	entry.Status = repo.EntryStatusQueued
-	if _, err := p.Repo.UpdateEntry(ctx, dbID, entry); err != nil {
+	if _, err := p.Repo.UpdateEntry(cleanupCtx, dbID, entry); err != nil {
 		p.Logger.Error("Worker: CRITICAL: Failed to requeue claimed entry", "entry", entry.ID, "error", err)
+		return
+	}
+	if p.isShuttingDown() || ctx.Err() != nil {
 		return
 	}
 	p.retries.noteClaimFailure(dbID, entry.ID)
@@ -311,11 +363,14 @@ func (p *Processor) requeueClaimedEntry(ctx context.Context, dbID repo.ULID, ent
 // The original file in storage is preserved for inspection and potential recovery;
 // only a possibly partially generated preview is removed.
 func (p *Processor) failProcessedEntry(ctx context.Context, dbID repo.ULID, entry repo.Entry) {
-	_ = p.Storage.DeletePreview(ctx, dbID.String(), entry.ID)
+	cleanupCtx, cancel := cleanupContext(ctx)
+	defer cancel()
+
+	_ = p.Storage.DeletePreview(cleanupCtx, dbID, entry.ID)
 	entry.PreviewSize = 0
 	entry.Status = repo.EntryStatusError
 	p.retries.clearClaimRetry(dbID, entry.ID)
-	if _, err := p.Repo.UpdateEntry(ctx, dbID, entry); err != nil {
+	if _, err := p.Repo.UpdateEntry(cleanupCtx, dbID, entry); err != nil {
 		if !errors.Is(err, customerrors.ErrNotFound) {
 			p.Logger.Error("Worker: CRITICAL: Failed to set status error", "entry", entry.ID, "error", err)
 		}

@@ -194,6 +194,9 @@ func (r *PostgresRepository) scanEntryRow(rows *sql.Rows, customFields []repo.Cu
 	}
 
 	if !rows.Next() {
+		if err := rows.Err(); err != nil {
+			return repo.Entry{}, err
+		}
 		return repo.Entry{}, customerrors.ErrNotFound
 	}
 
@@ -222,33 +225,15 @@ func (r *PostgresRepository) scanEntryRows(rows *sql.Rows, customFields []repo.C
 	return entries, nil
 }
 
-func (r *PostgresRepository) validateAndFormatSearchField(field string, customFields []repo.CustomFieldDef) (string, error) {
-	standardFields := map[string]bool{
-		"id": true, "timestamp": true, "created_at": true, "updated_at": true,
-		"filesize": true, "preview_filesize": true, "filename": true, "status": true, "mime_type": true,
-	}
-	if standardFields[field] {
-		return fmt.Sprintf(`"%s"`, field), nil
-	}
-
+func (r *PostgresRepository) isAllowedMediaField(field string) bool {
 	for _, fields := range r.MediaFields {
 		for _, mediaField := range fields {
 			if mediaField.Name == field {
-				return fmt.Sprintf(`"%s"`, field), nil
+				return true
 			}
 		}
 	}
-
-	for _, cf := range customFields {
-		if cf.Name == field {
-			if cf.Type.IsCoordinate() {
-				return "", fmt.Errorf("field '%s' is a coordinate field and cannot be used with scalar operators", field)
-			}
-			return fmt.Sprintf(`"%s%d"`, customFieldsPrefix, cf.ID), nil
-		}
-	}
-
-	return "", fmt.Errorf("field '%s' is not allowed or does not exist", field)
+	return false
 }
 
 // mapCustomFieldsToPostgresColumns maps entry custom fields into the target SQL column-data map.
@@ -281,12 +266,5 @@ func mapCustomFieldsToPostgresColumns(
 		}
 	}
 	return nil
-}
-
-func isValidOperator(op string) bool {
-	valid := map[string]bool{
-		"=": true, "!=": true, ">": true, ">=": true, "<": true, "<=": true, "LIKE": true, "ILIKE": true,
-	}
-	return valid[strings.ToUpper(op)]
 }
 

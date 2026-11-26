@@ -67,8 +67,8 @@ func TestAddField_RejectsReservedName(t *testing.T) {
 
 	for _, name := range []string{"status", "Filename", "created_at", "Preview_Filesize"} {
 		body := `{"name":"` + name + `","type":"TEXT"}`
-		req := httptest.NewRequest(http.MethodPost, "/api/database/db1/field", strings.NewReader(body))
-		req.SetPathValue("database_id", "db1")
+		req := httptest.NewRequest(http.MethodPost, "/api/database/01HGFB9Z5W7ABCDEFGHJKMNPQR/field", strings.NewReader(body))
+		req.SetPathValue("database_id", "01HGFB9Z5W7ABCDEFGHJKMNPQR")
 		rec := httptest.NewRecorder()
 
 		h.AddField(rec, req)
@@ -92,8 +92,8 @@ func TestUpdateField_RejectsReservedRename(t *testing.T) {
 	h := &DatabaseHandler{}
 
 	body := `{"name":"timestamp"}`
-	req := httptest.NewRequest(http.MethodPatch, "/api/database/db1/field/1", strings.NewReader(body))
-	req.SetPathValue("database_id", "db1")
+	req := httptest.NewRequest(http.MethodPatch, "/api/database/01HGFB9Z5W7ABCDEFGHJKMNPQR/field/1", strings.NewReader(body))
+	req.SetPathValue("database_id", "01HGFB9Z5W7ABCDEFGHJKMNPQR")
 	req.SetPathValue("field_id", "1")
 	rec := httptest.NewRecorder()
 

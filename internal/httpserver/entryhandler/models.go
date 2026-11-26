@@ -17,6 +17,9 @@ type EntryHandler struct {
 	MaxSyncUploadSizeBytes int64
 	MediaConverter         media.MediaConverter
 	Processor              *processing.Processor
+	Imports                *ImportManager
+
+	maxImportUploadBytes int64
 }
 
 // metadata that can be added when sending a new entry

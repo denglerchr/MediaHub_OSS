@@ -2,23 +2,32 @@ package initconfig_test
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/BurntSushi/toml"
 	"mediahub_oss/internal/cli/initconfig"
 	"mediahub_oss/internal/repository"
 	"mediahub_oss/internal/shared/customerrors"
+	"mediahub_oss/internal/shared/ulid"
 )
 
 type mockRepo struct {
 	repository.Repository
-	users     map[string]repository.User
-	databases []repository.Database
+	users                  map[string]repository.User
+	databases              []repository.Database
+	permissions            []repository.UserPermissions
+	getDatabasesFunc       func(ctx context.Context) ([]repository.Database, error)
+	createDatabaseFunc     func(ctx context.Context, db repository.Database) (repository.Database, error)
+	acquireLockFunc        func(ctx context.Context, lockName, ownerID string, ttl time.Duration) (bool, error)
+	releaseLockFunc        func(ctx context.Context, lockName, ownerID string) (bool, error)
+	setUserPermissionsFunc func(ctx context.Context, permissions repository.UserPermissions) error
 }
 
 func newMockRepo() *mockRepo {
@@ -28,12 +37,32 @@ func newMockRepo() *mockRepo {
 	}
 }
 
+func (m *mockRepo) AcquireLock(ctx context.Context, lockName, ownerID string, ttl time.Duration) (bool, error) {
+	if m.acquireLockFunc != nil {
+		return m.acquireLockFunc(ctx, lockName, ownerID, ttl)
+	}
+	return true, nil
+}
+
+func (m *mockRepo) ReleaseLock(ctx context.Context, lockName, ownerID string) (bool, error) {
+	if m.releaseLockFunc != nil {
+		return m.releaseLockFunc(ctx, lockName, ownerID)
+	}
+	return true, nil
+}
+
 func (m *mockRepo) GetDatabases(ctx context.Context) ([]repository.Database, error) {
+	if m.getDatabasesFunc != nil {
+		return m.getDatabasesFunc(ctx)
+	}
 	return m.databases, nil
 }
 
 func (m *mockRepo) CreateDatabase(ctx context.Context, db repository.Database) (repository.Database, error) {
-	db.ID = repository.ULID("01HGFB9Z5W7ABCDEFGHJKMNPQR")
+	if m.createDatabaseFunc != nil {
+		return m.createDatabaseFunc(ctx, db)
+	}
+	db.ID = ulid.MustParse("01HGFB9Z5W7ABCDEFGHJKMNPQR")
 	m.databases = append(m.databases, db)
 	return db, nil
 }
@@ -47,12 +76,16 @@ func (m *mockRepo) GetUserByUsername(ctx context.Context, username string) (repo
 }
 
 func (m *mockRepo) CreateUser(ctx context.Context, user repository.User) (repository.User, error) {
-	user.ID = repository.ULID("01HGFB9Z5W7ABCDEFGHJKMNPQS")
+	user.ID = ulid.MustParse("01HGFB9Z5W7ABCDEFGHJKMNPQS")
 	m.users[user.Username] = user
 	return user, nil
 }
 
 func (m *mockRepo) SetUserPermissions(ctx context.Context, permissions repository.UserPermissions) error {
+	m.permissions = append(m.permissions, permissions)
+	if m.setUserPermissionsFunc != nil {
+		return m.setUserPermissionsFunc(ctx, permissions)
+	}
 	return nil
 }
 
@@ -63,7 +96,7 @@ func TestApply_RedactsPasswordsForExistingAndNewUsers(t *testing.T) {
 	t.Run("redacts passwords when users already exist", func(t *testing.T) {
 		repo := newMockRepo()
 		repo.users["alice"] = repository.User{
-			ID:       "01HGFB9Z5W7ABCDEFGHJKMNPQT",
+			ID:       ulid.MustParse("01HGFB9Z5W7ABCDEFGHJKMNPQT"),
 			Username: "alice",
 		}
 
@@ -114,7 +147,7 @@ password = "AliceSecretPassword"
 	t.Run("redacts passwords in mixed scenario (new and existing users)", func(t *testing.T) {
 		repo := newMockRepo()
 		repo.users["alice"] = repository.User{
-			ID:       "01HGFB9Z5W7ABCDEFGHJKMNPQT",
+			ID:       ulid.MustParse("01HGFB9Z5W7ABCDEFGHJKMNPQT"),
 			Username: "alice",
 		}
 
@@ -433,6 +466,204 @@ func TestApply_CustomFieldValidation(t *testing.T) {
 			if len(repo.databases) != 0 {
 				t.Errorf("expected database with reserved/empty custom field name %q to be skipped, got %+v", reservedName, repo.databases)
 			}
+		}
+	})
+}
+
+func TestApply_DistributedLockAndDatabaseExistsRecovery(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	validHK := initconfig.InitHousekeeping{
+		Interval:  "1h",
+		DiskSpace: "10G",
+		MaxAge:    "0",
+	}
+
+	t.Run("acquires lock, retries while another pod holds it, reads DBs after lock, and releases lock", func(t *testing.T) {
+		ctx := context.Background()
+		repo := newMockRepo()
+
+		var events []string
+		var acquireAttempts int
+		var acquiredLockName, acquiredOwner, releasedLockName, releasedOwner string
+		var acquiredTTL time.Duration
+		var releaseCtxErr error
+
+		existingDBID := ulid.MustParse("01J1234567890123456789ABCD")
+
+		repo.acquireLockFunc = func(ctx context.Context, lockName, ownerID string, ttl time.Duration) (bool, error) {
+			acquireAttempts++
+			events = append(events, "acquire")
+			acquiredLockName = lockName
+			acquiredOwner = ownerID
+			acquiredTTL = ttl
+			if acquireAttempts < 3 {
+				return false, nil
+			}
+			// Simulate the other pod finishing database creation right before releasing the lock.
+			repo.databases = []repository.Database{{ID: existingDBID, Name: "SharedDB"}}
+			return true, nil
+		}
+		repo.getDatabasesFunc = func(ctx context.Context) ([]repository.Database, error) {
+			events = append(events, "get_databases")
+			return repo.databases, nil
+		}
+		repo.createDatabaseFunc = func(ctx context.Context, db repository.Database) (repository.Database, error) {
+			events = append(events, "create_database")
+			t.Fatalf("did not expect CreateDatabase for %q once visible after lock acquisition", db.Name)
+			return repository.Database{}, nil
+		}
+		repo.releaseLockFunc = func(releaseCtx context.Context, lockName, ownerID string) (bool, error) {
+			events = append(events, "release")
+			releaseCtxErr = releaseCtx.Err()
+			releasedLockName = lockName
+			releasedOwner = ownerID
+			return true, nil
+		}
+
+		cfg := initconfig.InitConfig{
+			Databases: []initconfig.InitDatabase{
+				{Name: "SharedDB", ContentType: "file", Housekeeping: validHK},
+			},
+			Users: []initconfig.InitUser{
+				{
+					Name:     "alice",
+					Password: "SecretPassword123",
+					Permissions: []initconfig.InitUserPermission{
+						{DatabaseName: "SharedDB", CanView: true, CanCreate: true},
+					},
+				},
+			},
+		}
+
+		if err := initconfig.Apply(ctx, &cfg, repo, logger, ""); err != nil {
+			t.Fatalf("Apply failed: %v", err)
+		}
+
+		if acquireAttempts != 3 {
+			t.Errorf("expected 3 AcquireLock attempts (2 retries + 1 success), got %d", acquireAttempts)
+		}
+		if acquiredLockName != "init_config" || releasedLockName != "init_config" {
+			t.Errorf("expected lock name 'init_config', got acquire=%q release=%q", acquiredLockName, releasedLockName)
+		}
+		if !strings.HasPrefix(acquiredOwner, "initconfig-") || acquiredOwner != releasedOwner {
+			t.Errorf("expected matching 'initconfig-*' ownerID, got acquire=%q release=%q", acquiredOwner, releasedOwner)
+		}
+		if acquiredTTL != 2*time.Minute {
+			t.Errorf("expected lock TTL 2m, got %v", acquiredTTL)
+		}
+		if releaseCtxErr != nil {
+			t.Errorf("expected detached release context, got %v", releaseCtxErr)
+		}
+		if len(events) < 5 || events[0] != "acquire" || events[1] != "acquire" || events[2] != "acquire" || events[3] != "get_databases" || events[len(events)-1] != "release" {
+			t.Errorf("unexpected operation order: %v", events)
+		}
+		if len(repo.permissions) != 1 || repo.permissions[0].DatabaseID != existingDBID {
+			t.Fatalf("expected user permission bound to %q, got %+v", existingDBID, repo.permissions)
+		}
+	})
+
+	t.Run("releases lock with non-canceled context even when Apply ctx is canceled mid-run", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		repo := newMockRepo()
+
+		var releaseCalled bool
+		var releaseCtxErr error
+
+		repo.getDatabasesFunc = func(ctx context.Context) ([]repository.Database, error) {
+			cancel()
+			return nil, ctx.Err()
+		}
+		repo.releaseLockFunc = func(releaseCtx context.Context, lockName, ownerID string) (bool, error) {
+			releaseCalled = true
+			releaseCtxErr = releaseCtx.Err()
+			return true, nil
+		}
+
+		cfg := initconfig.InitConfig{}
+		err := initconfig.Apply(ctx, &cfg, repo, logger, "")
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("expected context.Canceled, got %v", err)
+		}
+		if !releaseCalled {
+			t.Fatal("expected ReleaseLock to be called after mid-run cancellation")
+		}
+		if releaseCtxErr != nil {
+			t.Fatalf("expected detached ReleaseLock ctx err == nil, got %v", releaseCtxErr)
+		}
+	})
+
+	t.Run("returns error when ctx expires while waiting for lock", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), 120*time.Millisecond)
+		defer cancel()
+
+		repo := newMockRepo()
+		getDBsCalled := false
+		repo.acquireLockFunc = func(ctx context.Context, lockName, ownerID string, ttl time.Duration) (bool, error) {
+			return false, nil
+		}
+		repo.getDatabasesFunc = func(ctx context.Context) ([]repository.Database, error) {
+			getDBsCalled = true
+			return nil, nil
+		}
+
+		cfg := initconfig.InitConfig{}
+		err := initconfig.Apply(ctx, &cfg, repo, logger, "")
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("expected context.DeadlineExceeded while waiting for lock, got %v", err)
+		}
+		if getDBsCalled {
+			t.Errorf("expected GetDatabases not to run when lock was never acquired")
+		}
+	})
+
+	t.Run("recovers from ErrDatabaseExists by refreshing database ID map for permissions", func(t *testing.T) {
+		ctx := context.Background()
+		repo := newMockRepo()
+
+		racedDBID := ulid.MustParse("01J9999999999999999999ZZZZ")
+		getCalls := 0
+
+		repo.getDatabasesFunc = func(ctx context.Context) ([]repository.Database, error) {
+			getCalls++
+			if getCalls == 1 {
+				return nil, nil
+			}
+			return []repository.Database{{ID: racedDBID, Name: "RacedDB"}}, nil
+		}
+		repo.createDatabaseFunc = func(ctx context.Context, db repository.Database) (repository.Database, error) {
+			return repository.Database{}, customerrors.ErrDatabaseExists
+		}
+
+		cfg := initconfig.InitConfig{
+			Databases: []initconfig.InitDatabase{
+				{Name: "RacedDB", ContentType: "file", Housekeeping: validHK},
+			},
+			Users: []initconfig.InitUser{
+				{
+					Name:     "bob",
+					Password: "SecretPassword123",
+					Permissions: []initconfig.InitUserPermission{
+						{DatabaseName: "RacedDB", CanView: true, CanEdit: true},
+					},
+				},
+			},
+		}
+
+		if err := initconfig.Apply(ctx, &cfg, repo, logger, ""); err != nil {
+			t.Fatalf("Apply failed: %v", err)
+		}
+
+		if getCalls != 2 {
+			t.Errorf("expected 2 GetDatabases calls (initial + refresh after ErrDatabaseExists), got %d", getCalls)
+		}
+		if len(repo.permissions) != 1 {
+			t.Fatalf("expected 1 permission assignment, got %d", len(repo.permissions))
+		}
+		if repo.permissions[0].DatabaseID != racedDBID {
+			t.Errorf("expected permission DatabaseID %q, got %q", racedDBID, repo.permissions[0].DatabaseID)
+		}
+		if !repo.permissions[0].Roles.HasAccess(repository.AccessView) || !repo.permissions[0].Roles.HasAccess(repository.AccessEdit) {
+			t.Errorf("expected AccessView and AccessEdit permissions set, got %v", repo.permissions[0].Roles)
 		}
 	})
 }

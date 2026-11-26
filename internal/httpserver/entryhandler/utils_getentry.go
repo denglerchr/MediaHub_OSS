@@ -9,6 +9,7 @@ import (
 	"mediahub_oss/internal/processing"
 	repo "mediahub_oss/internal/repository"
 	"mediahub_oss/internal/shared/customerrors"
+	"mime"
 	"net/http"
 	"strconv"
 	"strings"
@@ -20,6 +21,54 @@ func entryFilenameOrDefault(entry repo.Entry) string {
 		return entry.FileName
 	}
 	return strconv.FormatInt(entry.ID, 10)
+}
+
+func isSafeInlineMimeType(mimeType string) bool {
+	mediaType, _, err := mime.ParseMediaType(mimeType)
+	if err != nil {
+		mediaType = strings.ToLower(strings.TrimSpace(strings.SplitN(mimeType, ";", 2)[0]))
+	}
+	mediaType = strings.ToLower(strings.TrimSpace(mediaType))
+	if mediaType == "image/svg+xml" {
+		return false
+	}
+	return strings.HasPrefix(mediaType, "video/") ||
+		strings.HasPrefix(mediaType, "audio/") ||
+		strings.HasPrefix(mediaType, "image/")
+}
+
+func sanitizeDispositionFilename(name, fallback string) string {
+	var b strings.Builder
+	for _, r := range name {
+		if r == '\r' || r == '\n' || (r >= 0 && r < 0x20) || r == 0x7f {
+			continue
+		}
+		b.WriteRune(r)
+	}
+	cleaned := strings.TrimSpace(b.String())
+	if cleaned == "" {
+		if fallback != "" {
+			return fallback
+		}
+		return "download"
+	}
+	return cleaned
+}
+
+func formatContentDisposition(disposition, filename, fallback string) string {
+	safeName := sanitizeDispositionFilename(filename, fallback)
+	formatted := mime.FormatMediaType(disposition, map[string]string{"filename": safeName})
+	if formatted == "" {
+		asciiSafe := strings.NewReplacer(`"`, "", `\`, "").Replace(safeName)
+		if asciiSafe == "" {
+			asciiSafe = fallback
+		}
+		if asciiSafe == "" {
+			asciiSafe = "download"
+		}
+		return fmt.Sprintf(`%s; filename="%s"`, disposition, asciiSafe)
+	}
+	return formatted
 }
 
 // parsePositiveQueryInt parses an optional positive integer (> 0) from query parameters.
@@ -136,7 +185,7 @@ func (h *EntryHandler) serveTransformedEntryFile(
 	entry repo.Entry,
 	convOpts media.ConversionOptions,
 ) {
-	origStream, err := h.Storage.Read(r.Context(), dbID.String(), entry.ID, 0, -1)
+	origStream, err := h.Storage.Read(r.Context(), dbID, entry.ID, 0, -1)
 	if err != nil {
 		utils.RespondWithError(w, http.StatusNotFound, "File content not found.")
 		return
@@ -168,14 +217,16 @@ func (h *EntryHandler) serveTransformedEntryFile(
 	user := utils.GetUserFromContext(r.Context())
 	h.Auditor.Log(r.Context(), "entry.download", user.Username, entryResourceID(dbID, entry.ID), nil)
 
+	w.Header().Set("X-Content-Type-Options", "nosniff")
 	if wantsJSONResponse(r) {
 		h.serveJSONFileStream(w, entry.ID, finalFileName, resultMimeType, uint64(convertedSize), convertedStream)
 		return
 	}
 
 	w.Header().Set("Content-Type", resultMimeType)
+	w.Header().Set("Content-Security-Policy", "sandbox")
 	w.Header().Set("Content-Length", strconv.FormatInt(convertedSize, 10))
-	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"", finalFileName))
+	w.Header().Set("Content-Disposition", formatContentDisposition("attachment", finalFileName, strconv.FormatInt(entry.ID, 10)))
 	w.WriteHeader(http.StatusOK)
 
 	_, _ = io.Copy(w, convertedStream)
@@ -189,8 +240,9 @@ func (h *EntryHandler) serveStoredEntryFile(
 	dbID repo.ULID,
 	entry repo.Entry,
 ) {
+	w.Header().Set("X-Content-Type-Options", "nosniff")
 	if wantsJSONResponse(r) {
-		fileStream, err := h.Storage.Read(r.Context(), dbID.String(), entry.ID, 0, -1)
+		fileStream, err := h.Storage.Read(r.Context(), dbID, entry.ID, 0, -1)
 		if err != nil {
 			utils.RespondWithError(w, http.StatusNotFound, "File content not found.")
 			return
@@ -225,7 +277,7 @@ func (h *EntryHandler) serveStoredEntryFile(
 		}
 	}
 
-	fileStream, err := h.Storage.Read(r.Context(), dbID.String(), entry.ID, offset, length)
+	fileStream, err := h.Storage.Read(r.Context(), dbID, entry.ID, offset, length)
 	if err != nil {
 		utils.RespondWithError(w, http.StatusNotFound, "File content not found.")
 		return
@@ -233,21 +285,25 @@ func (h *EntryHandler) serveStoredEntryFile(
 	defer fileStream.Close()
 
 	w.Header().Set("Content-Type", entry.MimeType)
+	w.Header().Set("Content-Security-Policy", "sandbox")
 	w.Header().Set("Accept-Ranges", "bytes")
+
+	safeFilename := entryFilenameOrDefault(entry)
+	fallbackFilename := strconv.FormatInt(entry.ID, 10)
 
 	if isPartial {
 		end := offset + length - 1
+		disposition := "attachment"
+		if isSafeInlineMimeType(entry.MimeType) {
+			disposition = "inline"
+		}
 		w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", offset, end, fileSize))
 		w.Header().Set("Content-Length", strconv.FormatInt(length, 10))
-		if entry.FileName != "" {
-			w.Header().Set("Content-Disposition", fmt.Sprintf("inline; filename=\"%s\"", entry.FileName))
-		}
+		w.Header().Set("Content-Disposition", formatContentDisposition(disposition, safeFilename, fallbackFilename))
 		w.WriteHeader(http.StatusPartialContent)
 	} else {
 		w.Header().Set("Content-Length", strconv.FormatInt(fileSize, 10))
-		if entry.FileName != "" {
-			w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"", entry.FileName))
-		}
+		w.Header().Set("Content-Disposition", formatContentDisposition("attachment", safeFilename, fallbackFilename))
 		w.WriteHeader(http.StatusOK)
 	}
 

@@ -1,14 +1,13 @@
 package repository
 
 import (
+	"mediahub_oss/internal/shared/ulid"
 	"time"
 )
 
-type ULID string
-
-func (u ULID) String() string {
-	return string(u)
-}
+// ULID aliases the validated 16-byte ulid.ULID type so repository models and
+// storage providers share the exact same compile-time validated identifier type.
+type ULID = ulid.ULID
 
 type Database struct {
 	ID           ULID

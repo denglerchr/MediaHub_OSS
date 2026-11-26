@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	repo "mediahub_oss/internal/repository"
-	"mediahub_oss/internal/shared"
 	"mediahub_oss/internal/shared/customerrors"
 	"strings"
 	"time"
@@ -56,12 +55,12 @@ func scanDatabaseRow(s scanner) (repo.Database, error) {
 }
 
 // BuildDynamicTableSchema generates the CREATE TABLE statement using the database ID.
-func (r *SQLiteRepository) BuildDynamicTableSchema(dbID, contentType string, customFields []repo.CustomFieldDef) (string, error) {
-	if !shared.IsValidULID(dbID) {
+func (r *SQLiteRepository) BuildDynamicTableSchema(dbID repo.ULID, contentType string, customFields []repo.CustomFieldDef) (string, error) {
+	if dbID.IsZero() {
 		return "", fmt.Errorf("%w: invalid database id", customerrors.ErrValidation)
 	}
 
-	tableName := fmt.Sprintf(`"entries_%s"`, dbID)
+	tableName := fmt.Sprintf(`"entries_%s"`, dbID.String())
 
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf("CREATE TABLE IF NOT EXISTS %s (\n", tableName))
@@ -113,28 +112,30 @@ func (r *SQLiteRepository) BuildDynamicTableSchema(dbID, contentType string, cus
 }
 
 // BuildCustomFieldIndexSQL generates the CREATE INDEX statement for a custom field.
-func BuildCustomFieldIndexSQL(dbID string, cf repo.CustomFieldDef) string {
-	tableName := fmt.Sprintf(`"entries_%s"`, dbID)
+func BuildCustomFieldIndexSQL(dbID repo.ULID, cf repo.CustomFieldDef) string {
+	idStr := dbID.String()
+	tableName := fmt.Sprintf(`"entries_%s"`, idStr)
 	if cf.Type.IsCoordinate() {
-		return fmt.Sprintf(`CREATE INDEX IF NOT EXISTS "idx_entries_%s_%s%d" ON %s("%s%d_lat", "%s%d_lng")`, dbID, customFieldsPrefix, cf.ID, tableName, customFieldsPrefix, cf.ID, customFieldsPrefix, cf.ID)
+		return fmt.Sprintf(`CREATE INDEX IF NOT EXISTS "idx_entries_%s_%s%d" ON %s("%s%d_lat", "%s%d_lng")`, idStr, customFieldsPrefix, cf.ID, tableName, customFieldsPrefix, cf.ID, customFieldsPrefix, cf.ID)
 	}
-	return fmt.Sprintf(`CREATE INDEX IF NOT EXISTS "idx_entries_%s_%s%d" ON %s("%s%d")`, dbID, customFieldsPrefix, cf.ID, tableName, customFieldsPrefix, cf.ID)
+	return fmt.Sprintf(`CREATE INDEX IF NOT EXISTS "idx_entries_%s_%s%d" ON %s("%s%d")`, idStr, customFieldsPrefix, cf.ID, tableName, customFieldsPrefix, cf.ID)
 }
 
 // BuildCustomFieldDropIndexSQL generates the DROP INDEX statement for a custom field.
-func BuildCustomFieldDropIndexSQL(dbID string, fieldID int) string {
-	return fmt.Sprintf(`DROP INDEX IF EXISTS "idx_entries_%s_%s%d"`, dbID, customFieldsPrefix, fieldID)
+func BuildCustomFieldDropIndexSQL(dbID repo.ULID, fieldID int) string {
+	return fmt.Sprintf(`DROP INDEX IF EXISTS "idx_entries_%s_%s%d"`, dbID.String(), customFieldsPrefix, fieldID)
 }
 
 // BuildIndexesSQL creates the indexing statements using the database ID.
-func BuildIndexesSQL(dbID string, customFields []repo.CustomFieldDef) []string {
-	tableName := fmt.Sprintf(`"entries_%s"`, dbID)
+func BuildIndexesSQL(dbID repo.ULID, customFields []repo.CustomFieldDef) []string {
+	idStr := dbID.String()
+	tableName := fmt.Sprintf(`"entries_%s"`, idStr)
 	var sqls []string
 
-	sqls = append(sqls, fmt.Sprintf(`CREATE INDEX IF NOT EXISTS "idx_entries_%s_time" ON %s(timestamp);`, dbID, tableName))
-	sqls = append(sqls, fmt.Sprintf(`CREATE INDEX IF NOT EXISTS "idx_entries_%s_status" ON %s(status);`, dbID, tableName))
-	sqls = append(sqls, fmt.Sprintf(`CREATE INDEX IF NOT EXISTS "idx_entries_%s_created" ON %s(created_at);`, dbID, tableName))
-	sqls = append(sqls, fmt.Sprintf(`CREATE INDEX IF NOT EXISTS "idx_entries_%s_updated" ON %s(updated_at);`, dbID, tableName))
+	sqls = append(sqls, fmt.Sprintf(`CREATE INDEX IF NOT EXISTS "idx_entries_%s_time" ON %s(timestamp);`, idStr, tableName))
+	sqls = append(sqls, fmt.Sprintf(`CREATE INDEX IF NOT EXISTS "idx_entries_%s_status" ON %s(status);`, idStr, tableName))
+	sqls = append(sqls, fmt.Sprintf(`CREATE INDEX IF NOT EXISTS "idx_entries_%s_created" ON %s(created_at);`, idStr, tableName))
+	sqls = append(sqls, fmt.Sprintf(`CREATE INDEX IF NOT EXISTS "idx_entries_%s_updated" ON %s(updated_at);`, idStr, tableName))
 
 	for _, cf := range customFields {
 		if cf.IsIndexed {

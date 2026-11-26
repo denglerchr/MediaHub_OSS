@@ -3,6 +3,7 @@ package s3storage
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -15,32 +16,35 @@ import (
 	"time"
 
 	"mediahub_oss/internal/shared/customerrors"
+	"mediahub_oss/internal/shared/ulid"
 	"mediahub_oss/internal/storage"
 )
 
 func TestGetObjectKey(t *testing.T) {
+	id1 := ulid.MustParse("01HGFB9Z5W7ABCDEFGHJKMNPQR")
+	id2 := ulid.MustParse("01J2A3X9D4B5C6E7F8G9H0J1K2")
 	tests := []struct {
-		dbID     string
+		dbID     ulid.ULID
 		id       int64
 		expected string
 	}{
 		{
-			dbID:     "01HGFB9Z5W7ABCDEFGHJKMNPQR",
+			dbID:     id1,
 			id:       0,
 			expected: "01HGFB9Z5W7ABCDEFGHJKMNPQR/0/0",
 		},
 		{
-			dbID:     "01HGFB9Z5W7ABCDEFGHJKMNPQR",
+			dbID:     id1,
 			id:       10232,
 			expected: "01HGFB9Z5W7ABCDEFGHJKMNPQR/10/10232",
 		},
 		{
-			dbID:     "01J2A3X9D4B5C6E7F8G9H0J1K2",
+			dbID:     id2,
 			id:       999,
 			expected: "01J2A3X9D4B5C6E7F8G9H0J1K2/0/999",
 		},
 		{
-			dbID:     "01J2A3X9D4B5C6E7F8G9H0J1K2",
+			dbID:     id2,
 			id:       1000,
 			expected: "01J2A3X9D4B5C6E7F8G9H0J1K2/1/1000",
 		},
@@ -56,12 +60,12 @@ func TestGetObjectKey(t *testing.T) {
 
 func TestGetPreviewObjectKey(t *testing.T) {
 	tests := []struct {
-		dbID     string
+		dbID     ulid.ULID
 		id       int64
 		expected string
 	}{
 		{
-			dbID:     "01HGFB9Z5W7ABCDEFGHJKMNPQR",
+			dbID:     ulid.MustParse("01HGFB9Z5W7ABCDEFGHJKMNPQR"),
 			id:       10232,
 			expected: "previews/01HGFB9Z5W7ABCDEFGHJKMNPQR/10/10232",
 		},
@@ -275,7 +279,7 @@ func TestS3StorageProviderOperations(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	dbID := "01HGFB9Z5W7ABCDEFGHJKMNPQR"
+	dbID := ulid.MustParse("01HGFB9Z5W7ABCDEFGHJKMNPQR")
 	var entryID int64 = 10232
 
 	// 1. Write file
@@ -422,7 +426,7 @@ func TestS3StorageProviderOperations(t *testing.T) {
 	}
 
 	// 10. Test DeleteDatabase
-	db2 := "01HGFB9Z5W7ABCDEFGHJKMNPQ2"
+	db2 := ulid.MustParse("01HGFB9Z5W7ABCDEFGHJKMNPQ2")
 	_, err = provider.Write(ctx, db2, 1, bytes.NewReader([]byte("main file")))
 	if err != nil {
 		t.Fatalf("Write for DeleteDatabase test failed: %v", err)
@@ -496,7 +500,7 @@ func TestS3DeleteMultipleErrors(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	dbID := "01HGFB9Z5W7ABCDEFGHJKMNPQR"
+	dbID := ulid.MustParse("01HGFB9Z5W7ABCDEFGHJKMNPQR")
 
 	// Case 1: Mapped error on ID 1
 	deleteXMLResponse = `<?xml version="1.0" encoding="UTF-8"?>
@@ -560,7 +564,7 @@ func TestS3StorageProvider_DeleteDatabase(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	dbID := "01HGFB9Z5W7ABCDEFGHJKMNPQR"
+	dbID := ulid.MustParse("01HGFB9Z5W7ABCDEFGHJKMNPQR")
 
 	// Write objects and previews
 	for id := int64(1); id <= 3; id++ {
@@ -586,6 +590,280 @@ func TestS3StorageProvider_DeleteDatabase(t *testing.T) {
 		if _, err := provider.ReadPreview(ctx, dbID, id); err == nil {
 			t.Errorf("expected preview %d to be deleted, but read succeeded", id)
 		}
+	}
+}
+
+func TestS3StorageProvider_ZeroULIDDeleteDatabaseLeavesSiblingsUntouched(t *testing.T) {
+	ts, mock := newMockS3Server()
+	defer ts.Close()
+
+	u, err := url.Parse(ts.URL)
+	if err != nil {
+		t.Fatalf("failed to parse test server url: %v", err)
+	}
+
+	provider, err := NewS3StorageProvider(Config{
+		Endpoint:  u.Host,
+		Region:    "us-east-1",
+		Bucket:    "testbucket",
+		AccessKey: "mockaccesskey",
+		SecretKey: "mocksecretkey",
+		UseSSL:    false,
+	})
+	if err != nil {
+		t.Fatalf("NewS3StorageProvider failed: %v", err)
+	}
+
+	ctx := context.Background()
+	validDB := ulid.MustParse("01HGFB9Z5W7ABCDEFGHJKMNPQR")
+	if _, err := provider.Write(ctx, validDB, 1, bytes.NewReader([]byte("main"))); err != nil {
+		t.Fatalf("setup Write failed: %v", err)
+	}
+	if _, err := provider.WritePreview(ctx, validDB, 1, bytes.NewReader([]byte("preview"))); err != nil {
+		t.Fatalf("setup WritePreview failed: %v", err)
+	}
+
+	if err := provider.DeleteDatabase(ctx, ulid.ULID{}); err != nil {
+		t.Fatalf("DeleteDatabase(zero ULID) failed: %v", err)
+	}
+
+	mock.mu.RLock()
+	_, mainExists := mock.objects[getObjectKey(validDB, 1)]
+	_, previewExists := mock.objects[getPreviewObjectKey(validDB, 1)]
+	mock.mu.RUnlock()
+
+	if !mainExists {
+		t.Fatalf("expected valid main object to remain intact")
+	}
+	if !previewExists {
+		t.Fatalf("expected valid preview object to remain intact")
+	}
+}
+
+func TestS3StorageProvider_ReadZeroLengthAndNegativeOffset(t *testing.T) {
+	validDB := ulid.MustParse("01HGFB9Z5W7ABCDEFGHJKMNPQR")
+
+	t.Run("negative offset returns ErrValidation without network", func(t *testing.T) {
+		provider, err := NewS3StorageProvider(Config{
+			Endpoint:  "localhost:9000",
+			Region:    "us-east-1",
+			Bucket:    "testbucket",
+			AccessKey: "mockaccesskey",
+			SecretKey: "mocksecretkey",
+		})
+		if err != nil {
+			t.Fatalf("NewS3StorageProvider failed: %v", err)
+		}
+
+		if _, err := provider.Read(context.Background(), validDB, 1, -1, 5); !errors.Is(err, customerrors.ErrValidation) {
+			t.Fatalf("expected ErrValidation for negative offset, got %v", err)
+		}
+	})
+
+	t.Run("length zero returns empty reader without invalid range header", func(t *testing.T) {
+		var sawRangeZeroMinusOne bool
+		ts, mock := newMockS3Server()
+		wrapped := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Header.Get("Range") == "bytes=0--1" || strings.Contains(r.Header.Get("Range"), "--") {
+				sawRangeZeroMinusOne = true
+			}
+			ts.Config.Handler.ServeHTTP(w, r)
+		}))
+		defer wrapped.Close()
+		defer ts.Close()
+
+		u, err := url.Parse(wrapped.URL)
+		if err != nil {
+			t.Fatalf("failed to parse URL: %v", err)
+		}
+		provider, err := NewS3StorageProvider(Config{
+			Endpoint:  u.Host,
+			Region:    "us-east-1",
+			Bucket:    "testbucket",
+			AccessKey: "mockaccesskey",
+			SecretKey: "mocksecretkey",
+			UseSSL:    false,
+		})
+		if err != nil {
+			t.Fatalf("NewS3StorageProvider failed: %v", err)
+		}
+
+		ctx := context.Background()
+		const entryID = int64(10)
+		if _, err := provider.Write(ctx, validDB, entryID, bytes.NewReader([]byte("hello s3"))); err != nil {
+			t.Fatalf("Write failed: %v", err)
+		}
+
+		for _, offset := range []int64{0, 5} {
+			rc, err := provider.Read(ctx, validDB, entryID, offset, 0)
+			if err != nil {
+				t.Fatalf("Read(offset=%d, length=0) failed: %v", offset, err)
+			}
+			data, readErr := io.ReadAll(rc)
+			rc.Close()
+			if readErr != nil {
+				t.Fatalf("ReadAll(offset=%d, length=0) failed: %v", offset, readErr)
+			}
+			if len(data) != 0 {
+				t.Fatalf("expected empty slice for length=0, got %d bytes", len(data))
+			}
+		}
+
+		if _, err := provider.Read(ctx, validDB, 99999, 0, 0); !errors.Is(err, customerrors.ErrNotFound) {
+			t.Fatalf("expected ErrNotFound for missing object with length=0, got %v", err)
+		}
+
+		mock.mu.RLock()
+		heads := mock.headRequests
+		mock.mu.RUnlock()
+		if heads < 3 {
+			t.Errorf("expected Stat HEAD checks for length=0 reads, got %d", heads)
+		}
+		if sawRangeZeroMinusOne {
+			t.Fatal("observed invalid negative Range header")
+		}
+	})
+}
+
+func TestS3StorageProvider_DeleteDatabaseCanceled(t *testing.T) {
+	validDB := ulid.MustParse("01HGFB9Z5W7ABCDEFGHJKMNPQR")
+
+	t.Run("pre-canceled context returns context.Canceled", func(t *testing.T) {
+		provider, err := NewS3StorageProvider(Config{
+			Endpoint:  "localhost:9000",
+			Region:    "us-east-1",
+			Bucket:    "testbucket",
+			AccessKey: "mockaccesskey",
+			SecretKey: "mocksecretkey",
+		})
+		if err != nil {
+			t.Fatalf("NewS3StorageProvider failed: %v", err)
+		}
+
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+
+		if err := provider.DeleteDatabase(ctx, validDB); !errors.Is(err, context.Canceled) {
+			t.Fatalf("expected context.Canceled, got %v", err)
+		}
+	})
+
+	t.Run("mid-operation cancellation returns context.Canceled", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		releaseHandler := make(chan struct{})
+
+		handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method == http.MethodGet && r.URL.Query().Get("list-type") == "2" {
+				w.Header().Set("Content-Type", "application/xml")
+				w.WriteHeader(http.StatusOK)
+				w.Write([]byte(`<?xml version="1.0" encoding="UTF-8"?>
+<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+    <Name>testbucket</Name>
+    <Prefix>` + r.URL.Query().Get("prefix") + `</Prefix>
+    <KeyCount>1</KeyCount>
+    <IsTruncated>false</IsTruncated>
+    <Contents><Key>` + validDB.String() + `/0/1</Key><Size>4</Size></Contents>
+</ListBucketResult>`))
+				return
+			}
+			if r.Method == http.MethodPost && r.URL.Query().Has("delete") {
+				_, _ = io.Copy(io.Discard, r.Body)
+				cancel()
+				select {
+				case <-r.Context().Done():
+				case <-releaseHandler:
+				}
+				return
+			}
+			w.WriteHeader(http.StatusOK)
+		})
+
+		ts := httptest.NewServer(handler)
+		defer ts.Close()
+		defer close(releaseHandler)
+		u, _ := url.Parse(ts.URL)
+
+		provider, err := NewS3StorageProvider(Config{
+			Endpoint:  u.Host,
+			Region:    "us-east-1",
+			Bucket:    "testbucket",
+			AccessKey: "mockaccesskey",
+			SecretKey: "mocksecretkey",
+			UseSSL:    false,
+		})
+		if err != nil {
+			t.Fatalf("NewS3StorageProvider failed: %v", err)
+		}
+
+		if err := provider.DeleteDatabase(ctx, validDB); !errors.Is(err, context.Canceled) {
+			t.Fatalf("expected context.Canceled on canceled DeleteDatabase, got %v", err)
+		}
+	})
+}
+
+func TestS3StorageProvider_WalkEarlyExitCancelsListObjects(t *testing.T) {
+	validDB := ulid.MustParse("01HGFB9Z5W7ABCDEFGHJKMNPQR")
+	sentinelErr := errors.New("stop walk early")
+
+	page2Done := make(chan bool, 1)
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Query().Get("list-type") != "2" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		if r.URL.Query().Get("continuation-token") == "page2" {
+			select {
+			case <-r.Context().Done():
+				page2Done <- true
+			case <-time.After(3 * time.Second):
+				page2Done <- false
+			}
+			return
+		}
+		w.Header().Set("Content-Type", "application/xml")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`<?xml version="1.0" encoding="UTF-8"?>
+<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+    <Name>testbucket</Name>
+    <Prefix>` + validDB.String() + `/</Prefix>
+    <KeyCount>1</KeyCount>
+    <IsTruncated>true</IsTruncated>
+    <NextContinuationToken>page2</NextContinuationToken>
+    <Contents><Key>` + validDB.String() + `/0/1</Key><Size>12</Size></Contents>
+</ListBucketResult>`))
+	})
+
+	ts := httptest.NewServer(handler)
+	defer ts.Close()
+	u, _ := url.Parse(ts.URL)
+
+	provider, err := NewS3StorageProvider(Config{
+		Endpoint:  u.Host,
+		Region:    "us-east-1",
+		Bucket:    "testbucket",
+		AccessKey: "mockaccesskey",
+		SecretKey: "mocksecretkey",
+		UseSSL:    false,
+	})
+	if err != nil {
+		t.Fatalf("NewS3StorageProvider failed: %v", err)
+	}
+
+	err = provider.Walk(context.Background(), validDB, func(id int64, info storage.FileInfo) error {
+		return sentinelErr
+	})
+	if !errors.Is(err, sentinelErr) {
+		t.Fatalf("expected sentinelErr, got %v", err)
+	}
+
+	select {
+	case canceled := <-page2Done:
+		if !canceled {
+			t.Fatal("expected ListObjects page 2 request to be canceled on Walk early exit")
+		}
+	case <-time.After(100 * time.Millisecond):
+		// Also valid if ListObjects exited before initiating page 2.
 	}
 }
 

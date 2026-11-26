@@ -10,6 +10,7 @@ import (
 
 	"mediahub_oss/internal/httpserver/auth"
 	repo "mediahub_oss/internal/repository"
+	"mediahub_oss/internal/shared/ulid"
 )
 
 type mockServiceAuthRepo struct {
@@ -45,10 +46,10 @@ func TestBackgroundServices_CloseServices(t *testing.T) {
 	})
 
 	t.Run("flushes and stops live authMiddleware", func(t *testing.T) {
-		keyID := repo.ULID("01HGFB9Z5W7ABCDEFGHJKMNPQR")
+		keyID := ulid.MustParse("01HGFB9Z5W7ABCDEFGHJKMNPQR")
 		mockRepo := &mockServiceAuthRepo{
 			user: repo.User{
-				ID:       "01HGFB9Z5W7ABCDEFGHJKMNPQR",
+				ID:       ulid.MustParse("01HGFB9Z5W7ABCDEFGHJKMNPQR"),
 				Username: "serviceuser",
 			},
 			apiKey: repo.APIKey{

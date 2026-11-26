@@ -9,8 +9,8 @@ import (
 	"errors"
 	"fmt"
 	repo "mediahub_oss/internal/repository"
-	"mediahub_oss/internal/shared"
 	"mediahub_oss/internal/shared/customerrors"
+	"mediahub_oss/internal/shared/ulid"
 	"strings"
 
 	"github.com/Masterminds/squirrel"
@@ -24,10 +24,8 @@ func (r *SQLiteRepository) CreateDatabase(ctx context.Context, db repo.Database)
 	}
 
 	// Generate ULID if not provided by the handler
-	if db.ID == "" {
-		db.ID = repo.ULID(shared.GenerateULID())
-	} else if !shared.IsValidULID(db.ID.String()) {
-		return repo.Database{}, fmt.Errorf("%w: invalid database id", customerrors.ErrValidation)
+	if db.ID.IsZero() {
+		db.ID = ulid.New()
 	}
 
 	var hkLastRunMs int64 = 0
@@ -41,11 +39,11 @@ func (r *SQLiteRepository) CreateDatabase(ctx context.Context, db repo.Database)
 	}
 
 	// 1. Generate the dynamic schema and index queries using the ID instead of Name
-	createTableSQL, err := r.BuildDynamicTableSchema(db.ID.String(), db.ContentType, db.CustomFields)
+	createTableSQL, err := r.BuildDynamicTableSchema(db.ID, db.ContentType, db.CustomFields)
 	if err != nil {
 		return repo.Database{}, fmt.Errorf("%w: %v", customerrors.ErrValidation, err)
 	}
-	indexSQLs := BuildIndexesSQL(db.ID.String(), db.CustomFields)
+	indexSQLs := BuildIndexesSQL(db.ID, db.CustomFields)
 
 	// 2. Execute within a transaction
 	tx, err := r.DB.BeginTx(ctx, nil)
@@ -118,13 +116,9 @@ func (r *SQLiteRepository) CreateDatabase(ctx context.Context, db repo.Database)
 
 // GetDatabase retrieves a single database configuration by its ULID.
 func (r *SQLiteRepository) GetDatabase(ctx context.Context, dbID repo.ULID) (repo.Database, error) {
-	if !shared.IsValidULID(dbID.String()) {
-		return repo.Database{}, fmt.Errorf("%w: invalid database id", customerrors.ErrValidation)
-	}
-
 	query, args, err := r.Builder.Select("id", "name", "content_type", "hk_interval", "hk_disk_space", "hk_max_age", "create_preview", "auto_conversion", "n_max_queued", "hk_last_run", "entry_count", "total_disk_space_bytes", "queued_count").
 		From("databases").
-		Where(squirrel.Eq{"id": dbID.String()}).
+		Where(squirrel.Eq{"id": dbID}).
 		ToSql()
 	if err != nil {
 		return repo.Database{}, fmt.Errorf("failed to build select query: %w", err)
@@ -194,9 +188,9 @@ func (r *SQLiteRepository) GetDatabases(ctx context.Context) ([]repo.Database, e
 	}
 	defer cfRows.Close()
 
-	cfMap := make(map[string][]repo.CustomFieldDef)
+	cfMap := make(map[repo.ULID][]repo.CustomFieldDef)
 	for cfRows.Next() {
-		var dbID string
+		var dbID repo.ULID
 		var cf repo.CustomFieldDef
 		if err := cfRows.Scan(&dbID, &cf.ID, &cf.Name, &cf.Type, &cf.IsIndexed); err != nil {
 			return nil, fmt.Errorf("failed to scan custom field: %w", err)
@@ -208,7 +202,7 @@ func (r *SQLiteRepository) GetDatabases(ctx context.Context) ([]repo.Database, e
 	}
 
 	for i := range databases {
-		if cfs, ok := cfMap[databases[i].ID.String()]; ok {
+		if cfs, ok := cfMap[databases[i].ID]; ok {
 			databases[i].CustomFields = cfs
 		} else {
 			databases[i].CustomFields = []repo.CustomFieldDef{}
@@ -222,9 +216,6 @@ func (r *SQLiteRepository) GetDatabases(ctx context.Context) ([]repo.Database, e
 func (r *SQLiteRepository) UpdateDatabase(ctx context.Context, db repo.Database) (repo.Database, error) {
 	if !safeNameRegex.MatchString(db.Name) {
 		return repo.Database{}, fmt.Errorf("%w: database name contains invalid characters", customerrors.ErrInvalidName)
-	}
-	if !shared.IsValidULID(db.ID.String()) {
-		return repo.Database{}, fmt.Errorf("%w: invalid database id", customerrors.ErrValidation)
 	}
 
 	var hkLastRunMs int64 = 0
@@ -268,15 +259,11 @@ func (r *SQLiteRepository) UpdateDatabase(ctx context.Context, db repo.Database)
 // recomputed the true values; regular configuration updates must not use it or
 // concurrent entry operations would lose their statistics deltas.
 func (r *SQLiteRepository) UpdateDatabaseStats(ctx context.Context, dbID repo.ULID, stats repo.DatabaseStats) error {
-	if !shared.IsValidULID(dbID.String()) {
-		return fmt.Errorf("%w: invalid database id", customerrors.ErrValidation)
-	}
-
 	query, args, err := r.Builder.Update("databases").
 		Set("entry_count", stats.EntryCount).
 		Set("total_disk_space_bytes", stats.TotalDiskSpaceBytes).
 		Set("queued_count", stats.QueuedCount).
-		Where(squirrel.Eq{"id": dbID.String()}).
+		Where(squirrel.Eq{"id": dbID}).
 		ToSql()
 	if err != nil {
 		return fmt.Errorf("failed to build stats update query: %w", err)
@@ -294,9 +281,8 @@ func (r *SQLiteRepository) UpdateDatabaseStats(ctx context.Context, dbID repo.UL
 
 // DeleteDatabase permanently removes a database, its entries table, and cascades to permissions.
 func (r *SQLiteRepository) DeleteDatabase(ctx context.Context, dbID repo.ULID) error {
-	if !shared.IsValidULID(dbID.String()) {
-		return fmt.Errorf("%w: invalid database id", customerrors.ErrValidation)
-	}
+	r.cfMu.Lock()
+	defer r.cfMu.Unlock()
 
 	tx, err := r.DB.BeginTx(ctx, nil)
 	if err != nil {
@@ -311,7 +297,7 @@ func (r *SQLiteRepository) DeleteDatabase(ctx context.Context, dbID repo.ULID) e
 	}
 
 	// Delete from the main metadata table (permissions cascade automatically)
-	query, args, err := r.Builder.Delete("databases").Where(squirrel.Eq{"id": dbID.String()}).ToSql()
+	query, args, err := r.Builder.Delete("databases").Where(squirrel.Eq{"id": dbID}).ToSql()
 	if err != nil {
 		return fmt.Errorf("failed to build delete query: %w", err)
 	}
@@ -330,21 +316,17 @@ func (r *SQLiteRepository) DeleteDatabase(ctx context.Context, dbID repo.ULID) e
 		return fmt.Errorf("failed to commit transaction: %w", err)
 	}
 
-	// Invalidate custom fields cache for the deleted database
-	r.Cache.Delete("cf:" + dbID.String())
+	// Invalidate custom fields cache for the deleted database under cfMu
+	r.Cache.Delete(customFieldsCacheKey(dbID))
 
 	return nil
 }
 
 // GetDatabaseStats retrieves live statistics for a specific database by its ID.
 func (r *SQLiteRepository) GetDatabaseStats(ctx context.Context, dbID repo.ULID) (repo.DatabaseStats, error) {
-	if !shared.IsValidULID(dbID.String()) {
-		return repo.DatabaseStats{}, fmt.Errorf("%w: invalid database id", customerrors.ErrValidation)
-	}
-
 	query, args, err := r.Builder.Select("entry_count", "total_disk_space_bytes", "queued_count").
 		From("databases").
-		Where(squirrel.Eq{"id": dbID.String()}).
+		Where(squirrel.Eq{"id": dbID}).
 		ToSql()
 	if err != nil {
 		return repo.DatabaseStats{}, fmt.Errorf("failed to build select query: %w", err)
@@ -381,11 +363,11 @@ func (r *SQLiteRepository) GetDatabaseULIDsWithQueuedEntries(ctx context.Context
 
 	var ulids []repo.ULID
 	for rows.Next() {
-		var id string
+		var id repo.ULID
 		if err := rows.Scan(&id); err != nil {
 			return nil, fmt.Errorf("failed to scan database id: %w", err)
 		}
-		ulids = append(ulids, repo.ULID(id))
+		ulids = append(ulids, id)
 	}
 
 	if err := rows.Err(); err != nil {

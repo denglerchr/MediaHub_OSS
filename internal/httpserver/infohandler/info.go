@@ -2,7 +2,6 @@ package infohandler
 
 import (
 	"fmt"
-	"log/slog"
 	"net/http"
 	"time"
 
@@ -11,7 +10,6 @@ import (
 )
 
 func NewInfoHandler(
-	logger *slog.Logger,
 	version string,
 	mc media.MediaConverter,
 	oidcEnabled bool,
@@ -29,7 +27,6 @@ func NewInfoHandler(
 	}
 
 	handler := &InfoHandler{
-		Logger:       logger,
 		Version:      version,
 		StartTime:    time.Now(),
 		ConversionTo: convertTo,

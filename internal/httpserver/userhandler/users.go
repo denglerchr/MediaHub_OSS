@@ -1,12 +1,11 @@
 package userhandler
 
 import (
-	"encoding/json"
 	"errors"
 	"mediahub_oss/internal/httpserver/utils"
 	repo "mediahub_oss/internal/repository"
-	"mediahub_oss/internal/shared"
 	"mediahub_oss/internal/shared/customerrors"
+	"mediahub_oss/internal/shared/ulid"
 	"net/http"
 
 	"golang.org/x/crypto/bcrypt"
@@ -40,7 +39,8 @@ func (h *UserHandler) GetMe(w http.ResponseWriter, r *http.Request) {
 		Permissions: []DatabasePermission{}, // Default to empty array
 	}
 
-	// 3. If the user is an admin, they bypass specific permission checks
+	// 3. Global admins (direct admin sessions and admin API keys with AccessAdmin)
+	//    bypass per-database filtering and return an empty permissions list.
 	if isAdmin {
 		utils.RespondWithJSON(w, http.StatusOK, response)
 		return
@@ -54,22 +54,7 @@ func (h *UserHandler) GetMe(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 5. Parse the roles
-	for dbID, rp := range permsMap {
-		canView := rp.HasAccess(repo.AccessView)
-		canCreate := rp.HasAccess(repo.AccessCreate)
-		canEdit := rp.HasAccess(repo.AccessEdit)
-		canDelete := rp.HasAccess(repo.AccessDelete)
-		canAdmin := rp.HasAccess(repo.AccessAdmin)
-
-		response.Permissions = append(response.Permissions, DatabasePermission{
-			DatabaseID: dbID.String(),
-			CanView:    canView,
-			CanCreate:  canCreate,
-			CanEdit:    canEdit,
-			CanDelete:  canDelete,
-			CanAdmin:   canAdmin,
-		})
-	}
+	response.Permissions = mapPermissionsMapToDTO(permsMap)
 
 	// 6. Return the populated response
 	utils.RespondWithJSON(w, http.StatusOK, response)
@@ -105,8 +90,8 @@ func (h *UserHandler) UpdateMe(w http.ResponseWriter, r *http.Request) {
 
 	// 2. Parse the request payload
 	var payload UpdateMePayload
-	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-		utils.RespondWithError(w, http.StatusBadRequest, "Invalid JSON body")
+	if status, msg := utils.DecodeJSONBody(w, r, &payload); status != 0 {
+		utils.RespondWithError(w, status, msg)
 		return
 	}
 
@@ -216,16 +201,7 @@ func (h *UserHandler) GetUsers(w http.ResponseWriter, r *http.Request) {
 			}
 
 			// 5. Parse the comma-separated roles into boolean flags
-			for _, rp := range rawPerms {
-				userRes.Permissions = append(userRes.Permissions, DatabasePermission{
-					DatabaseID: rp.DatabaseID.String(), // Updated to DatabaseID
-					CanView:    rp.Roles.HasAccess(repo.AccessView),
-					CanCreate:  rp.Roles.HasAccess(repo.AccessCreate),
-					CanEdit:    rp.Roles.HasAccess(repo.AccessEdit),
-					CanDelete:  rp.Roles.HasAccess(repo.AccessDelete),
-					CanAdmin:   rp.Roles.HasAccess(repo.AccessAdmin),
-				})
-			}
+			userRes.Permissions = mapUserPermissionsToDTO(rawPerms)
 		}
 
 		// Add the populated user response to our list
@@ -259,9 +235,9 @@ func (h *UserHandler) CreateUser(w http.ResponseWriter, r *http.Request) {
 
 	// 1. Decode Payload
 	var payload CreateUserPayload
-	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-		h.Logger.Warn("Failed to decode CreateUser payload", "error", err)
-		utils.RespondWithError(w, http.StatusBadRequest, "Invalid JSON body")
+	if status, msg := utils.DecodeJSONBody(w, r, &payload); status != 0 {
+		h.Logger.Warn("Failed to decode CreateUser payload", "status", status, "error", msg)
+		utils.RespondWithError(w, status, msg)
 		return
 	}
 
@@ -282,13 +258,19 @@ func (h *UserHandler) CreateUser(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Validate for duplicate database permissions
-	seenDBs := make(map[string]bool)
-	for _, p := range payload.Permissions {
-		if seenDBs[p.DatabaseID] {
-			utils.RespondWithError(w, http.StatusBadRequest, "Duplicate database IDs in permissions list")
+	if hasDuplicateDatabaseIDs(payload.Permissions) {
+		utils.RespondWithError(w, http.StatusBadRequest, "Duplicate database IDs in permissions list")
+		return
+	}
+
+	parsedDBIDs := make([]ulid.ULID, len(payload.Permissions))
+	for i, perm := range payload.Permissions {
+		dbID, err := ulid.Parse(perm.DatabaseID)
+		if err != nil {
+			utils.RespondWithError(w, http.StatusBadRequest, "Invalid database_id in permissions list: must be a valid ULID")
 			return
 		}
-		seenDBs[p.DatabaseID] = true
+		parsedDBIDs[i] = dbID
 	}
 
 	// 3. Determine password hash
@@ -329,14 +311,14 @@ func (h *UserHandler) CreateUser(w http.ResponseWriter, r *http.Request) {
 	var appliedPermissions = []DatabasePermission{}
 
 	if len(payload.Permissions) > 0 {
-		for _, perm := range payload.Permissions {
-			access := repo.NewAccessGrant(perm.CanView, perm.CanCreate, perm.CanEdit, perm.CanDelete, perm.CanAdmin)
+		for i, perm := range payload.Permissions {
+			access := perm.toAccessGrant()
 
 			// Only save if at least one role is assigned
 			if access != 0 {
 				repoPerm := repo.UserPermissions{
 					UserID:     createdUser.ID,
-					DatabaseID: repo.ULID(perm.DatabaseID), // Updated to map DatabaseID
+					DatabaseID: parsedDBIDs[i],
 					Roles:      access,
 				}
 
@@ -393,33 +375,33 @@ func (h *UserHandler) UpdateUser(w http.ResponseWriter, r *http.Request) {
 	adminUser := utils.GetUserFromContext(ctx)
 
 	// 1. Extract the user ID from the path parameters
-	userIDStr := r.PathValue("user_ulid")
-	if userIDStr == "" {
-		utils.RespondWithError(w, http.StatusBadRequest, "Missing required path parameter: user_ulid")
-		return
-	}
-	userID := repo.ULID(userIDStr)
-	if !shared.IsValidULID(userIDStr) {
-		utils.RespondWithError(w, http.StatusBadRequest, "Invalid user ID format: must be a valid ULID")
+	userID, ok := parseUserIDParam(w, r)
+	if !ok {
 		return
 	}
 
 	// 2. Decode the payload
 	var payload UpdateUserPayload
-	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-		h.Logger.Warn("Failed to decode UpdateUser payload", "error", err)
-		utils.RespondWithError(w, http.StatusBadRequest, "Invalid JSON body")
+	if status, msg := utils.DecodeJSONBody(w, r, &payload); status != 0 {
+		h.Logger.Warn("Failed to decode UpdateUser payload", "status", status, "error", msg)
+		utils.RespondWithError(w, status, msg)
 		return
 	}
 
 	// Validate for duplicate database permissions
-	seenDBs := make(map[string]bool)
-	for _, p := range payload.Permissions {
-		if seenDBs[p.DatabaseID] {
-			utils.RespondWithError(w, http.StatusBadRequest, "Duplicate database IDs in permissions list")
+	if hasDuplicateDatabaseIDs(payload.Permissions) {
+		utils.RespondWithError(w, http.StatusBadRequest, "Duplicate database IDs in permissions list")
+		return
+	}
+
+	parsedDBIDs := make([]ulid.ULID, len(payload.Permissions))
+	for i, perm := range payload.Permissions {
+		dbID, err := ulid.Parse(perm.DatabaseID)
+		if err != nil {
+			utils.RespondWithError(w, http.StatusBadRequest, "Invalid database_id in permissions list: must be a valid ULID")
 			return
 		}
-		seenDBs[p.DatabaseID] = true
+		parsedDBIDs[i] = dbID
 	}
 
 	// 3. Fetch the existing user
@@ -482,6 +464,10 @@ func (h *UserHandler) UpdateUser(w http.ResponseWriter, r *http.Request) {
 				utils.RespondWithError(w, http.StatusConflict, "Username already exists")
 				return
 			}
+			if errors.Is(err, customerrors.ErrConflict) {
+				utils.RespondWithError(w, http.StatusConflict, "Cannot remove last admin user")
+				return
+			}
 			if errors.Is(err, customerrors.ErrNotFound) {
 				utils.RespondWithError(w, http.StatusNotFound, "User not found")
 				return
@@ -502,14 +488,11 @@ func (h *UserHandler) UpdateUser(w http.ResponseWriter, r *http.Request) {
 
 	// 5. Process permission updates (Upsert or Delete)
 	if len(payload.Permissions) > 0 {
-		for _, perm := range payload.Permissions {
-
-			access := repo.NewAccessGrant(perm.CanView, perm.CanCreate, perm.CanEdit, perm.CanDelete, perm.CanAdmin)
-
+		for i, perm := range payload.Permissions {
 			repoPerm := repo.UserPermissions{
 				UserID:     userID,
-				DatabaseID: repo.ULID(perm.DatabaseID), // Updated to use DatabaseID
-				Roles:      access,
+				DatabaseID: parsedDBIDs[i],
+				Roles:      perm.toAccessGrant(),
 			}
 
 			if err := h.Repo.SetUserPermissions(ctx, repoPerm); err != nil {
@@ -521,18 +504,8 @@ func (h *UserHandler) UpdateUser(w http.ResponseWriter, r *http.Request) {
 	// 6. Construct the final response object to return to the client
 	finalPermissions := []DatabasePermission{}
 	if !existingUser.IsAdmin {
-		rawPerms, err := h.Repo.GetAllUserPermissions(ctx, existingUser.ID)
-		if err == nil {
-			for _, rp := range rawPerms {
-				finalPermissions = append(finalPermissions, DatabasePermission{
-					DatabaseID: rp.DatabaseID.String(),
-					CanView:    rp.Roles.HasAccess(repo.AccessView),
-					CanCreate:  rp.Roles.HasAccess(repo.AccessCreate),
-					CanEdit:    rp.Roles.HasAccess(repo.AccessEdit),
-					CanDelete:  rp.Roles.HasAccess(repo.AccessDelete),
-					CanAdmin:   rp.Roles.HasAccess(repo.AccessAdmin),
-				})
-			}
+		if rawPerms, err := h.Repo.GetAllUserPermissions(ctx, existingUser.ID); err == nil {
+			finalPermissions = mapUserPermissionsToDTO(rawPerms)
 		}
 	}
 
@@ -573,14 +546,8 @@ func (h *UserHandler) DeleteUser(w http.ResponseWriter, r *http.Request) {
 	adminUser := utils.GetUserFromContext(ctx)
 
 	// 1. Extract the user ID from the path parameters
-	userIDStr := r.PathValue("user_ulid")
-	if userIDStr == "" {
-		utils.RespondWithError(w, http.StatusBadRequest, "Missing required path parameter: user_ulid")
-		return
-	}
-	userID := repo.ULID(userIDStr)
-	if !shared.IsValidULID(userIDStr) {
-		utils.RespondWithError(w, http.StatusBadRequest, "Invalid user ID format: must be a valid ULID")
+	userID, ok := parseUserIDParam(w, r)
+	if !ok {
 		return
 	}
 
@@ -615,6 +582,8 @@ func (h *UserHandler) DeleteUser(w http.ResponseWriter, r *http.Request) {
 	if err := h.Repo.DeleteUser(ctx, userID); err != nil {
 		if errors.Is(err, customerrors.ErrNotFound) {
 			utils.RespondWithError(w, http.StatusNotFound, "User not found")
+		} else if errors.Is(err, customerrors.ErrConflict) {
+			utils.RespondWithError(w, http.StatusConflict, "Cannot delete the last remaining admin user")
 		} else {
 			h.Logger.Error("Failed to delete user", "error", err, "user_id", userID)
 			utils.RespondWithError(w, http.StatusInternalServerError, "Failed to delete user account")
@@ -652,14 +621,8 @@ func (h *UserHandler) GetUser(w http.ResponseWriter, r *http.Request) {
 
 	adminUser := utils.GetUserFromContext(ctx)
 
-	userIDStr := r.PathValue("user_ulid")
-	if userIDStr == "" {
-		utils.RespondWithError(w, http.StatusBadRequest, "Missing required path parameter: user_ulid")
-		return
-	}
-	userID := repo.ULID(userIDStr)
-	if !shared.IsValidULID(userIDStr) {
-		utils.RespondWithError(w, http.StatusBadRequest, "Invalid user ID format: must be a valid ULID")
+	userID, ok := parseUserIDParam(w, r)
+	if !ok {
 		return
 	}
 
@@ -676,18 +639,8 @@ func (h *UserHandler) GetUser(w http.ResponseWriter, r *http.Request) {
 
 	finalPermissions := []DatabasePermission{}
 	if !user.IsAdmin {
-		rawPerms, err := h.Repo.GetAllUserPermissions(ctx, user.ID)
-		if err == nil {
-			for _, rp := range rawPerms {
-				finalPermissions = append(finalPermissions, DatabasePermission{
-					DatabaseID: rp.DatabaseID.String(),
-					CanView:    rp.Roles.HasAccess(repo.AccessView),
-					CanCreate:  rp.Roles.HasAccess(repo.AccessCreate),
-					CanEdit:    rp.Roles.HasAccess(repo.AccessEdit),
-					CanDelete:  rp.Roles.HasAccess(repo.AccessDelete),
-					CanAdmin:   rp.Roles.HasAccess(repo.AccessAdmin),
-				})
-			}
+		if rawPerms, err := h.Repo.GetAllUserPermissions(ctx, user.ID); err == nil {
+			finalPermissions = mapUserPermissionsToDTO(rawPerms)
 		}
 	}
 
@@ -700,7 +653,7 @@ func (h *UserHandler) GetUser(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h.Auditor.Log(ctx, "user.get", adminUser.Username, user.Username, map[string]any{
-		"user_id":      string(user.ID),
+		"user_id":      user.ID.String(),
 		"is_admin":     user.IsAdmin,
 		"account_type": user.AccountType.String(),
 	})

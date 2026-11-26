@@ -29,12 +29,12 @@ func NewRecoveryCommand(globalOptions *GlobalOptions) *cobra.Command {
 		},
 	}
 
-	recoveryOptions.registerFlags(recoveryCommand, globalOptions)
+	recoveryOptions.registerFlags(recoveryCommand)
 
 	return recoveryCommand
 }
 
-func (opt *RecoveryOptions) registerFlags(cmd *cobra.Command, globalOptions *GlobalOptions) {
+func (opt *RecoveryOptions) registerFlags(cmd *cobra.Command) {
 	cmd.Flags().BoolVar(&opt.DryRun, "dryrun", false, "If true, report only without editing.")
 }
 
@@ -44,14 +44,20 @@ func runRecovery(globalOptions *GlobalOptions, recoveryOptions *RecoveryOptions)
 
 	logger.Info("Starting recovery maintenance...", "dryRun", recoveryOptions.DryRun)
 
-	// 1. Initialize the new recovery service
-	// We pass the configuration so the service can connect to the DB and Storage,
-	// along with the logger and the DryRun flag.
-	recoverySvc, err := recovery.NewRecoveryService(globalOptions.Conf, logger, recoveryOptions.DryRun)
+	// 1. Initialize repository and storage provider before constructing the recovery service
+	// so any storage initialization error still cleanly closes the opened database pool.
+	repo, err := initRepository(globalOptions.Conf.Database)
 	if err != nil {
 		return fmt.Errorf("failed to initialize recovery service: %w", err)
 	}
-	defer recoverySvc.Close()
+	defer repo.Close()
+
+	storageProvider, err := initStorage(globalOptions.Conf.Storage)
+	if err != nil {
+		return fmt.Errorf("failed to initialize recovery service: %w", err)
+	}
+
+	recoverySvc := recovery.NewRecoveryService(repo, storageProvider, logger, recoveryOptions.DryRun)
 
 	// 2. Verify database schema version compatibility
 	version, err := recoverySvc.GetMigrationVersion(ctx)

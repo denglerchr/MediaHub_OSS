@@ -19,7 +19,7 @@ func (r *SQLiteRepository) StoreRefreshToken(ctx context.Context, userID repo.UL
 	// Build the INSERT query using Squirrel
 	query, args, err := r.Builder.Insert("refresh_tokens").
 		Columns("user_id", "token_hash", "expiry").
-		Values(userID.String(), tokenHash, expiry).
+		Values(userID, tokenHash, expiry).
 		ToSql()
 	if err != nil {
 		return fmt.Errorf("failed to build insert token query: %w", err)
@@ -43,28 +43,45 @@ func (r *SQLiteRepository) ValidateRefreshToken(ctx context.Context, tokenHash s
 		Where(squirrel.Eq{"token_hash": tokenHash}).
 		ToSql()
 	if err != nil {
-		return "", fmt.Errorf("failed to build validate token query: %w", err)
+		return repo.ULID{}, fmt.Errorf("failed to build validate token query: %w", err)
 	}
 
-	var userIDStr string
+	var userID repo.ULID
 	var expiry int64
 
 	// Execute the query and scan the results
-	err = r.DB.QueryRowContext(ctx, query, args...).Scan(&userIDStr, &expiry)
+	err = r.DB.QueryRowContext(ctx, query, args...).Scan(&userID, &expiry)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return "", customerrors.ErrNotFound
+			return repo.ULID{}, customerrors.ErrNotFound
 		}
-		return "", fmt.Errorf("failed to query refresh token: %w", err)
+		return repo.ULID{}, fmt.Errorf("failed to query refresh token: %w", err)
 	}
 
 	// Check if the token has expired
 	if time.Now().After(time.UnixMilli(expiry)) {
-		return "", customerrors.ErrNotFound
+		return repo.ULID{}, customerrors.ErrNotFound
 	}
 
 	// Token is valid and active
-	return repo.ULID(userIDStr), nil
+	return userID, nil
+}
+
+// ConsumeRefreshToken atomically deletes an unexpired refresh token and returns its associated user ID.
+func (r *SQLiteRepository) ConsumeRefreshToken(ctx context.Context, tokenHash string) (repo.ULID, error) {
+	const query = `DELETE FROM refresh_tokens
+WHERE token_hash = ? AND expiry >= ?
+RETURNING user_id`
+
+	var userID repo.ULID
+	if err := r.DB.QueryRowContext(ctx, query, tokenHash, time.Now().UnixMilli()).Scan(&userID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return repo.ULID{}, customerrors.ErrNotFound
+		}
+		return repo.ULID{}, fmt.Errorf("failed to consume refresh token: %w", err)
+	}
+
+	return userID, nil
 }
 
 // DeleteRefreshToken removes a specific refresh token from the database using its hash (e.g., upon logout).
@@ -126,7 +143,7 @@ func (r *SQLiteRepository) DeleteExpiredRefreshTokens(ctx context.Context) (int6
 func (r *SQLiteRepository) DeleteAllRefreshTokensForUser(ctx context.Context, userID repo.ULID) error {
 	// Build the DELETE query targeting the specific user_id
 	query, args, err := r.Builder.Delete("refresh_tokens").
-		Where(squirrel.Eq{"user_id": userID.String()}).
+		Where(squirrel.Eq{"user_id": userID}).
 		ToSql()
 	if err != nil {
 		return fmt.Errorf("failed to build delete all tokens query: %w", err)

@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	repo "mediahub_oss/internal/repository"
-	"mediahub_oss/internal/shared"
 	"mediahub_oss/internal/shared/customerrors"
 	"regexp"
 	"strings"
@@ -58,12 +57,12 @@ func scanDatabaseRow(s scanner) (repo.Database, error) {
 // BuildDynamicTableSchema generates PostgreSQL DDL for a dedicated media database entries table.
 // Optimization: Uses SMALLINT (2 bytes) for entry status instead of 4-byte INTEGER to optimize storage on millions of rows.
 // CHECK constraints are preferred over native PG ENUMs for transactional migration safety and driver compatibility.
-func (r *PostgresRepository) BuildDynamicTableSchema(dbID, contentType string, customFields []repo.CustomFieldDef) (string, error) {
-	if !shared.IsValidULID(dbID) {
+func (r *PostgresRepository) BuildDynamicTableSchema(dbID repo.ULID, contentType string, customFields []repo.CustomFieldDef) (string, error) {
+	if dbID.IsZero() {
 		return "", fmt.Errorf("%w: invalid database id", customerrors.ErrValidation)
 	}
 
-	tableName := fmt.Sprintf(`"entries_%s"`, dbID)
+	tableName := fmt.Sprintf(`"entries_%s"`, dbID.String())
 
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf("CREATE TABLE IF NOT EXISTS %s (\n", tableName))
@@ -97,7 +96,7 @@ func (r *PostgresRepository) BuildDynamicTableSchema(dbID, contentType string, c
 	for _, cf := range customFields {
 		datatype := mapToPostgresType(cf.Type.String())
 		switch datatype {
-		case "TEXT", "INTEGER", "DOUBLE PRECISION", "BOOLEAN", "POINT":
+		case "TEXT", "INTEGER", "BIGINT", "DOUBLE PRECISION", "BOOLEAN", "POINT":
 			sb.WriteString(fmt.Sprintf(",\n\t\"%s%d\" %s", customFieldsPrefix, cf.ID, datatype))
 		default:
 			return "", fmt.Errorf("unsupported custom field type: %s", cf.Type)
@@ -109,33 +108,35 @@ func (r *PostgresRepository) BuildDynamicTableSchema(dbID, contentType string, c
 }
 
 // BuildCustomFieldIndexSQL generates the CREATE INDEX statement for a custom field in PostgreSQL.
-func BuildCustomFieldIndexSQL(dbID string, cf repo.CustomFieldDef) string {
-	tableName := fmt.Sprintf(`"entries_%s"`, dbID)
+func BuildCustomFieldIndexSQL(dbID repo.ULID, cf repo.CustomFieldDef) string {
+	idStr := dbID.String()
+	tableName := fmt.Sprintf(`"entries_%s"`, idStr)
 	if cf.Type.IsCoordinate() {
-		return fmt.Sprintf(`CREATE INDEX IF NOT EXISTS "idx_entries_%s_%s%d" ON %s USING gist("%s%d");`, dbID, customFieldsPrefix, cf.ID, tableName, customFieldsPrefix, cf.ID)
+		return fmt.Sprintf(`CREATE INDEX IF NOT EXISTS "idx_entries_%s_%s%d" ON %s USING gist("%s%d");`, idStr, customFieldsPrefix, cf.ID, tableName, customFieldsPrefix, cf.ID)
 	}
-	return fmt.Sprintf(`CREATE INDEX IF NOT EXISTS "idx_entries_%s_%s%d" ON %s("%s%d");`, dbID, customFieldsPrefix, cf.ID, tableName, customFieldsPrefix, cf.ID)
+	return fmt.Sprintf(`CREATE INDEX IF NOT EXISTS "idx_entries_%s_%s%d" ON %s("%s%d");`, idStr, customFieldsPrefix, cf.ID, tableName, customFieldsPrefix, cf.ID)
 }
 
 // BuildCustomFieldDropIndexSQL generates the DROP INDEX statement for a custom field in PostgreSQL.
-func BuildCustomFieldDropIndexSQL(dbID string, fieldID int) string {
-	return fmt.Sprintf(`DROP INDEX IF EXISTS "idx_entries_%s_%s%d"`, dbID, customFieldsPrefix, fieldID)
+func BuildCustomFieldDropIndexSQL(dbID repo.ULID, fieldID int) string {
+	return fmt.Sprintf(`DROP INDEX IF EXISTS "idx_entries_%s_%s%d"`, dbID.String(), customFieldsPrefix, fieldID)
 }
 
 // BuildIndexesSQL returns standard and partial PostgreSQL indexes for dynamic entry tables.
 // Optimization: Includes a partial index on status = 4 (Queued) to make background worker queue polling instant,
 // regardless of how many millions of ready entries exist in the table.
-func BuildIndexesSQL(dbID string, customFields []repo.CustomFieldDef) []string {
-	tableName := fmt.Sprintf(`"entries_%s"`, dbID)
+func BuildIndexesSQL(dbID repo.ULID, customFields []repo.CustomFieldDef) []string {
+	idStr := dbID.String()
+	tableName := fmt.Sprintf(`"entries_%s"`, idStr)
 	var sqls []string
 
-	sqls = append(sqls, fmt.Sprintf(`CREATE INDEX IF NOT EXISTS "idx_entries_%s_time" ON %s(timestamp);`, dbID, tableName))
-	sqls = append(sqls, fmt.Sprintf(`CREATE INDEX IF NOT EXISTS "idx_entries_%s_status" ON %s(status);`, dbID, tableName))
-	sqls = append(sqls, fmt.Sprintf(`CREATE INDEX IF NOT EXISTS "idx_entries_%s_created" ON %s(created_at);`, dbID, tableName))
-	sqls = append(sqls, fmt.Sprintf(`CREATE INDEX IF NOT EXISTS "idx_entries_%s_updated" ON %s(updated_at);`, dbID, tableName))
+	sqls = append(sqls, fmt.Sprintf(`CREATE INDEX IF NOT EXISTS "idx_entries_%s_time" ON %s(timestamp);`, idStr, tableName))
+	sqls = append(sqls, fmt.Sprintf(`CREATE INDEX IF NOT EXISTS "idx_entries_%s_status" ON %s(status);`, idStr, tableName))
+	sqls = append(sqls, fmt.Sprintf(`CREATE INDEX IF NOT EXISTS "idx_entries_%s_created" ON %s(created_at);`, idStr, tableName))
+	sqls = append(sqls, fmt.Sprintf(`CREATE INDEX IF NOT EXISTS "idx_entries_%s_updated" ON %s(updated_at);`, idStr, tableName))
 
 	// Partial index for fast background queue scanning: filters specifically for queued status (4)
-	sqls = append(sqls, fmt.Sprintf(`CREATE INDEX IF NOT EXISTS "idx_entries_%s_queued" ON %s(id) WHERE status = 4;`, dbID, tableName))
+	sqls = append(sqls, fmt.Sprintf(`CREATE INDEX IF NOT EXISTS "idx_entries_%s_queued" ON %s(id) WHERE status = 4;`, idStr, tableName))
 
 	for _, cf := range customFields {
 		if cf.IsIndexed {

@@ -5,75 +5,60 @@ import (
 	"mediahub_oss/internal/repository"
 )
 
+// PermissionHolder abstracts authorization checks across the three caller identities:
+//   - **GlobalAdmin**: direct (non-API-key) admin session with unrestricted access to all endpoints,
+//     databases, and actions. Never use for admin API keys.
+//   - **APIKeyOfAdmin**: ANY API key belonging to an admin user (whether AccessAdmin is set or not).
+//     IsGlobalAdmin() checks Scope.HasAccess(AccessAdmin), while HasPermission() always enforces (Scope & ag) != 0.
+//   - **UserPermissions**: non-admin user (direct session or API key), limited to per-database grants
+//     intersected with Scope.
 type PermissionHolder interface {
+	// IsGlobalAdmin reports whether the caller holds global administrative authority (direct admin
+	// session or an admin API key with AccessAdmin). Note: returning true does NOT imply unrestricted
+	// database/entry access, because an APIKeyOfAdmin with AccessAdmin returns true here while still
+	// enforcing its remaining Scope bits in HasPermission.
 	IsGlobalAdmin() bool
-	HasPermission(database repository.ULID, ag repository.AccessGrant) bool // check with OR logic, one of the ag bits is enough
+	HasPermission(ctx context.Context, database repository.ULID, ag repository.AccessGrant) (bool, error) // check with OR logic, one of the ag bits is enough
 
-	GetUserULID() repository.ULID
 	GetAllPermissions(ctx context.Context) (map[repository.ULID]repository.AccessGrant, error)
-
-	HasGlobalScope(ag repository.AccessGrant) bool
-	EffectiveScope() repository.AccessGrant
 }
 
-// There are three types of permission holders:
-// **GlobalAdmin**: has full access to all databases and actions.
-// **APIKeyOfAdmin**: has access limited only by the scope of the API key
-// **UserPermissions**: has access limited by the specific database permissions and a potential API key scope
-
-type GlobalAdmin struct {
-	UserULID repository.ULID
-	Scope    repository.AccessGrant
-}
+// GlobalAdmin represents a direct (non-API-key) session of an admin user.
+// It has unrestricted access to all global admin endpoints and all databases/actions.
+// Do NOT use GlobalAdmin for admin API keys — always use APIKeyOfAdmin instead so
+// API key scope attenuation is enforced on every database/entry check.
+type GlobalAdmin struct{}
 
 func (g *GlobalAdmin) IsGlobalAdmin() bool {
 	return true
 }
 
-func (g *GlobalAdmin) HasPermission(database repository.ULID, ag repository.AccessGrant) bool {
-	return true
-}
-
-func (g *GlobalAdmin) GetUserULID() repository.ULID {
-	return g.UserULID
+func (g *GlobalAdmin) HasPermission(ctx context.Context, database repository.ULID, ag repository.AccessGrant) (bool, error) {
+	return true, nil
 }
 
 func (g *GlobalAdmin) GetAllPermissions(ctx context.Context) (map[repository.ULID]repository.AccessGrant, error) {
 	return map[repository.ULID]repository.AccessGrant{}, nil // Global admin has implicit access to all databases
 }
 
-func (g *GlobalAdmin) HasGlobalScope(ag repository.AccessGrant) bool {
-	return g.EffectiveScope().HasAccess(ag)
-}
-
-func (g *GlobalAdmin) EffectiveScope() repository.AccessGrant {
-	if g.Scope == 0 {
-		return repository.NewAccessGrant(true, true, true, true, true)
-	}
-	return g.Scope
-}
-
-// An API key without admin scope of an admin user
+// APIKeyOfAdmin represents ANY API key belonging to an admin user (with or without AccessAdmin).
+// Database and entry operations are always bounded by Scope, while global admin endpoints are
+// permitted only when Scope includes AccessAdmin.
 type APIKeyOfAdmin struct {
-	UserULID repository.ULID
-	Scope    repository.AccessGrant
-	Repo     repository.Repository
+	Scope repository.AccessGrant
+	Repo  repository.Repository
 
 	loaded    bool
 	databases []repository.ULID
 }
 
 func (a *APIKeyOfAdmin) IsGlobalAdmin() bool {
-	return false
+	return a.Scope.HasAccess(repository.AccessAdmin)
 }
 
-func (a *APIKeyOfAdmin) HasPermission(database repository.ULID, ag repository.AccessGrant) bool {
+func (a *APIKeyOfAdmin) HasPermission(ctx context.Context, database repository.ULID, ag repository.AccessGrant) (bool, error) {
 	// OR logic: if the API key scope has ANY of the requested bits
-	return (a.Scope & ag) != 0
-}
-
-func (a *APIKeyOfAdmin) GetUserULID() repository.ULID {
-	return a.UserULID
+	return (a.Scope & ag) != 0, nil
 }
 
 func (a *APIKeyOfAdmin) loadDatabases(ctx context.Context) error {
@@ -104,15 +89,8 @@ func (a *APIKeyOfAdmin) GetAllPermissions(ctx context.Context) (map[repository.U
 	return perms, nil
 }
 
-func (a *APIKeyOfAdmin) HasGlobalScope(ag repository.AccessGrant) bool {
-	return a.Scope.HasAccess(ag)
-}
-
-func (a *APIKeyOfAdmin) EffectiveScope() repository.AccessGrant {
-	return a.Scope
-}
-
-// A non-admin user with specific database permissions
+// UserPermissions represents a non-admin user (direct session or API key),
+// limiting access to per-database grants intersected with Scope.
 type UserPermissions struct {
 	UserULID repository.ULID
 	Scope    repository.AccessGrant
@@ -126,15 +104,13 @@ func (u *UserPermissions) IsGlobalAdmin() bool {
 	return false
 }
 
-func (u *UserPermissions) loadPermissions(ctx context.Context) {
+func (u *UserPermissions) loadPermissions(ctx context.Context) error {
 	if u.loaded {
-		return
+		return nil
 	}
 	perms, err := u.Repo.GetAllUserPermissions(ctx, u.UserULID)
 	if err != nil {
-		u.permissions = make(map[repository.ULID]repository.AccessGrant)
-		u.loaded = true
-		return
+		return err
 	}
 	permsMap := make(map[repository.ULID]repository.AccessGrant, len(perms))
 	for _, p := range perms {
@@ -142,34 +118,27 @@ func (u *UserPermissions) loadPermissions(ctx context.Context) {
 	}
 	u.permissions = permsMap
 	u.loaded = true
+	return nil
 }
 
-func (u *UserPermissions) HasPermission(database repository.ULID, ag repository.AccessGrant) bool {
-	u.loadPermissions(context.Background())
+func (u *UserPermissions) HasPermission(ctx context.Context, database repository.ULID, ag repository.AccessGrant) (bool, error) {
+	if err := u.loadPermissions(ctx); err != nil {
+		return false, err
+	}
 	if perm, exists := u.permissions[database]; exists {
 		// OR logic: if the user's specific database perm & scope has ANY of the requested bits
-		return (u.Scope & perm & ag) != 0
+		return (u.Scope & perm & ag) != 0, nil
 	}
-	return false
-}
-
-func (u *UserPermissions) GetUserULID() repository.ULID {
-	return u.UserULID
+	return false, nil
 }
 
 func (u *UserPermissions) GetAllPermissions(ctx context.Context) (map[repository.ULID]repository.AccessGrant, error) {
-	u.loadPermissions(ctx)
+	if err := u.loadPermissions(ctx); err != nil {
+		return nil, err
+	}
 	filtered := make(map[repository.ULID]repository.AccessGrant, len(u.permissions))
 	for dbID, perm := range u.permissions {
 		filtered[dbID] = perm & u.Scope
 	}
 	return filtered, nil
-}
-
-func (u *UserPermissions) HasGlobalScope(ag repository.AccessGrant) bool {
-	return u.Scope.HasAccess(ag)
-}
-
-func (u *UserPermissions) EffectiveScope() repository.AccessGrant {
-	return u.Scope
 }

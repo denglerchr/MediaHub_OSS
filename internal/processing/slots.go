@@ -1,7 +1,5 @@
 package processing
 
-import "context"
-
 // This file contains the conversion slot accounting of the Processor.
 //
 // Two kinds of slots exist:
@@ -23,15 +21,36 @@ func (p *Processor) hasFreeAsyncCapacityLocked() bool {
 }
 
 // tryReserveSyncSlot reserves a slot for a synchronous (request-scoped) conversion.
-// Returns false if the total conversion limit is reached.
+// Returns false if the processor is shutting down or the total conversion limit is reached.
 func (p *Processor) tryReserveSyncSlot() bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if p.activeTotal >= p.NFfmpegTotal {
+	if p.shuttingDown.Load() || p.activeTotal >= p.NFfmpegTotal {
 		return false
 	}
 	p.activeTotal++
 	return true
+}
+
+// maybeSpawnDispatchLocked reports whether a background dispatch should start
+// and registers its goroutine in p.wg while p.mu is held.
+func (p *Processor) maybeSpawnDispatchLocked() bool {
+	if p.shuttingDown.Load() || !p.hasQueuedEntries || !p.hasFreeAsyncCapacityLocked() {
+		return false
+	}
+	p.wg.Add(1)
+	return true
+}
+
+func (p *Processor) spawnDispatchIfReady(shouldDispatch bool) {
+	if !shouldDispatch {
+		return
+	}
+	workerCtx := p.workerContext()
+	go func() {
+		defer p.wg.Done()
+		p.dispatchQueuedWorkers(workerCtx)
+	}()
 }
 
 // releaseSyncSlot releases a synchronous conversion slot and triggers a queue
@@ -39,20 +58,19 @@ func (p *Processor) tryReserveSyncSlot() bool {
 func (p *Processor) releaseSyncSlot() {
 	p.mu.Lock()
 	p.activeTotal--
-	shouldDispatch := p.hasQueuedEntries && p.hasFreeAsyncCapacityLocked()
+	shouldDispatch := p.maybeSpawnDispatchLocked()
 	p.mu.Unlock()
 
-	if shouldDispatch {
-		go p.dispatchQueuedWorkers(context.Background())
-	}
+	p.spawnDispatchIfReady(shouldDispatch)
 }
 
 // tryReserveAsyncSlot reserves a slot for a background conversion.
-// Returns false if either the async or the total conversion limit is reached.
+// Returns false if the processor is shutting down or either the async or the total
+// conversion limit is reached.
 func (p *Processor) tryReserveAsyncSlot() bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if !p.hasFreeAsyncCapacityLocked() {
+	if p.shuttingDown.Load() || !p.hasFreeAsyncCapacityLocked() {
 		return false
 	}
 	p.activeAsync++
@@ -66,12 +84,10 @@ func (p *Processor) releaseAsyncSlot() {
 	p.mu.Lock()
 	p.activeAsync--
 	p.activeTotal--
-	shouldDispatch := p.hasQueuedEntries && p.hasFreeAsyncCapacityLocked()
+	shouldDispatch := p.maybeSpawnDispatchLocked()
 	p.mu.Unlock()
 
-	if shouldDispatch {
-		go p.dispatchQueuedWorkers(context.Background())
-	}
+	p.spawnDispatchIfReady(shouldDispatch)
 }
 
 // unreserveAsyncSlot rolls back a reservation made by tryReserveAsyncSlot without
@@ -89,10 +105,8 @@ func (p *Processor) unreserveAsyncSlot() {
 func (p *Processor) noteQueuedEntry() {
 	p.mu.Lock()
 	p.hasQueuedEntries = true
-	shouldDispatch := p.hasFreeAsyncCapacityLocked()
+	shouldDispatch := p.maybeSpawnDispatchLocked()
 	p.mu.Unlock()
 
-	if shouldDispatch {
-		go p.dispatchQueuedWorkers(context.Background())
-	}
+	p.spawnDispatchIfReady(shouldDispatch)
 }

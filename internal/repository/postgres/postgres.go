@@ -77,10 +77,10 @@ func NewRepository(source string, maxOpenConns, maxIdleConns int) (*PostgresRepo
 
 func mapToPostgresType(t string) string {
 	switch strings.ToUpper(t) {
-	case "INTEGER", "INT", "INT32", "UINT32":
-		return "INTEGER"
-	case "INT64", "UINT64", "BIGINT":
+	case "INTEGER", "INT", "INT64", "UINT64", "BIGINT":
 		return "BIGINT"
+	case "INT32", "UINT32":
+		return "INTEGER"
 	case "INT16", "UINT16", "INT8", "UINT8", "SMALLINT":
 		return "SMALLINT"
 	case "REAL", "FLOAT64", "FLOAT32", "DOUBLE", "DOUBLE PRECISION":

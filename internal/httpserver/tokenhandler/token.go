@@ -1,7 +1,6 @@
 package tokenhandler
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -16,7 +15,6 @@ import (
 
 type OIDCConfig struct {
 	Enabled           bool
-	DisableLoginPage  bool
 	DefaultUserRights string
 	IssuerURL         string
 	ClientID          string
@@ -101,7 +99,11 @@ func (h *TokenHandler) GetToken(w http.ResponseWriter, r *http.Request) {
 // @Router /api/token/refresh [post]
 func (h *TokenHandler) RefreshToken(w http.ResponseWriter, r *http.Request) {
 	var req TokenRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.RefreshToken == "" {
+	if status, msg := utils.DecodeJSONBody(w, r, &req); status != 0 {
+		utils.RespondWithError(w, status, msg)
+		return
+	}
+	if req.RefreshToken == "" {
 		utils.RespondWithError(w, http.StatusBadRequest, "Invalid JSON body")
 		return
 	}
@@ -109,8 +111,8 @@ func (h *TokenHandler) RefreshToken(w http.ResponseWriter, r *http.Request) {
 	// Hash the provided refresh token to look it up in the database
 	tokenHash := hashToken(req.RefreshToken)
 
-	// Validate the token in the DB and get the associated UserID
-	userID, err := h.Repo.ValidateRefreshToken(r.Context(), tokenHash)
+	// Atomically validate and consume the token in the DB and get the associated UserID
+	userID, err := h.Repo.ConsumeRefreshToken(r.Context(), tokenHash)
 	if errors.Is(err, customerrors.ErrNotFound) || errors.Is(err, customerrors.ErrPermissionDenied) {
 		utils.RespondWithError(w, http.StatusUnauthorized, "Invalid or expired refresh token")
 		return
@@ -119,9 +121,6 @@ func (h *TokenHandler) RefreshToken(w http.ResponseWriter, r *http.Request) {
 		utils.RespondWithError(w, http.StatusInternalServerError, "Failed to verify refresh token")
 		return
 	}
-
-	// Delete the old token (Token Rotation)
-	_ = h.Repo.DeleteRefreshToken(r.Context(), tokenHash)
 
 	// Generate a fresh pair of tokens
 	accessToken, newRefreshToken, err := h.generateTokens(r, userID)
@@ -155,7 +154,11 @@ func (h *TokenHandler) Logout(w http.ResponseWriter, r *http.Request) {
 	user := utils.GetUserFromContext(r.Context())
 
 	var req TokenRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.RefreshToken == "" {
+	if status, msg := utils.DecodeJSONBody(w, r, &req); status != 0 {
+		utils.RespondWithError(w, status, msg)
+		return
+	}
+	if req.RefreshToken == "" {
 		utils.RespondWithError(w, http.StatusBadRequest, "Invalid JSON body")
 		return
 	}

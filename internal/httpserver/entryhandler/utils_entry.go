@@ -7,6 +7,7 @@ import (
 	"mediahub_oss/internal/httpserver/utils"
 	repo "mediahub_oss/internal/repository"
 	"mediahub_oss/internal/shared/customerrors"
+	"mediahub_oss/internal/shared/ulid"
 	"net/http"
 	"strconv"
 	"strings"
@@ -98,14 +99,19 @@ func entryResourceID(dbID repo.ULID, id int64) string {
 }
 
 // parseDatabasePathParam extracts and validates the "database_id" path parameter.
-// If missing, it writes an HTTP 400 error response and returns ok=false.
+// If missing or invalid, it writes an HTTP 400 error response and returns ok=false.
 func parseDatabasePathParam(w http.ResponseWriter, r *http.Request) (repo.ULID, bool) {
-	dbID := r.PathValue("database_id")
-	if dbID == "" {
+	dbIDStr := r.PathValue("database_id")
+	if dbIDStr == "" {
 		utils.RespondWithError(w, http.StatusBadRequest, "Missing required path parameter: database_id")
-		return "", false
+		return repo.ULID{}, false
 	}
-	return repo.ULID(dbID), true
+	dbID, err := ulid.Parse(dbIDStr)
+	if err != nil {
+		utils.RespondWithError(w, http.StatusBadRequest, "Invalid database_id format.")
+		return repo.ULID{}, false
+	}
+	return dbID, true
 }
 
 // parseEntryPathParams extracts and validates "database_id" and "id" path parameters.
@@ -113,13 +119,13 @@ func parseDatabasePathParam(w http.ResponseWriter, r *http.Request) (repo.ULID, 
 func parseEntryPathParams(w http.ResponseWriter, r *http.Request) (repo.ULID, int64, bool) {
 	dbID, ok := parseDatabasePathParam(w, r)
 	if !ok {
-		return "", 0, false
+		return repo.ULID{}, 0, false
 	}
 	idStr := r.PathValue("id")
 	id, err := strconv.ParseInt(idStr, 10, 64)
 	if err != nil {
 		utils.RespondWithError(w, http.StatusBadRequest, "Invalid ID format.")
-		return "", 0, false
+		return repo.ULID{}, 0, false
 	}
 	return dbID, id, true
 }

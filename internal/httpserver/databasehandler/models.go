@@ -13,7 +13,7 @@ type DatabaseHandler struct {
 	Auditor     audit.AuditLogger
 	Repo        repository.Repository
 	Storage     storage.StorageProvider
-	HouseKeeper housekeeping.HouseKeeper
+	HouseKeeper *housekeeping.HouseKeeper
 }
 
 // DatabaseCreatePayload defines the required JSON payload for POST /api/database.

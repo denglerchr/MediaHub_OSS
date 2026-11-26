@@ -8,7 +8,6 @@ import (
 	"strings"
 
 	repo "mediahub_oss/internal/repository"
-	"mediahub_oss/internal/shared"
 	"mediahub_oss/internal/shared/customerrors"
 
 	"github.com/Masterminds/squirrel"
@@ -16,12 +15,8 @@ import (
 
 // GetCustomFields retrieves all custom fields for a specific database.
 func (r *PostgresRepository) GetCustomFields(ctx context.Context, dbID repo.ULID) ([]repo.CustomFieldDef, error) {
-	if !shared.IsValidULID(dbID.String()) {
-		return nil, fmt.Errorf("%w: invalid database id", customerrors.ErrValidation)
-	}
-
 	var exists bool
-	err := r.DB.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM databases WHERE id = $1)", dbID.String()).Scan(&exists)
+	err := r.DB.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM databases WHERE id = $1)", dbID).Scan(&exists)
 	if err != nil {
 		return nil, fmt.Errorf("failed to check database existence: %w", err)
 	}
@@ -34,7 +29,7 @@ func (r *PostgresRepository) GetCustomFields(ctx context.Context, dbID repo.ULID
 func (r *PostgresRepository) getCustomFields(ctx context.Context, q Queryer, dbID repo.ULID) ([]repo.CustomFieldDef, error) {
 	query, args, err := r.Builder.Select("field_id", "name", "type", "is_indexed").
 		From("database_custom_fields").
-		Where(squirrel.Eq{"database_id": dbID.String()}).
+		Where(squirrel.Eq{"database_id": dbID}).
 		OrderBy("field_id").
 		ToSql()
 	if err != nil {
@@ -66,9 +61,20 @@ func (r *PostgresRepository) getCustomFields(ctx context.Context, q Queryer, dbI
 	return fields, nil
 }
 
+func (r *PostgresRepository) lockEntriesTable(ctx context.Context, tx *sql.Tx, dbID repo.ULID, mode string) error {
+	query := fmt.Sprintf(`LOCK TABLE "entries_%s" IN %s MODE`, dbID.String(), mode)
+	if _, err := tx.ExecContext(ctx, query); err != nil {
+		if isPQUndefinedTable(err) {
+			return customerrors.ErrNotFound
+		}
+		return fmt.Errorf("failed to lock entries table: %w", err)
+	}
+	return nil
+}
+
 func (r *PostgresRepository) lockDatabaseForUpdate(ctx context.Context, tx *sql.Tx, dbID repo.ULID) error {
 	var dummy int
-	err := tx.QueryRowContext(ctx, "SELECT 1 FROM databases WHERE id = $1 FOR UPDATE", dbID.String()).Scan(&dummy)
+	err := tx.QueryRowContext(ctx, "SELECT 1 FROM databases WHERE id = $1 FOR UPDATE", dbID).Scan(&dummy)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return customerrors.ErrNotFound
@@ -80,9 +86,6 @@ func (r *PostgresRepository) lockDatabaseForUpdate(ctx context.Context, tx *sql.
 
 // AddCustomField adds a new custom field to an existing database.
 func (r *PostgresRepository) AddCustomField(ctx context.Context, dbID repo.ULID, field repo.CustomFieldDef) (repo.CustomFieldDef, error) {
-	if !shared.IsValidULID(dbID.String()) {
-		return repo.CustomFieldDef{}, fmt.Errorf("%w: invalid database id", customerrors.ErrValidation)
-	}
 	if field.Name == "" {
 		return repo.CustomFieldDef{}, fmt.Errorf("%w: field name cannot be empty", customerrors.ErrValidation)
 	}
@@ -101,6 +104,10 @@ func (r *PostgresRepository) AddCustomField(ctx context.Context, dbID repo.ULID,
 		return repo.CustomFieldDef{}, err
 	}
 	defer tx.Rollback()
+
+	if err := r.lockEntriesTable(ctx, tx, dbID, "ACCESS EXCLUSIVE"); err != nil {
+		return repo.CustomFieldDef{}, err
+	}
 
 	if err := r.lockDatabaseForUpdate(ctx, tx, dbID); err != nil {
 		return repo.CustomFieldDef{}, err
@@ -135,7 +142,7 @@ func (r *PostgresRepository) AddCustomField(ctx context.Context, dbID repo.ULID,
 
 	query, args, err := r.Builder.Insert("database_custom_fields").
 		Columns("database_id", "field_id", "name", "type", "is_indexed").
-		Values(dbID.String(), field.ID, field.Name, datatype, field.IsIndexed).
+		Values(dbID, field.ID, field.Name, datatype, field.IsIndexed).
 		ToSql()
 	if err != nil {
 		return repo.CustomFieldDef{}, err
@@ -155,7 +162,7 @@ func (r *PostgresRepository) AddCustomField(ctx context.Context, dbID repo.ULID,
 	}
 
 	if field.IsIndexed {
-		indexSQL := BuildCustomFieldIndexSQL(dbID.String(), field)
+		indexSQL := BuildCustomFieldIndexSQL(dbID, field)
 		if _, err := tx.ExecContext(ctx, indexSQL); err != nil {
 			return repo.CustomFieldDef{}, fmt.Errorf("failed to create index on custom field: %w", err)
 		}
@@ -170,14 +177,21 @@ func (r *PostgresRepository) AddCustomField(ctx context.Context, dbID repo.ULID,
 
 // UpdateCustomField updates an existing custom field.
 func (r *PostgresRepository) UpdateCustomField(ctx context.Context, dbID repo.ULID, fieldID int, name *string, isIndexed *bool) (repo.CustomFieldDef, error) {
-	if !shared.IsValidULID(dbID.String()) {
-		return repo.CustomFieldDef{}, fmt.Errorf("%w: invalid database id", customerrors.ErrValidation)
-	}
 	tx, err := r.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return repo.CustomFieldDef{}, err
 	}
 	defer tx.Rollback()
+
+	if isIndexed != nil {
+		mode := "ACCESS EXCLUSIVE"
+		if *isIndexed {
+			mode = "SHARE"
+		}
+		if err := r.lockEntriesTable(ctx, tx, dbID, mode); err != nil {
+			return repo.CustomFieldDef{}, err
+		}
+	}
 
 	if err := r.lockDatabaseForUpdate(ctx, tx, dbID); err != nil {
 		return repo.CustomFieldDef{}, err
@@ -227,12 +241,12 @@ func (r *PostgresRepository) UpdateCustomField(ctx context.Context, dbID repo.UL
 		if newIsIndexed {
 			cfForIndex := *targetField
 			cfForIndex.IsIndexed = true
-			indexSQL := BuildCustomFieldIndexSQL(dbID.String(), cfForIndex)
+			indexSQL := BuildCustomFieldIndexSQL(dbID, cfForIndex)
 			if _, err := tx.ExecContext(ctx, indexSQL); err != nil {
 				return repo.CustomFieldDef{}, fmt.Errorf("failed to create index: %w", err)
 			}
 		} else {
-			dropIndexSQL := BuildCustomFieldDropIndexSQL(dbID.String(), fieldID)
+			dropIndexSQL := BuildCustomFieldDropIndexSQL(dbID, fieldID)
 			if _, err := tx.ExecContext(ctx, dropIndexSQL); err != nil {
 				return repo.CustomFieldDef{}, fmt.Errorf("failed to drop index: %w", err)
 			}
@@ -242,7 +256,7 @@ func (r *PostgresRepository) UpdateCustomField(ctx context.Context, dbID repo.UL
 	query, args, err := r.Builder.Update("database_custom_fields").
 		Set("name", newName).
 		Set("is_indexed", newIsIndexed).
-		Where(squirrel.Eq{"database_id": dbID.String(), "field_id": fieldID}).
+		Where(squirrel.Eq{"database_id": dbID, "field_id": fieldID}).
 		ToSql()
 	if err != nil {
 		return repo.CustomFieldDef{}, err
@@ -270,14 +284,15 @@ func (r *PostgresRepository) UpdateCustomField(ctx context.Context, dbID repo.UL
 
 // DeleteCustomField deletes a custom field.
 func (r *PostgresRepository) DeleteCustomField(ctx context.Context, dbID repo.ULID, fieldID int) error {
-	if !shared.IsValidULID(dbID.String()) {
-		return fmt.Errorf("%w: invalid database id", customerrors.ErrValidation)
-	}
 	tx, err := r.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
+
+	if err := r.lockEntriesTable(ctx, tx, dbID, "ACCESS EXCLUSIVE"); err != nil {
+		return err
+	}
 
 	if err := r.lockDatabaseForUpdate(ctx, tx, dbID); err != nil {
 		return err
@@ -299,7 +314,7 @@ func (r *PostgresRepository) DeleteCustomField(ctx context.Context, dbID repo.UL
 		return customerrors.ErrNotFound
 	}
 
-	dropIndexSQL := BuildCustomFieldDropIndexSQL(dbID.String(), fieldID)
+	dropIndexSQL := BuildCustomFieldDropIndexSQL(dbID, fieldID)
 	if _, err := tx.ExecContext(ctx, dropIndexSQL); err != nil {
 		return fmt.Errorf("failed to drop index: %w", err)
 	}
@@ -311,7 +326,7 @@ func (r *PostgresRepository) DeleteCustomField(ctx context.Context, dbID repo.UL
 	}
 
 	query, args, err := r.Builder.Delete("database_custom_fields").
-		Where(squirrel.Eq{"database_id": dbID.String(), "field_id": fieldID}).
+		Where(squirrel.Eq{"database_id": dbID, "field_id": fieldID}).
 		ToSql()
 	if err != nil {
 		return err

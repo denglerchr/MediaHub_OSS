@@ -88,12 +88,9 @@ func getEncoderSpecificFlags(encoder string) []string {
 	case strings.Contains(encoder, "svtav1"):
 		// AV1 needs a higher CRF to match H264/VP9 visual quality.
 		flags = []string{"-crf", "32", "-preset", "8"}
-	case encoder == "libx264" || encoder == "libx265":
-		// Standard software encoders
+	case encoder == "libx264":
+		// Standard software encoder
 		flags = []string{"-crf", "26"}
-	case strings.Contains(encoder, "vpx-vp9"):
-		// VP9 requires bitrate to be 0 for pure CRF to work
-		flags = []string{"-crf", "30", "-b:v", "0"}
 	default:
 		// Fallback for VAAPI/Vulkan or unknown hardware.
 		// Since we don't know the exact CQ flag, we fallback to a safe constrained bitrate.
