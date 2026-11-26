@@ -30,7 +30,10 @@ export class FullscreenSettingsModalComponent implements OnInit, OnDestroy {
     // Initialize the form with the default values you requested
     this.settingsForm = this.fb.group({
       delaySeconds: [20, [Validators.required, Validators.min(1)]],
-      entryLimit: [50, [Validators.required, Validators.min(1)]],
+      entryLimit: [
+        50,
+        [Validators.required, Validators.min(1), Validators.max(1000), Validators.pattern(/^\d+$/)],
+      ],
       shuffle: [false],
       repeat: [true], // Defaulting to true for typical slideshow behavior
     });

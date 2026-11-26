@@ -42,6 +42,10 @@ They are now inherited from src/styles.css
   align-items: center;
 }
 
+.custom-field-row .form-error {
+  grid-column: 1 / -1;
+}
+
 /*
 REMOVED .btn-link, it's now global
 */

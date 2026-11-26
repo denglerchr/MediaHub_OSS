@@ -110,21 +110,27 @@
 
       <div *ngIf="currentDatabase.custom_fields.length > 0" class="custom-fields-section">
         <h4>Custom Metadata</h4>
-        <div class="form-grid">
+        <div class="form-grid" formGroupName="custom_fields">
           <div
             *ngFor="let field of currentDatabase.custom_fields; trackBy: trackByFieldId"
             class="form-group"
           >
             <ng-container [ngSwitch]="field.type">
               <ng-container *ngSwitchCase="'BOOLEAN'">
-                <label [for]="field.name" class="form-label">{{ field.name }} (BOOLEAN)</label>
+                <label [for]="'upload-cf-' + field.name" class="form-label"
+                  >{{ field.name }} (BOOLEAN)</label
+                >
                 <div class="bool-field-container">
                   <label class="toggle-switch">
-                    <input type="checkbox" [id]="field.name" [formControlName]="field.name" />
+                    <input
+                      type="checkbox"
+                      [id]="'upload-cf-' + field.name"
+                      [formControlName]="field.name"
+                    />
                     <span class="toggle-slider"></span>
                   </label>
                   <span class="bool-field-value">
-                    {{ uploadForm.get(field.name)?.value ? 'True' : 'False' }}
+                    {{ uploadForm.get(['custom_fields', field.name])?.value ? 'True' : 'False' }}
                   </span>
                 </div>
               </ng-container>
@@ -160,14 +166,14 @@
               </ng-container>
 
               <ng-container *ngSwitchDefault>
-                <label [for]="field.name" class="form-label"
+                <label [for]="'upload-cf-' + field.name" class="form-label"
                   >{{ field.name }} ({{ field.type }})</label
                 >
 
                 <ng-container [ngSwitch]="field.type">
                   <input
                     *ngSwitchCase="'INTEGER'"
-                    [id]="field.name"
+                    [id]="'upload-cf-' + field.name"
                     type="number"
                     step="1"
                     [formControlName]="field.name"
@@ -176,7 +182,7 @@
 
                   <input
                     *ngSwitchCase="'REAL'"
-                    [id]="field.name"
+                    [id]="'upload-cf-' + field.name"
                     type="number"
                     step="any"
                     [formControlName]="field.name"
@@ -185,7 +191,7 @@
 
                   <input
                     *ngSwitchDefault
-                    [id]="field.name"
+                    [id]="'upload-cf-' + field.name"
                     type="text"
                     [formControlName]="field.name"
                     class="form-control"

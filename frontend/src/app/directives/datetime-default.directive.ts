@@ -19,12 +19,16 @@ export class DatetimeDefaultDirective {
   // Inject NgControl to cleanly update Reactive Forms
   constructor(@Optional() @Self() private ngControl: NgControl) {}
 
-  // Automatically listen to click and focus events on the host element
+  // Automatically listen to click events on the host element
   @HostListener('click')
-  @HostListener('focus')
   onInteraction(): void {
-    // Only proceed if the control exists and is currently empty
-    if (this.ngControl && this.ngControl.control && !this.ngControl.value) {
+    // Only proceed if the control exists, is enabled, and is currently empty
+    if (
+      this.ngControl &&
+      this.ngControl.control &&
+      !this.ngControl.disabled &&
+      (this.ngControl.value == null || this.ngControl.value === '')
+    ) {
       const now = new Date();
       const year = now.getFullYear();
 

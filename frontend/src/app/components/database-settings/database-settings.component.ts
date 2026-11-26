@@ -1,8 +1,8 @@
 import { Component, OnDestroy, OnInit } from '@angular/core';
 import { ActivatedRoute } from '@angular/router';
 import { FormBuilder, FormGroup, Validators } from '@angular/forms';
-import { Observable, Subject, of } from 'rxjs';
-import { switchMap, takeUntil, filter, take, finalize } from 'rxjs/operators';
+import { Observable, Subject, of, EMPTY } from 'rxjs';
+import { switchMap, takeUntil, filter, take, finalize, catchError } from 'rxjs/operators';
 import { Database, User, DatabaseConfig, CustomField, CustomFieldType } from '../../models';
 import { DatabaseService, DatabaseUpdatePayload } from '../../services/database.service';
 import { AuthService } from '../../services/auth.service';
@@ -12,10 +12,17 @@ import {
   ConfirmationModalComponent,
   ConfirmationModalData,
 } from '../confirmation-modal/confirmation-modal.component';
-import { isValidCustomFieldName, isReservedCustomFieldName } from '../../utils/validation';
+import {
+  DATABASE_NAME_MAX_LENGTH,
+  DATABASE_NAME_PATTERN,
+  isValidCustomFieldName,
+  isReservedCustomFieldName,
+} from '../../utils/validation';
 
 /** Kind of a housekeeping string: durations ("25h") or sizes ("1536M"). */
 type HousekeepingKind = 'duration' | 'size';
+
+const CUSTOM_FIELD_NAME_MAX_LENGTH = 64;
 
 @Component({
   selector: 'app-database-settings',
@@ -28,6 +35,10 @@ export class DatabaseSettingsComponent implements OnInit, OnDestroy {
   public currentUser$: Observable<User | null>;
   public settingsForm: FormGroup;
   public isLoading = false;
+  public isSavingSettings = false;
+  public isRunningHousekeeping = false;
+  public isMutatingField = false;
+  public isDeletingDatabase = false;
 
   public currentDb: Database | null = null;
 
@@ -57,6 +68,9 @@ export class DatabaseSettingsComponent implements OnInit, OnDestroy {
   // must not be mistaken for user edits, which clear the raw state above.
   private isApplyingServerValue = false;
 
+  private pendingLoadDbId: string | null = null;
+  private loadedFormDbId: string | null = null;
+
   private destroy$ = new Subject<void>();
 
   constructor(
@@ -71,7 +85,14 @@ export class DatabaseSettingsComponent implements OnInit, OnDestroy {
     this.currentUser$ = this.authService.currentUser$;
 
     this.settingsForm = this.fb.group({
-      name: ['', [Validators.required]], // NEW: Added name field for renaming
+      name: [
+        '',
+        [
+          Validators.required,
+          Validators.maxLength(DATABASE_NAME_MAX_LENGTH),
+          Validators.pattern(DATABASE_NAME_PATTERN),
+        ],
+      ], // NEW: Added name field for renaming
       n_max_queued: [0, [Validators.required, Validators.min(0)]],
       create_preview: [true],
       auto_conversion: [''],
@@ -115,64 +136,57 @@ export class DatabaseSettingsComponent implements OnInit, OnDestroy {
           const id = params.get('id'); // UPDATED: Extract 'id' instead of 'name'
           this.settingsForm.reset();
           this.housekeepingRaw = {};
-          this.isLoading = true;
-          return id ? this.databaseService.selectDatabase(id) : of(null);
+          this.editingFieldId = null;
+          this.loadedFormDbId = null;
+          this.pendingLoadDbId = id;
+          this.isLoading = !!id;
+          return id
+            ? this.databaseService.selectDatabase(id).pipe(
+                catchError(() => {
+                  if (this.pendingLoadDbId === id) {
+                    this.pendingLoadDbId = null;
+                    this.isLoading = false;
+                  }
+                  return EMPTY;
+                }),
+              )
+            : of(null);
         }),
       )
-      .subscribe();
+      .subscribe({
+        next: () => {
+          if (this.pendingLoadDbId !== null) {
+            this.pendingLoadDbId = null;
+            this.isLoading = false;
+          }
+        },
+        error: () => {
+          this.pendingLoadDbId = null;
+          this.isLoading = false;
+        },
+      });
 
     this.selectedDatabase$.pipe(takeUntil(this.destroy$)).subscribe((db) => {
-      this.isLoading = false;
       if (db) {
+        if (this.pendingLoadDbId === db.id) {
+          this.pendingLoadDbId = null;
+          this.isLoading = false;
+        }
         this.currentDb = db;
 
-        // Extract numerical values and string units from the DB payload.
-        // FE-002: the backend re-emits these strings through
-        // internal/shared/strgen.go ("25h" comes back as "1d 1h", "1536M" as
-        // "1.5G", "90m" as "1h 30min"), so parsing must be lenient and must
-        // never silently coerce a non-empty value to 0.
-        const interval = this.parseHousekeepingString(db.housekeeping.interval, 'h', 'duration');
-        const diskSpace = this.parseHousekeepingString(db.housekeeping.disk_space, 'G', 'size');
-        const maxAge = this.parseHousekeepingString(db.housekeeping.max_age, 'd', 'duration');
-
-        // FE-002: patchValue emits valueChanges per control — guard the
-        // edit-detection subscriptions above while applying server state.
-        this.isApplyingServerValue = true;
-        try {
-          this.settingsForm.patchValue({
-            name: db.name,
-            n_max_queued: db.n_max_queued,
-            ...db.config,
-            housekeeping: {
-              interval_value: interval ? interval.value : 0,
-              interval_unit: interval ? interval.unit : 'h',
-              disk_space_value: diskSpace ? diskSpace.value : 0,
-              disk_space_unit: diskSpace ? diskSpace.unit : 'G',
-              max_age_value: maxAge ? maxAge.value : 0,
-              max_age_unit: maxAge ? maxAge.unit : 'd',
-            },
-          });
-
-          // Keep unparseable server values verbatim so the warning names them and
-          // the save stays blocked until the admin re-enters the row (the backend
-          // would silently zero them — see the housekeepingRaw declaration).
-          this.housekeepingRaw = {};
-          if (!interval) {
-            this.housekeepingRaw.interval = String(db.housekeeping.interval ?? '');
-          }
-          if (!diskSpace) {
-            this.housekeepingRaw.disk_space = String(db.housekeeping.disk_space ?? '');
-          }
-          if (!maxAge) {
-            this.housekeepingRaw.max_age = String(db.housekeeping.max_age ?? '');
-          }
-        } finally {
-          this.isApplyingServerValue = false;
+        // Preserve unsaved settingsForm edits when custom field CRUD / housekeeping
+        // re-emits selectedDatabase$ for the already-loaded database.
+        if (this.loadedFormDbId !== db.id || this.settingsForm.pristine) {
+          this.applyDatabaseToForm(db);
         }
       } else {
         this.currentDb = null;
+        this.loadedFormDbId = null;
         this.housekeepingRaw = {};
         this.settingsForm.reset();
+        if (this.pendingLoadDbId === null) {
+          this.isLoading = false;
+        }
       }
       this.updatePermissions();
     });
@@ -180,6 +194,55 @@ export class DatabaseSettingsComponent implements OnInit, OnDestroy {
     this.currentUser$.pipe(takeUntil(this.destroy$)).subscribe(() => {
       this.updatePermissions();
     });
+  }
+
+  private applyDatabaseToForm(db: Database): void {
+    this.loadedFormDbId = db.id;
+
+    // Extract numerical values and string units from the DB payload.
+    // FE-002: the backend re-emits these strings through
+    // internal/shared/strgen.go ("25h" comes back as "1d 1h", "1536M" as
+    // "1.5G", "90m" as "1h 30min"), so parsing must be lenient and must
+    // never silently coerce a non-empty value to 0.
+    const interval = this.parseHousekeepingString(db.housekeeping.interval, 'h', 'duration');
+    const diskSpace = this.parseHousekeepingString(db.housekeeping.disk_space, 'G', 'size');
+    const maxAge = this.parseHousekeepingString(db.housekeeping.max_age, 'd', 'duration');
+
+    // FE-002: patchValue emits valueChanges per control — guard the
+    // edit-detection subscriptions above while applying server state.
+    this.isApplyingServerValue = true;
+    try {
+      this.settingsForm.patchValue({
+        name: db.name,
+        n_max_queued: db.n_max_queued,
+        ...db.config,
+        housekeeping: {
+          interval_value: interval ? interval.value : 0,
+          interval_unit: interval ? interval.unit : 'h',
+          disk_space_value: diskSpace ? diskSpace.value : 0,
+          disk_space_unit: diskSpace ? diskSpace.unit : 'G',
+          max_age_value: maxAge ? maxAge.value : 0,
+          max_age_unit: maxAge ? maxAge.unit : 'd',
+        },
+      });
+
+      // Keep unparseable server values verbatim so the warning names them and
+      // the save stays blocked until the admin re-enters the row (the backend
+      // would silently zero them — see the housekeepingRaw declaration).
+      this.housekeepingRaw = {};
+      if (!interval) {
+        this.housekeepingRaw.interval = String(db.housekeeping.interval ?? '');
+      }
+      if (!diskSpace) {
+        this.housekeepingRaw.disk_space = String(db.housekeeping.disk_space ?? '');
+      }
+      if (!maxAge) {
+        this.housekeepingRaw.max_age = String(db.housekeeping.max_age ?? '');
+      }
+      this.settingsForm.markAsPristine();
+    } finally {
+      this.isApplyingServerValue = false;
+    }
   }
 
   /**
@@ -418,7 +481,7 @@ export class DatabaseSettingsComponent implements OnInit, OnDestroy {
   }
 
   onSaveSettings(): void {
-    if (this.settingsForm.invalid || !this.currentDb || !this.canAdmin) {
+    if (this.isSavingSettings || this.settingsForm.invalid || !this.currentDb || !this.canAdmin) {
       return;
     }
     // FE-002: block the save while a housekeeping row holds a server value the parser
@@ -432,7 +495,7 @@ export class DatabaseSettingsComponent implements OnInit, OnDestroy {
       );
       return;
     }
-    this.isLoading = true;
+    this.isSavingSettings = true;
 
     const formValue = this.settingsForm.value;
     const config: DatabaseConfig = {};
@@ -460,7 +523,7 @@ export class DatabaseSettingsComponent implements OnInit, OnDestroy {
     const maxAge = this.formatHousekeeping(hkForm.max_age_value, hkForm.max_age_unit, 'duration');
 
     if (interval === null || diskSpace === null || maxAge === null) {
-      this.isLoading = false;
+      this.isSavingSettings = false;
       this.notificationService.showError(
         'Housekeeping values must be at least one second (or one byte for disk space).',
       );
@@ -485,75 +548,109 @@ export class DatabaseSettingsComponent implements OnInit, OnDestroy {
       // FE-043: the request must not outlive the component.
       .pipe(
         takeUntil(this.destroy$),
-        finalize(() => (this.isLoading = false)),
+        finalize(() => (this.isSavingSettings = false)),
       )
-      .subscribe(() => {
-        this.settingsForm.markAsPristine();
+      .subscribe({
+        next: (updatedDb) => {
+          if (updatedDb) {
+            this.currentDb = updatedDb;
+            this.applyDatabaseToForm(updatedDb);
+            this.updatePermissions();
+          } else {
+            this.settingsForm.markAsPristine();
+          }
+        },
+        error: () => {},
       });
   }
 
   onTriggerHousekeeping(): void {
-    if (!this.currentDb || !this.canDelete) return;
-    this.isLoading = true;
+    if (this.isRunningHousekeeping || !this.currentDb || !this.canDelete) return;
+    this.isRunningHousekeeping = true;
     this.databaseService
       .triggerHousekeeping(this.currentDb.id) // UPDATED: Use ULID
       // FE-043: the request must not outlive the component.
       .pipe(
         takeUntil(this.destroy$),
-        finalize(() => (this.isLoading = false)),
+        finalize(() => (this.isRunningHousekeeping = false)),
       )
-      .subscribe();
+      .subscribe({
+        error: () => {},
+      });
   }
 
   onDeleteDatabase(): void {
-    if (!this.currentDb || !this.isGlobalAdmin) return;
+    if (this.isDeletingDatabase || !this.currentDb || !this.isGlobalAdmin) return;
+
+    const dbId = this.currentDb.id;
+    const dbName = this.currentDb.name;
 
     const modalData: ConfirmationModalData = {
       title: 'Confirm Database Deletion',
-      message: `This action will permanently delete the '${this.currentDb.name}' database and all entries within it. This action cannot be undone.`,
+      message: `This action will permanently delete the '${dbName}' database and all entries within it. This action cannot be undone.`,
     };
 
     this.modalService
       .open(ConfirmationModalComponent.MODAL_ID, modalData)
       .pipe(
+        takeUntil(this.destroy$),
         take(1),
         filter((confirmed) => confirmed === true),
       )
       .subscribe(() => {
-        if (this.currentDb) {
-          this.isLoading = true;
-          this.databaseService
-            .deleteDatabase(this.currentDb.id)
-            .pipe(
-              takeUntil(this.destroy$),
-              finalize(() => (this.isLoading = false)),
-            )
-            .subscribe();
-        }
+        this.isDeletingDatabase = true;
+        this.databaseService
+          .deleteDatabase(dbId)
+          .pipe(
+            takeUntil(this.destroy$),
+            finalize(() => (this.isDeletingDatabase = false)),
+          )
+          .subscribe({
+            error: () => {},
+          });
       });
   }
 
-  onAddField(): void {
-    if (!this.currentDb || !this.canAdmin || !this.newFieldName) return;
-
-    if (!isValidCustomFieldName(this.newFieldName)) {
-      this.notificationService.showError(
-        'Field name must start with a letter or underscore and contain only alphanumeric characters or underscores.',
-      );
-      return;
+  private validateCustomFieldName(name: string, excludeFieldId?: number): string | null {
+    if (!name) {
+      return 'Field name is required.';
+    }
+    if (name.length > CUSTOM_FIELD_NAME_MAX_LENGTH) {
+      return `Field name cannot exceed ${CUSTOM_FIELD_NAME_MAX_LENGTH} characters.`;
+    }
+    if (!isValidCustomFieldName(name)) {
+      return 'Field name must start with a letter or underscore and contain only alphanumeric characters or underscores.';
     }
     // FE-049: reserved names collide with standard/media fields and are rejected by
-    // the backend (AddField) — surface the reason up front instead of a bare 400.
-    if (isReservedCustomFieldName(this.newFieldName)) {
-      this.notificationService.showError(
-        `Field name '${this.newFieldName}' is reserved (standard/media field). Please choose another name.`,
-      );
+    // the backend (AddField/UpdateField) — surface the reason up front instead of a bare 400.
+    if (isReservedCustomFieldName(name)) {
+      return `Field name '${name}' is reserved (standard/media field). Please choose another name.`;
+    }
+    const normalized = name.toLowerCase();
+    const isDuplicate = this.currentDb?.custom_fields?.some(
+      (f) => f.id !== excludeFieldId && f.name.toLowerCase() === normalized,
+    );
+    if (isDuplicate) {
+      return `A custom field named '${name}' already exists.`;
+    }
+    return null;
+  }
+
+  onAddField(): void {
+    if (this.isMutatingField || !this.currentDb || !this.canAdmin) return;
+
+    const trimmedName = this.newFieldName.trim();
+    if (!trimmedName) return;
+
+    const validationError = this.validateCustomFieldName(trimmedName);
+    if (validationError) {
+      this.notificationService.showError(validationError);
       return;
     }
 
-    this.isLoading = true;
+    this.isMutatingField = true;
     const newField: CustomField = {
-      name: this.newFieldName,
+      name: trimmedName,
       type: this.newFieldType,
       is_indexed: this.newFieldIsIndexed,
     };
@@ -562,12 +659,15 @@ export class DatabaseSettingsComponent implements OnInit, OnDestroy {
       .addCustomField(this.currentDb.id, newField)
       .pipe(
         takeUntil(this.destroy$),
-        finalize(() => (this.isLoading = false)),
+        finalize(() => (this.isMutatingField = false)),
       )
-      .subscribe(() => {
-        this.newFieldName = '';
-        this.newFieldType = 'TEXT';
-        this.newFieldIsIndexed = true;
+      .subscribe({
+        next: () => {
+          this.newFieldName = '';
+          this.newFieldType = 'TEXT';
+          this.newFieldIsIndexed = true;
+        },
+        error: () => {},
       });
   }
 
@@ -583,66 +683,66 @@ export class DatabaseSettingsComponent implements OnInit, OnDestroy {
   }
 
   onSaveField(fieldId: number): void {
-    if (!this.currentDb || !this.canAdmin || !this.editingFieldName) return;
+    if (this.isMutatingField || !this.currentDb || !this.canAdmin) return;
 
-    if (!isValidCustomFieldName(this.editingFieldName)) {
-      this.notificationService.showError(
-        'Field name must start with a letter or underscore and contain only alphanumeric characters or underscores.',
-      );
-      return;
-    }
-    // FE-049: renames into a reserved standard/media field name are rejected by the
-    // backend (UpdateField) — surface the reason up front.
-    if (isReservedCustomFieldName(this.editingFieldName)) {
-      this.notificationService.showError(
-        `Field name '${this.editingFieldName}' is reserved (standard/media field). Please choose another name.`,
-      );
+    const trimmedName = this.editingFieldName.trim();
+    if (!trimmedName) return;
+
+    const validationError = this.validateCustomFieldName(trimmedName, fieldId);
+    if (validationError) {
+      this.notificationService.showError(validationError);
       return;
     }
 
-    this.isLoading = true;
+    this.isMutatingField = true;
     this.databaseService
-      .updateCustomField(
-        this.currentDb.id,
-        fieldId,
-        this.editingFieldName,
-        this.editingFieldIsIndexed,
-      )
+      .updateCustomField(this.currentDb.id, fieldId, trimmedName, this.editingFieldIsIndexed)
       .pipe(
         takeUntil(this.destroy$),
         finalize(() => {
-          this.isLoading = false;
-          this.editingFieldId = null;
+          this.isMutatingField = false;
         }),
       )
-      .subscribe();
+      .subscribe({
+        next: () => {
+          this.editingFieldId = null;
+        },
+        error: () => {},
+      });
   }
 
   onDeleteField(field: CustomField): void {
-    if (!this.currentDb || !this.canAdmin || field.id === undefined) return;
+    if (this.isMutatingField || !this.currentDb || !this.canAdmin || field.id === undefined) {
+      return;
+    }
+
+    const dbId = this.currentDb.id;
+    const dbName = this.currentDb.name;
+    const fieldId = field.id;
 
     const modalData: ConfirmationModalData = {
       title: 'Confirm Custom Field Deletion',
-      message: `This action will permanently delete the custom field '${field.name}' from database '${this.currentDb.name}' and discard all entry data stored under this field. This action cannot be undone.`,
+      message: `This action will permanently delete the custom field '${field.name}' from database '${dbName}' and discard all entry data stored under this field. This action cannot be undone.`,
     };
 
     this.modalService
       .open(ConfirmationModalComponent.MODAL_ID, modalData)
       .pipe(
+        takeUntil(this.destroy$),
         take(1),
         filter((confirmed) => confirmed === true),
       )
       .subscribe(() => {
-        if (this.currentDb && field.id !== undefined) {
-          this.isLoading = true;
-          this.databaseService
-            .deleteCustomField(this.currentDb.id, field.id)
-            .pipe(
-              takeUntil(this.destroy$),
-              finalize(() => (this.isLoading = false)),
-            )
-            .subscribe();
-        }
+        this.isMutatingField = true;
+        this.databaseService
+          .deleteCustomField(dbId, fieldId)
+          .pipe(
+            takeUntil(this.destroy$),
+            finalize(() => (this.isMutatingField = false)),
+          )
+          .subscribe({
+            error: () => {},
+          });
       });
   }
 

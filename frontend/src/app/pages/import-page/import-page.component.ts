@@ -2,7 +2,7 @@ import { Component, OnInit, OnDestroy, ChangeDetectorRef } from '@angular/core';
 import { ActivatedRoute, Router } from '@angular/router';
 import { FormBuilder, FormGroup, Validators, FormControl } from '@angular/forms';
 import { HttpEvent, HttpEventType, HttpResponse } from '@angular/common/http';
-import { Subject } from 'rxjs';
+import { Subject, Subscription } from 'rxjs';
 import { takeUntil } from 'rxjs/operators';
 
 import { Database } from '../../models';
@@ -10,6 +10,7 @@ import { DatabaseService } from '../../services/database.service';
 import { EntryService } from '../../services/entry.service';
 import { NotificationService } from '../../services/notification.service';
 import { AuthService } from '../../services/auth.service';
+import { extractEntriesCsvHeaderLine } from '../../utils/zip-csv-header';
 
 @Component({
   selector: 'app-import-page',
@@ -19,7 +20,10 @@ import { AuthService } from '../../services/auth.service';
 })
 export class ImportPageComponent implements OnInit, OnDestroy {
   public currentDatabase: Database | null = null;
+  public dbLoadError = false;
   private destroy$ = new Subject<void>();
+  private uploadSub?: Subscription;
+  private isDestroyed = false;
 
   // --- Native Stepper State ---
   public currentStep = 1;
@@ -92,13 +96,24 @@ export class ImportPageComponent implements OnInit, OnDestroy {
   ngOnInit(): void {
     const dbId = this.route.snapshot.paramMap.get('id');
     if (dbId) {
+      this.dbLoadError = false;
       this.databaseService
         .selectDatabase(dbId)
         .pipe(takeUntil(this.destroy$))
-        .subscribe((db) => {
-          this.currentDatabase = db;
-          this.cdr.markForCheck();
+        .subscribe({
+          next: (db) => {
+            this.currentDatabase = db;
+            this.dbLoadError = !db;
+            this.cdr.markForCheck();
+          },
+          error: () => {
+            this.currentDatabase = null;
+            this.dbLoadError = true;
+            this.cdr.markForCheck();
+          },
         });
+    } else {
+      this.dbLoadError = true;
     }
   }
 
@@ -136,17 +151,17 @@ export class ImportPageComponent implements OnInit, OnDestroy {
 
     this.selectedFile = file;
     this.isParsingZip = true;
-    this.cdr.detectChanges();
+    if (!this.isDestroyed) {
+      this.cdr.detectChanges();
+    }
 
     try {
-      const JSZipModule = await import('jszip');
-      const JSZip = JSZipModule.default;
-      const zip = new JSZip();
+      const csvHeaderLine = await extractEntriesCsvHeaderLine(file);
+      if (this.isDestroyed) {
+        return;
+      }
 
-      const loadedZip = await zip.loadAsync(file);
-      const csvFile = loadedZip.file('entries.csv');
-
-      if (!csvFile) {
+      if (csvHeaderLine === null) {
         this.notificationService.showError(
           'The archive does not contain an entries.csv file in the root folder.',
         );
@@ -154,13 +169,16 @@ export class ImportPageComponent implements OnInit, OnDestroy {
         return;
       }
 
-      const csvText = await csvFile.async('text');
-      await this.extractCsvHeaders(csvText);
+      await this.extractCsvHeaders(csvHeaderLine);
     } catch (err) {
       // FE-042: `unknown` instead of `any`.
       console.error('Failed to parse ZIP:', err);
-      this.notificationService.showError('Failed to read the ZIP archive. It might be corrupted.');
-      this.resetFile();
+      if (!this.isDestroyed) {
+        this.notificationService.showError(
+          'Failed to read the ZIP archive. It might be corrupted.',
+        );
+        this.resetFile();
+      }
     }
   }
 
@@ -169,19 +187,69 @@ export class ImportPageComponent implements OnInit, OnDestroy {
     this.isParsingZip = false;
     this.customCsvHeaders = [];
     this.currentStep = 1;
-    this.cdr.detectChanges();
+    if (!this.isDestroyed) {
+      this.cdr.detectChanges();
+    }
   }
 
   private async extractCsvHeaders(csvText: string): Promise<void> {
+    const cleanedCsvText = csvText.replace(/^\uFEFF/, '');
     const PapaModule = await import('papaparse');
+    if (this.isDestroyed) {
+      return;
+    }
     const Papa = PapaModule.default;
 
-    Papa.parse(csvText, {
+    Papa.parse(cleanedCsvText, {
       header: true,
       preview: 1,
       skipEmptyLines: true,
       complete: (results) => {
+        if (this.isDestroyed) {
+          return;
+        }
         const allHeaders = results.meta.fields || [];
+        const lowerHeaders = allHeaders.map((h) => h.toLowerCase());
+
+        const hasValidStandardOrder =
+          allHeaders.length >= this.STANDARD_HEADERS.length &&
+          this.STANDARD_HEADERS.every((expected, idx) => lowerHeaders[idx] === expected);
+        if (!hasValidStandardOrder) {
+          this.notificationService.showError(
+            `Invalid entries.csv header format. Expected first columns: ${this.STANDARD_HEADERS.join(', ')}.`,
+          );
+          this.resetFile();
+          return;
+        }
+
+        const renamedHeaders = (results.meta as { renamedHeaders?: Record<string, string> })
+          .renamedHeaders;
+        if (renamedHeaders && Object.keys(renamedHeaders).length > 0) {
+          const firstDuplicate = Object.values(renamedHeaders)[0];
+          this.notificationService.showError(
+            `Invalid entries.csv: duplicate column header "${firstDuplicate}".`,
+          );
+          this.resetFile();
+          return;
+        }
+
+        const seenHeaders = new Set<string>();
+        const duplicateHeader = allHeaders.find((h) => {
+          const lower = h.toLowerCase();
+          if (seenHeaders.has(lower)) {
+            return true;
+          }
+          seenHeaders.add(lower);
+          return false;
+        });
+        if (duplicateHeader !== undefined) {
+          this.notificationService.showError(
+            `Invalid entries.csv: duplicate column header "${duplicateHeader}".`,
+          );
+          this.resetFile();
+          return;
+        }
+
         const hiddenHeaders = this.hiddenCsvHeaders();
         this.customCsvHeaders = allHeaders.filter(
           (header) => !hiddenHeaders.includes(header.toLowerCase()),
@@ -189,7 +257,9 @@ export class ImportPageComponent implements OnInit, OnDestroy {
 
         this.buildMappingForm();
         this.isParsingZip = false;
-        this.cdr.detectChanges();
+        if (!this.isDestroyed) {
+          this.cdr.detectChanges();
+        }
       },
     });
   }
@@ -221,17 +291,26 @@ export class ImportPageComponent implements OnInit, OnDestroy {
   public startImport(): void {
     if (!this.currentDatabase || !this.selectedFile) return;
 
+    const custom_field_mapping: Record<string, string> = {};
+    const mappingValues = this.mappingStepForm.value as Record<string, string>;
+    const mappedTargets = new Set<string>();
+
+    for (const csvHeader of Object.keys(mappingValues)) {
+      const target = mappingValues[csvHeader];
+      if (target) {
+        if (mappedTargets.has(target)) {
+          this.notificationService.showError(
+            `Multiple CSV columns cannot be mapped to the same custom field ("${target}").`,
+          );
+          return;
+        }
+        mappedTargets.add(target);
+        custom_field_mapping[csvHeader] = target;
+      }
+    }
+
     this.isUploading = true;
     this.uploadProgress = 0;
-
-    const custom_field_mapping: Record<string, string> = {};
-    const mappingValues = this.mappingStepForm.value;
-
-    Object.keys(mappingValues).forEach((csvHeader) => {
-      if (mappingValues[csvHeader]) {
-        custom_field_mapping[csvHeader] = mappingValues[csvHeader];
-      }
-    });
 
     const config = {
       mode: this.configStepForm.value.mode,
@@ -239,8 +318,9 @@ export class ImportPageComponent implements OnInit, OnDestroy {
       custom_field_mapping: custom_field_mapping,
     };
 
-    this.entryService
-      .importEntries(this.currentDatabase!.id, this.selectedFile!, config)
+    this.uploadSub?.unsubscribe();
+    this.uploadSub = this.entryService
+      .importEntries(this.currentDatabase.id, this.selectedFile, config)
       .pipe(takeUntil(this.destroy$))
       .subscribe({
         next: (event: HttpEvent<unknown>) => {
@@ -267,6 +347,18 @@ export class ImportPageComponent implements OnInit, OnDestroy {
       });
   }
 
+  public cancelUpload(): void {
+    if (!this.isUploading) return;
+    this.uploadSub?.unsubscribe();
+    this.uploadSub = undefined;
+    this.isUploading = false;
+    this.uploadProgress = 0;
+    this.notificationService.showInfo('Import upload cancelled.');
+    if (!this.isDestroyed) {
+      this.cdr.markForCheck();
+    }
+  }
+
   public navigateBack(): void {
     if (this.currentDatabase) {
       this.router.navigate(['/dashboard/settings', this.currentDatabase.id]);
@@ -274,6 +366,8 @@ export class ImportPageComponent implements OnInit, OnDestroy {
   }
 
   ngOnDestroy(): void {
+    this.isDestroyed = true;
+    this.uploadSub?.unsubscribe();
     this.destroy$.next();
     this.destroy$.complete();
   }

@@ -99,6 +99,7 @@ export class EntryGridComponent implements OnInit, OnChanges, AfterViewInit, OnD
     if (changes['dbId'] || changes['entries']) {
       if (changes['dbId']) {
         this.failedImageIds.clear();
+        this.aspectRatios.clear();
       } else if (changes['entries']) {
         // FE-031: prune the caches to the ids still on screen — aspectRatios and
         // failedImageIds used to grow without bound across list updates.

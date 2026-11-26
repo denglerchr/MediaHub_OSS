@@ -2,10 +2,10 @@
 // Regression specs for FE-012 (one failed request must not brick the detail modal),
 // FE-023 (media keeps playing after the modal closes) and FE-024 (object URL leak on
 // ESC/X/overlay dismissal).
-import { ComponentFixture, TestBed } from '@angular/core/testing';
+import { ComponentFixture, TestBed, fakeAsync, tick } from '@angular/core/testing';
 import { NO_ERRORS_SCHEMA } from '@angular/core';
 import { CommonModule } from '@angular/common';
-import { BehaviorSubject, of, throwError } from 'rxjs';
+import { BehaviorSubject, Subject, of, throwError } from 'rxjs';
 import { EntryDetailModalComponent } from './entry-detail-modal.component';
 import { EntryService } from '../../services/entry.service';
 import { DatabaseService } from '../../services/database.service';
@@ -20,9 +20,11 @@ describe('EntryDetailModalComponent — FE-012/FE-023/FE-024 regressions', () =>
   let component: EntryDetailModalComponent;
   let modalService: ModalService;
   let selectedEntry$: BehaviorSubject<Entry | null>;
+  let selectedDatabase$: BehaviorSubject<Database | null>;
   let getEntryMetaSpy: jasmine.Spy;
   let getEntryFileBlobSpy: jasmine.Spy;
   let getEntryFileUrlSpy: jasmine.Spy;
+  let deleteEntrySpy: jasmine.Spy;
   let forceAccessTokenRefreshSpy: jasmine.Spy;
   let clearSelectedEntrySpy: jasmine.Spy;
   let notificationService: jasmine.SpyObj<NotificationService>;
@@ -50,6 +52,7 @@ describe('EntryDetailModalComponent — FE-012/FE-023/FE-024 regressions', () =>
 
   beforeEach(async () => {
     selectedEntry$ = new BehaviorSubject<Entry | null>(null);
+    selectedDatabase$ = new BehaviorSubject<Database | null>(db);
     getEntryMetaSpy = jasmine.createSpy('getEntryMeta');
     getEntryFileBlobSpy = jasmine
       .createSpy('getEntryFileBlob')
@@ -65,6 +68,7 @@ describe('EntryDetailModalComponent — FE-012/FE-023/FE-024 regressions', () =>
     clearSelectedEntrySpy = jasmine
       .createSpy('clearSelectedEntry')
       .and.callFake(() => selectedEntry$.next(null));
+    deleteEntrySpy = jasmine.createSpy('deleteEntry').and.returnValue(of({ message: 'ok' }));
     notificationService = jasmine.createSpyObj('NotificationService', [
       'showError',
       'showSuccess',
@@ -85,7 +89,7 @@ describe('EntryDetailModalComponent — FE-012/FE-023/FE-024 regressions', () =>
         .createSpy('selectEntry')
         .and.callFake((e: Entry) => selectedEntry$.next(e)),
       clearSelectedEntry: clearSelectedEntrySpy,
-      deleteEntry: jasmine.createSpy('deleteEntry').and.returnValue(of({ message: 'ok' })),
+      deleteEntry: deleteEntrySpy,
     };
 
     await TestBed.configureTestingModule({
@@ -94,7 +98,7 @@ describe('EntryDetailModalComponent — FE-012/FE-023/FE-024 regressions', () =>
       schemas: [NO_ERRORS_SCHEMA], // <app-modal> wrapper and [secureSrc] are not under test
       providers: [
         { provide: EntryService, useValue: entryServiceMock },
-        { provide: DatabaseService, useValue: { selectedDatabase$: of(db) } },
+        { provide: DatabaseService, useValue: { selectedDatabase$ } },
         {
           provide: AuthService,
           useValue: { currentUser$: of(user), forceAccessTokenRefresh: forceAccessTokenRefreshSpy },
@@ -311,5 +315,110 @@ describe('EntryDetailModalComponent — FE-012/FE-023/FE-024 regressions', () =>
 
     expect(getEntryMetaSpy.calls.count()).toBeGreaterThan(metaCallsAfterLoad);
     expect(component.entryForMetadata?.id).toBe(8);
+  });
+
+  it('does NOT take the metadata-only shortcut when same entry ID belongs to a different database', () => {
+    spyOn(URL, 'createObjectURL').and.returnValue('blob:fake-image');
+    getEntryMetaSpy.and.returnValue(of(makeEntry('image/jpeg')));
+    selectedEntry$.next(makeEntry('image/jpeg'));
+    fixture.detectChanges();
+
+    const metaCallsAfterLoad = getEntryMetaSpy.calls.count();
+
+    const db2 = { ...db, id: 'db2', name: 'DB Two' } as unknown as Database;
+    const db2Entry = { ...makeEntry('image/jpeg'), database_id: 'db2' } as Entry;
+    getEntryMetaSpy.and.returnValue(of(db2Entry));
+
+    selectedDatabase$.next(db2);
+    selectedEntry$.next(db2Entry);
+    fixture.detectChanges();
+
+    expect(getEntryMetaSpy.calls.count()).toBeGreaterThan(metaCallsAfterLoad);
+    expect(component.entryForMetadata?.database_id).toBe('db2');
+  });
+
+  it('onDelete captures dbId and entryId before opening confirmation modal and handles delete errors', () => {
+    getEntryMetaSpy.and.returnValue(of(makeEntry('audio/mpeg')));
+    selectedEntry$.next(makeEntry('audio/mpeg'));
+    fixture.detectChanges();
+
+    const confirm$ = new Subject<boolean>();
+    spyOn(modalService, 'open').and.returnValue(confirm$.asObservable());
+    const closeSpy = spyOn(modalService, 'close');
+    deleteEntrySpy.and.returnValue(throwError(() => new Error('delete failed')));
+
+    component.onDelete();
+    // Mutate modal state before user confirms
+    component.currentDatabase = null;
+    component.entryForMetadata = null;
+
+    confirm$.next(true);
+    confirm$.complete();
+
+    expect(deleteEntrySpy).toHaveBeenCalledWith('db1', 7);
+    expect(component.isLoadingFile).toBeFalse();
+    expect(closeSpy).not.toHaveBeenCalled();
+  });
+
+  it('onDelete cancels subscription on destroy', () => {
+    getEntryMetaSpy.and.returnValue(of(makeEntry('audio/mpeg')));
+    selectedEntry$.next(makeEntry('audio/mpeg'));
+    fixture.detectChanges();
+
+    const confirm$ = new Subject<boolean>();
+    spyOn(modalService, 'open').and.returnValue(confirm$.asObservable());
+
+    component.onDelete();
+    fixture.destroy();
+
+    confirm$.next(true);
+    expect(deleteEntrySpy).not.toHaveBeenCalled();
+  });
+
+  it('onDownload defers object URL revocation, resets isDownloading on error/teardown', fakeAsync(() => {
+    getEntryMetaSpy.and.returnValue(of(makeEntry('audio/mpeg')));
+    selectedEntry$.next(makeEntry('audio/mpeg'));
+    fixture.detectChanges();
+
+    const createSpy = spyOn(URL, 'createObjectURL').and.returnValue('blob:download-1');
+    const revokeSpy = spyOn(URL, 'revokeObjectURL');
+    const anchor = document.createElement('a');
+    const clickSpy = spyOn(anchor, 'click');
+    const originalCreateElement = document.createElement.bind(document);
+    spyOn(document, 'createElement').and.callFake((tagName: string) =>
+      tagName === 'a' ? anchor : originalCreateElement(tagName),
+    );
+
+    component.onDownload();
+
+    expect(createSpy).toHaveBeenCalled();
+    expect(clickSpy).toHaveBeenCalled();
+    expect(component.isDownloading).toBeFalse();
+    expect(revokeSpy).not.toHaveBeenCalledWith('blob:download-1');
+
+    tick(1000);
+    expect(revokeSpy).toHaveBeenCalledWith('blob:download-1');
+
+    // Error path resets isDownloading without throwing
+    getEntryFileBlobSpy.and.returnValue(throwError(() => new Error('download error')));
+    expect(() => component.onDownload()).not.toThrow();
+    expect(component.isDownloading).toBeFalse();
+
+    // Teardown resets stuck isDownloading flag
+    component.isDownloading = true;
+    modalService.close(EntryDetailModalComponent.MODAL_ID);
+    expect(component.isDownloading).toBeFalse();
+  }));
+
+  it('renders loading text when entryForMetadata is null and isLoadingFile is true', () => {
+    component.entryForMetadata = null;
+    component.isLoadingFile = true;
+    fixture.detectChanges();
+
+    expect(fixture.nativeElement.textContent).toContain('Loading entry details...');
+
+    component.isLoadingFile = false;
+    fixture.detectChanges();
+    expect(fixture.nativeElement.textContent).not.toContain('Loading entry details...');
   });
 });

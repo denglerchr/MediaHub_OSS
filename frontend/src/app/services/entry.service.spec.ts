@@ -9,8 +9,9 @@ import { HttpClientTestingModule, HttpTestingController } from '@angular/common/
 import { BehaviorSubject, Observable } from 'rxjs';
 import { EntryService } from './entry.service';
 import { AuthService } from './auth.service';
+import { ImageCacheService } from './image-cache.service';
 import { NotificationService } from './notification.service';
-import { Entry, User } from '../models';
+import { Entry, SearchRequest, User } from '../models';
 
 /** The poll chain is service-internal; reach it without widening the public API. */
 interface PollCapableService {
@@ -21,13 +22,25 @@ describe('EntryService — FE-013 poll termination', () => {
   let service: EntryService;
   let httpMock: HttpTestingController;
   let currentUser$: BehaviorSubject<User | null>;
+  let hasDatabasePermissionSpy: jasmine.Spy;
+  let imageCacheSpy: jasmine.SpyObj<ImageCacheService>;
+  let notificationSpy: jasmine.SpyObj<NotificationService>;
 
   const user = { id: 'u1', username: 'alice', is_admin: true, permissions: [] } as unknown as User;
 
-  const pollUrl = (entryId: number) => `/api/database/db1/entry/${entryId}`;
+  const pollUrl = (entryId: number, dbId = 'db1') => `/api/database/${dbId}/entry/${entryId}`;
 
   beforeEach(() => {
     currentUser$ = new BehaviorSubject<User | null>(user);
+    hasDatabasePermissionSpy = jasmine.createSpy('hasDatabasePermission').and.returnValue(true);
+    imageCacheSpy = jasmine.createSpyObj('ImageCacheService', ['invalidate']);
+    notificationSpy = jasmine.createSpyObj('NotificationService', [
+      'showError',
+      'showSuccess',
+      'showInfo',
+      'showGlobalError',
+      'clearGlobalError',
+    ]);
 
     TestBed.configureTestingModule({
       imports: [HttpClientTestingModule],
@@ -38,17 +51,16 @@ describe('EntryService — FE-013 poll termination', () => {
           useValue: {
             currentUser$,
             getAccessToken: () => 'A1',
+            hasDatabasePermission: hasDatabasePermissionSpy,
           },
         },
         {
+          provide: ImageCacheService,
+          useValue: imageCacheSpy,
+        },
+        {
           provide: NotificationService,
-          useValue: jasmine.createSpyObj('NotificationService', [
-            'showError',
-            'showSuccess',
-            'showInfo',
-            'showGlobalError',
-            'clearGlobalError',
-          ]),
+          useValue: notificationSpy,
         },
       ],
     });
@@ -363,5 +375,285 @@ describe('EntryService — FE-013 poll termination', () => {
 
       currentUser$.next(null);
     }));
+  });
+
+  describe('session transitions, deletion cache invalidation, and search limit clamping', () => {
+    const makeEntry = (id: number, dbId = 'db1'): Entry =>
+      ({
+        id,
+        database_id: dbId,
+        filename: `item-${id}.jpg`,
+        timestamp: 1000,
+        created_at: 1000,
+        updated_at: 1000,
+        status: 'ready',
+      }) as Entry;
+
+    it('clears selectedEntry$ and stops polls when user switches directly to another user', fakeAsync(() => {
+      startProcessingUpload(42);
+      service.selectEntry(makeEntry(7));
+
+      let selected: Entry | null = makeEntry(7);
+      service.selectedEntry$.subscribe((e) => (selected = e));
+
+      currentUser$.next({
+        id: 'u2',
+        username: 'bob',
+        is_admin: false,
+        permissions: [],
+      } as unknown as User);
+
+      expect(selected).toBeNull();
+      tick(120000);
+      httpMock.expectNone(pollUrl(42));
+    }));
+
+    it('deleteEntry invalidates preview cache and clears matching selectedEntry$', () => {
+      service.selectEntry(makeEntry(5, 'db1'));
+      let selected: Entry | null = null;
+      service.selectedEntry$.subscribe((e) => (selected = e));
+
+      service.deleteEntry('db1', 5).subscribe();
+      httpMock.expectOne('/api/database/db1/entry/5').flush({ message: 'Deleted' });
+
+      expect(imageCacheSpy.invalidate).toHaveBeenCalledWith('/api/database/db1/entry/5/preview');
+      expect(selected).toBeNull();
+    });
+
+    it('deleteEntry does not clear selectedEntry$ from a different database on ID collision', () => {
+      service.selectEntry(makeEntry(5, 'db2'));
+      let selected: Entry | null = null as Entry | null;
+      service.selectedEntry$.subscribe((e) => (selected = e));
+
+      service.deleteEntry('db1', 5).subscribe();
+      httpMock.expectOne('/api/database/db1/entry/5').flush({ message: 'Deleted' });
+
+      expect(imageCacheSpy.invalidate).toHaveBeenCalledWith('/api/database/db1/entry/5/preview');
+      expect(selected?.database_id).toBe('db2');
+    });
+
+    it('bulkDeleteEntries invalidates preview caches and clears matching selectedEntry$', () => {
+      service.selectEntry(makeEntry(6, 'db1'));
+      let selected: Entry | null = null;
+      service.selectedEntry$.subscribe((e) => (selected = e));
+
+      service.bulkDeleteEntries('db1', [5, 6]).subscribe();
+      httpMock.expectOne('/api/database/db1/entries/delete').flush({
+        database_id: 'db1',
+        deleted_count: 2,
+        space_freed_bytes: 100,
+        message: 'ok',
+        errors: '',
+      });
+
+      expect(imageCacheSpy.invalidate).toHaveBeenCalledWith('/api/database/db1/entry/5/preview');
+      expect(imageCacheSpy.invalidate).toHaveBeenCalledWith('/api/database/db1/entry/6/preview');
+      expect(selected).toBeNull();
+    });
+
+    it('searchEntries clamps pagination.limit into [1, 1000] on a cloned payload', () => {
+      const highPayload: SearchRequest = { pagination: { limit: 1500, offset: 0 } };
+      service.searchEntries('db1', highPayload).subscribe();
+      const reqHigh = httpMock.expectOne('/api/database/db1/entries/search');
+      expect(reqHigh.request.body.pagination.limit).toBe(1000);
+      expect(highPayload.pagination.limit).toBe(1500);
+      reqHigh.flush([]);
+
+      const lowPayload: SearchRequest = { pagination: { limit: 0, offset: 0 } };
+      service.searchEntries('db1', lowPayload).subscribe();
+      const reqLow = httpMock.expectOne('/api/database/db1/entries/search');
+      expect(reqLow.request.body.pagination.limit).toBe(1);
+      expect(lowPayload.pagination.limit).toBe(0);
+      reqLow.flush([]);
+    });
+
+    it('uses composite poll keys so two DBs with the same entry ID do not cancel each other', fakeAsync(() => {
+      for (const dbId of ['db1', 'db2']) {
+        service
+          .uploadEntry(
+            dbId,
+            { timestamp: 1000, filename: `${dbId}.jpg`, custom_fields: {} },
+            new File(['x'], `${dbId}.jpg`, { type: 'image/jpeg' }),
+            { silentSuccess: true },
+          )
+          .subscribe();
+        httpMock.expectOne(`/api/database/${dbId}/entry`).flush(
+          {
+            id: 42,
+            timestamp: 1000,
+            created_at: 1000,
+            updated_at: 1000,
+            database_id: dbId,
+            status: 'processing',
+          },
+          { status: 201, statusText: 'Created' },
+        );
+      }
+
+      let processing: number[] = [];
+      service.processingEntries$.subscribe((ids) => (processing = ids));
+      expect(processing).toEqual([42]);
+
+      tick(2000);
+      httpMock.expectOne(pollUrl(42, 'db1')).flush({
+        id: 42,
+        timestamp: 1000,
+        created_at: 1000,
+        updated_at: 1000,
+        database_id: 'db1',
+        status: 'ready',
+      });
+      httpMock.expectOne(pollUrl(42, 'db2')).flush({
+        id: 42,
+        timestamp: 1000,
+        created_at: 1000,
+        updated_at: 1000,
+        database_id: 'db2',
+        status: 'processing',
+      });
+
+      // db2 is still processing so 42 remains in processingEntries$
+      expect(processing).toEqual([42]);
+
+      tick(2000);
+      httpMock.expectNone(pollUrl(42, 'db1'));
+      httpMock.expectOne(pollUrl(42, 'db2')).flush({
+        id: 42,
+        timestamp: 1000,
+        created_at: 1000,
+        updated_at: 1000,
+        database_id: 'db2',
+        status: 'ready',
+      });
+
+      expect(processing).toEqual([]);
+    }));
+
+    it('skips polling and processingEntries$ tracking when user lacks can_view permission', fakeAsync(() => {
+      hasDatabasePermissionSpy.and.returnValue(false);
+      const created: Entry[] = [];
+      service.entryCreated$.subscribe((e) => created.push(e));
+
+      let processing: number[] = [];
+      service.processingEntries$.subscribe((ids) => (processing = ids));
+
+      service
+        .uploadEntry(
+          'db1',
+          { timestamp: 1000, filename: 'clip.mp4', custom_fields: { tag: 'v1' } },
+          new File(['x'], 'clip.mp4', { type: 'video/mp4' }),
+          { silentSuccess: true },
+        )
+        .subscribe();
+
+      httpMock.expectOne('/api/database/db1/entry').flush(
+        {
+          id: 77,
+          timestamp: 1000,
+          created_at: 1000,
+          updated_at: 1000,
+          database_id: 'db1',
+          mime_type: 'video/mp4',
+          status: 'queued',
+        },
+        { status: 202, statusText: 'Accepted' },
+      );
+
+      expect(created.length).toBe(1);
+      expect(created[0].mime_type).toBe('video/mp4');
+      expect(created[0].custom_fields).toEqual({ tag: 'v1' });
+      expect(processing).toEqual([]);
+
+      tick(10000);
+      httpMock.expectNone(pollUrl(77, 'db1'));
+    }));
+
+    it('terminates polling on 401/403 without calling handleEntryGone', fakeAsync(() => {
+      startProcessingUpload(42);
+
+      let processing: number[] = [];
+      service.processingEntries$.subscribe((ids) => (processing = ids));
+      const updates: Entry[] = [];
+      service.entryUpdated$.subscribe((e) => updates.push(e));
+      let refreshes = 0;
+      service.refreshRequired$.subscribe(() => refreshes++);
+
+      tick(2000);
+      httpMock.expectOne(pollUrl(42)).flush(null, { status: 403, statusText: 'Forbidden' });
+
+      expect(processing).toEqual([]);
+      expect(updates).toEqual([]);
+      expect(refreshes).toBe(0);
+
+      tick(120000);
+      httpMock.expectNone(pollUrl(42));
+    }));
+
+    it('parses JSON error messages from Blob responses in handleError', (done) => {
+      const errorBlob = new Blob([JSON.stringify({ error: 'Export limit exceeded' })], {
+        type: 'application/json',
+      });
+
+      service.bulkExportEntries('db1', [1, 2]).subscribe({
+        next: () => fail('expected error'),
+        error: (err: Error) => {
+          expect(err.message).toBe('Export limit exceeded');
+          expect(notificationSpy.showError).toHaveBeenCalledWith('Export limit exceeded');
+          done();
+        },
+      });
+
+      httpMock
+        .expectOne('/api/database/db1/entries/export')
+        .flush(errorBlob, { status: 400, statusText: 'Bad Request' });
+    });
+
+    it('preserves mime_type and custom_fields on 202 async upload and ignores null body', () => {
+      const created: Entry[] = [];
+      service.entryCreated$.subscribe((e) => created.push(e));
+
+      service
+        .uploadEntry(
+          'db1',
+          { timestamp: 1234, filename: 'a.mp4', custom_fields: { source: 'cam1' } },
+          new File(['x'], 'a.mp4', { type: 'video/mp4' }),
+          { silentSuccess: true },
+        )
+        .subscribe();
+
+      httpMock.expectOne('/api/database/db1/entry').flush(
+        {
+          id: 88,
+          timestamp: 1234,
+          created_at: 1234,
+          updated_at: 1234,
+          database_id: 'db1',
+          mime_type: 'video/webm',
+          status: 'processing',
+          custom_fields: { source: 'server' },
+        },
+        { status: 202, statusText: 'Accepted' },
+      );
+
+      expect(created.length).toBe(1);
+      expect(created[0].mime_type).toBe('video/webm');
+      expect(created[0].custom_fields).toEqual({ source: 'server' });
+
+      // Null 202 body must not throw
+      service
+        .uploadEntry(
+          'db1',
+          { timestamp: 1234, filename: 'b.mp4', custom_fields: {} },
+          new File(['x'], 'b.mp4', { type: 'video/mp4' }),
+          { silentSuccess: true },
+        )
+        .subscribe();
+      httpMock
+        .expectOne('/api/database/db1/entry')
+        .flush(null, { status: 202, statusText: 'Accepted' });
+      expect(created.length).toBe(1);
+
+      currentUser$.next(null);
+    });
   });
 });

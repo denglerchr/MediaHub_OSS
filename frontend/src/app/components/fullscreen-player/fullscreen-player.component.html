@@ -41,6 +41,7 @@
         autoplay
         controls
         (ended)="onMediaEnded()"
+        (loadedmetadata)="onMediaLoadedMetadata()"
         (error)="onMediaError()"
       ></video>
     </ng-container>
@@ -73,6 +74,7 @@
           autoplay
           controls
           (ended)="onMediaEnded()"
+          (loadedmetadata)="onMediaLoadedMetadata()"
           (error)="onMediaError()"
           class="audio-element"
         ></audio>
@@ -84,5 +86,9 @@
         <p>Unsupported media type for fullscreen presentation.</p>
       </div>
     </ng-container>
+  </div>
+
+  <div *ngIf="!isLoading && !currentEntry" class="fallback-wrapper">
+    <p>No ready media entries available.</p>
   </div>
 </div>

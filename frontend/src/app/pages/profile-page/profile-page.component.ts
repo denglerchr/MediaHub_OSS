@@ -38,10 +38,6 @@ export class ProfilePageComponent implements OnInit, OnDestroy {
     return p.name;
   }
 
-  public trackByKeyId(index: number, key: ApiKey): string {
-    return key.id;
-  }
-
   public passwordForm: FormGroup;
   public isPasswordLoading = false;
   public isKeysLoading = false;
@@ -164,6 +160,8 @@ export class ProfilePageComponent implements OnInit, OnDestroy {
   }
 
   public onSubmitPassword(): void {
+    if (this.isPasswordLoading) return;
+
     if (this.passwordForm.invalid) {
       this.passwordForm.markAllAsTouched();
       return;
@@ -176,6 +174,7 @@ export class ProfilePageComponent implements OnInit, OnDestroy {
     this.authService
       .changeOwnPassword(oldPassword, newPassword)
       .pipe(
+        takeUntil(this.destroy$),
         finalize(() => {
           this.isPasswordLoading = false;
           this.cdr.markForCheck();
@@ -183,14 +182,17 @@ export class ProfilePageComponent implements OnInit, OnDestroy {
       )
       .subscribe({
         next: () => {
-          this.notificationService.showSuccess('Password updated successfully!');
+          this.notificationService.showSuccess(
+            'Password updated successfully! Please sign in again with your new password.',
+          );
           this.passwordForm.reset();
           this.cdr.markForCheck();
+          this.authService.logout(false);
         },
         error: (err) => {
           console.error('Failed to change password', err);
           if (err.status === 401) {
-            this.notificationService.showError('Incorrect current password.');
+            this.notificationService.showError(err.error?.error || 'Incorrect current password.');
           } else {
             this.notificationService.showError('Could not update password. Try again.');
           }
@@ -201,11 +203,12 @@ export class ProfilePageComponent implements OnInit, OnDestroy {
 
   public openCreateKeyModal(): void {
     if (!this.user) return;
+    const userId = this.user.id;
     this.modalService
-      .open(ApiKeyModalComponent.MODAL_ID, { userId: this.user.id })
-      .pipe(take(1))
+      .open(ApiKeyModalComponent.MODAL_ID, { userId })
+      .pipe(takeUntil(this.destroy$), take(1))
       .subscribe((created) => {
-        if (created) {
+        if (created && this.user?.id === userId) {
           this.loadApiKeys();
         }
       });
@@ -213,11 +216,12 @@ export class ProfilePageComponent implements OnInit, OnDestroy {
 
   public openEditKeyModal(key: ApiKey): void {
     if (!this.user) return;
+    const userId = this.user.id;
     this.modalService
-      .open(ApiKeyModalComponent.MODAL_ID, { userId: this.user.id, apiKey: key })
-      .pipe(take(1))
+      .open(ApiKeyModalComponent.MODAL_ID, { userId, apiKey: key })
+      .pipe(takeUntil(this.destroy$), take(1))
       .subscribe((updated) => {
-        if (updated) {
+        if (updated && this.user?.id === userId) {
           this.loadApiKeys();
         }
       });
@@ -225,6 +229,7 @@ export class ProfilePageComponent implements OnInit, OnDestroy {
 
   public openRevokeConfirm(key: ApiKey): void {
     if (!this.user) return;
+    const userId = this.user.id;
 
     const modalData: ConfirmationModalData = {
       title: 'Revoke API Key',
@@ -234,18 +239,21 @@ export class ProfilePageComponent implements OnInit, OnDestroy {
     this.modalService
       .open(ConfirmationModalComponent.MODAL_ID, modalData)
       .pipe(
+        takeUntil(this.destroy$),
         take(1),
         filter((isConfirmed) => isConfirmed === true),
       )
       .subscribe(() => {
         // FE-043: the delete request must not outlive the component.
         this.authService
-          .deleteUserKey(this.user!.id, key.id)
+          .deleteUserKey(userId, key.id)
           .pipe(takeUntil(this.destroy$))
           .subscribe({
             next: () => {
               this.notificationService.showSuccess('API key revoked successfully.');
-              this.loadApiKeys();
+              if (this.user?.id === userId) {
+                this.loadApiKeys();
+              }
             },
             error: () => {
               // FE-046: the shared AuthService.handleError already surfaced the reason.

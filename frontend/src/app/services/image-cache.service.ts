@@ -1,13 +1,14 @@
 // frontend/src/app/services/image-cache.service.ts
-import { Injectable } from '@angular/core';
+import { Injectable, OnDestroy, Optional } from '@angular/core';
 import { HttpClient, HttpHeaders } from '@angular/common/http';
-import { Observable, throwError } from 'rxjs';
-import { map, shareReplay, catchError, tap } from 'rxjs/operators';
+import { Observable, Subscription } from 'rxjs';
+import { map, shareReplay, tap } from 'rxjs/operators';
+import { AuthService } from './auth.service';
 
 @Injectable({
   providedIn: 'root',
 })
-export class ImageCacheService {
+export class ImageCacheService implements OnDestroy {
   private readonly MAX_CACHE_SIZE = 1024;
   private cache = new Map<string, Observable<string>>();
   private resolvedBlobUrls = new Map<string, string>();
@@ -28,7 +29,26 @@ export class ImageCacheService {
   // each, never while an <img> may still show them.
   private supersededBlobUrls = new Map<string, string[]>();
 
-  constructor(private http: HttpClient) {}
+  private lastUserId: string | null = null;
+  private authSubscription?: Subscription;
+
+  constructor(
+    private http: HttpClient,
+    @Optional() private authService?: AuthService,
+  ) {
+    if (this.authService) {
+      this.authSubscription = this.authService.currentUser$.subscribe((user) => {
+        if (user === null || (this.lastUserId !== null && user.id !== this.lastUserId)) {
+          this.clearAll();
+        }
+        this.lastUserId = user?.id ?? null;
+      });
+    }
+  }
+
+  ngOnDestroy(): void {
+    this.authSubscription?.unsubscribe();
+  }
 
   /**
    * Fetches an image blob from the given URL securely and returns a cached Object URL.
@@ -46,43 +66,55 @@ export class ImageCacheService {
 
     this.evictOldestIfNecessary();
 
-    const stream$ = this.http
+    const stream$: Observable<string> = this.http
       .get(url, {
         responseType: 'blob',
         headers: new HttpHeaders({ Accept: '*/*' }),
       })
       .pipe(
         map((blob) => URL.createObjectURL(blob)),
-        tap((blobUrl) => {
-          const previousBlobUrl = this.resolvedBlobUrls.get(url);
-          if (previousBlobUrl && previousBlobUrl !== blobUrl) {
-            // N5: this re-fetch superseded the previous blob for the same source URL.
-            // The old blob may still be on screen (evict-while-referenced → re-fetch),
-            // so remember it and revoke it with the current one instead of orphaning
-            // it by overwriting the mapping.
-            const superseded = this.supersededBlobUrls.get(url);
-            if (superseded) {
-              superseded.push(previousBlobUrl);
-            } else {
-              this.supersededBlobUrls.set(url, [previousBlobUrl]);
+        tap({
+          next: (blobUrl) => {
+            if (this.cache.get(url) !== stream$) {
+              if ((this.refCounts.get(url) ?? 0) === 0) {
+                this.evictedWhileInUse.delete(url);
+                this.revokeBlobUrl(blobUrl);
+                return;
+              }
+              this.evictedWhileInUse.add(url);
             }
-          }
-          this.resolvedBlobUrls.set(url, blobUrl);
-          // FE-025: the entry can be evicted while the fetch is still in flight. If it
-          // was and nothing references it any more, revoke as soon as it materialises.
-          if (this.evictedWhileInUse.has(url) && (this.refCounts.get(url) ?? 0) === 0) {
-            this.evictedWhileInUse.delete(url);
-            this.revokeNow(url);
-          }
+
+            const previousBlobUrl = this.resolvedBlobUrls.get(url);
+            if (previousBlobUrl && previousBlobUrl !== blobUrl) {
+              // N5: this re-fetch superseded the previous blob for the same source URL.
+              // The old blob may still be on screen (evict-while-referenced → re-fetch),
+              // so remember it and revoke it with the current one instead of orphaning
+              // it by overwriting the mapping.
+              const superseded = this.supersededBlobUrls.get(url);
+              if (superseded) {
+                superseded.push(previousBlobUrl);
+              } else {
+                this.supersededBlobUrls.set(url, [previousBlobUrl]);
+              }
+            }
+            this.resolvedBlobUrls.set(url, blobUrl);
+            // FE-025: the entry can be evicted while the fetch is still in flight. If it
+            // was and nothing references it any more, revoke as soon as it materialises.
+            if (this.evictedWhileInUse.has(url) && (this.refCounts.get(url) ?? 0) === 0) {
+              this.evictedWhileInUse.delete(url);
+              this.revokeNow(url);
+            }
+          },
+          error: () => {
+            // N5: a failed fetch created no blob of its own — keep any previously
+            // resolved (and possibly still referenced) mapping so it is still revoked
+            // on release/invalidate instead of being orphaned here.
+            if (this.cache.get(url) === stream$) {
+              this.cache.delete(url);
+            }
+          },
         }),
         shareReplay(1),
-        catchError((err) => {
-          // N5: a failed fetch created no blob of its own — keep any previously
-          // resolved (and possibly still referenced) mapping so it is still revoked
-          // on release/invalidate instead of being orphaned here.
-          this.cache.delete(url);
-          return throwError(() => err);
-        }),
       );
 
     this.cache.set(url, stream$);
@@ -141,7 +173,7 @@ export class ImageCacheService {
    * URLs still referenced keep their blob until released (FE-025).
    */
   public clearAll(): void {
-    const urls = Array.from(this.resolvedBlobUrls.keys());
+    const urls = new Set<string>([...this.cache.keys(), ...this.resolvedBlobUrls.keys()]);
     urls.forEach((url) => {
       this.cache.delete(url);
       if ((this.refCounts.get(url) ?? 0) > 0) {

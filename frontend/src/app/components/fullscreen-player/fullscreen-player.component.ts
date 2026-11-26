@@ -48,6 +48,9 @@ export class FullscreenPlayerComponent implements OnInit, OnDestroy {
 
   private delayTimerSub?: Subscription;
   private pollingSub?: Subscription;
+  private imageLoadSub?: Subscription;
+  private currentBlobUrl: string | null = null;
+  private pendingResumeTime: number | null = null;
   private destroy$ = new Subject<void>();
 
   // FE-011: tokenized media URLs expire mid-presentation — see onMediaError().
@@ -74,6 +77,11 @@ export class FullscreenPlayerComponent implements OnInit, OnDestroy {
     if (!document.fullscreenElement) {
       this.closePlayer();
     }
+  }
+
+  @HostListener('document:keydown.escape')
+  onEscapeKey(): void {
+    this.closePlayer();
   }
 
   /**
@@ -131,6 +139,7 @@ export class FullscreenPlayerComponent implements OnInit, OnDestroy {
 
     if (readyEntries.length === 0) {
       this.isLoading = false;
+      this.cdr.markForCheck();
       return;
     }
 
@@ -150,6 +159,16 @@ export class FullscreenPlayerComponent implements OnInit, OnDestroy {
     // Check if we have any truly *new* entries that we haven't seen before
     const newEntries = readyEntries.filter((e) => !this.knownEntryIds.has(e.id));
     if (newEntries.length === 0) {
+      this.isLoading = false;
+      return;
+    }
+
+    if (this.settings.entryLimit === 1 && !this.settings.repeat) {
+      const newest = newEntries[0];
+      this.knownEntryIds.add(newest.id);
+      this.playlist = [newest];
+      this.currentIndex = -1;
+      this.playNext();
       this.isLoading = false;
       return;
     }
@@ -174,8 +193,8 @@ export class FullscreenPlayerComponent implements OnInit, OnDestroy {
       this.playlist = [...played, ...pending];
     }
 
-    // If this is the very first load, or we are sitting idle waiting for a new file (N=1 scenario), start playback
-    if (this.currentEntry === null || (this.settings.entryLimit === 1 && !this.settings.repeat)) {
+    // If this is the very first load, start playback
+    if (this.currentEntry === null) {
       this.playNext();
     }
     this.isLoading = false;
@@ -192,7 +211,18 @@ export class FullscreenPlayerComponent implements OnInit, OnDestroy {
    * showing a dead slide.
    */
   private prunePlaylist(entries: Entry[]): void {
-    if (this.playlist.length === 0 || entries.length === 0) {
+    if (this.playlist.length === 0) {
+      return;
+    }
+
+    if (entries.length === 0) {
+      this.playlist = [];
+      this.knownEntryIds.clear();
+      this.releaseMedia();
+      this.currentEntry = null;
+      this.currentIndex = -1;
+      this.isLoading = false;
+      this.cdr.markForCheck();
       return;
     }
 
@@ -224,6 +254,7 @@ export class FullscreenPlayerComponent implements OnInit, OnDestroy {
       this.currentEntry = null;
       this.currentIndex = -1;
       this.isLoading = false;
+      this.cdr.markForCheck();
       return;
     }
 
@@ -279,11 +310,53 @@ export class FullscreenPlayerComponent implements OnInit, OnDestroy {
   private loadMedia(entry: Entry): void {
     // FE-011: fresh entry → fresh media-URL retry budget.
     this.mediaUrlRetries = 0;
+    this.pendingResumeTime = null;
+    this.cancelImageLoad();
+    this.revokeBlobUrl();
+
     const mime = entry.mime_type || 'file';
     const isStreamable = isMimeTypeStreamable(mime);
 
-    if (isStreamable || this.contentType === 'image') {
-      this.mediaUrl = this.entryService.getEntryFileUrl(this.dbId, entry.id); // UPDATED: Pass dbId
+    if (this.contentType === 'image' && !isStreamable) {
+      this.mediaUrl = null;
+      this.cdr.detectChanges();
+
+      const entryId = entry.id;
+      this.imageLoadSub = this.entryService
+        .getEntryFileBlob(this.dbId, entryId)
+        .pipe(takeUntil(this.destroy$))
+        .subscribe({
+          next: (blob) => {
+            if (!this.currentEntry || this.currentEntry.id !== entryId) {
+              return;
+            }
+            this.revokeBlobUrl();
+            this.currentBlobUrl = URL.createObjectURL(blob);
+            this.mediaUrl = this.currentBlobUrl;
+            this.cdr.detectChanges();
+            this.startDelayTimer();
+          },
+          error: () => {
+            if (!this.currentEntry || this.currentEntry.id !== entryId) {
+              return;
+            }
+            this.mediaUrl = null;
+            this.cdr.detectChanges();
+            this.startDelayTimer();
+          },
+        });
+      return;
+    }
+
+    if (isStreamable) {
+      const nextUrl = this.entryService.getEntryFileUrl(this.dbId, entry.id); // UPDATED: Pass dbId
+      const el = this.mediaElement?.nativeElement;
+      if (this.settings.repeat && this.playlist.length === 1 && el && this.mediaUrl === nextUrl) {
+        el.currentTime = 0;
+        el.play()?.catch(() => {});
+        return;
+      }
+      this.mediaUrl = nextUrl;
     } else {
       this.mediaUrl = null;
     }
@@ -305,6 +378,19 @@ export class FullscreenPlayerComponent implements OnInit, OnDestroy {
   }
 
   /**
+   * Restores the playback position after a streamable media element reloads with a refreshed token.
+   */
+  public onMediaLoadedMetadata(): void {
+    if (this.pendingResumeTime !== null && this.pendingResumeTime > 0) {
+      const el = this.mediaElement?.nativeElement;
+      if (el) {
+        el.currentTime = this.pendingResumeTime;
+      }
+    }
+    this.pendingResumeTime = null;
+  }
+
+  /**
    * FE-011: the media element failed (typically a 401 after the token embedded in
    * the URL expired). Refresh the access token first — the media element's 401
    * never reaches the interceptor, so nothing else has refreshed the *expired*
@@ -317,6 +403,14 @@ export class FullscreenPlayerComponent implements OnInit, OnDestroy {
       return;
     }
     const entryId = this.currentEntry.id;
+
+    if (this.currentBlobUrl && this.mediaUrl === this.currentBlobUrl) {
+      this.notificationService.showError('Media playback failed — the file could not be loaded.');
+      this.startDelayTimer();
+      return;
+    }
+
+    const resumeTime = this.mediaElement?.nativeElement.currentTime || 0;
 
     this.authService
       .forceAccessTokenRefresh()
@@ -335,9 +429,11 @@ export class FullscreenPlayerComponent implements OnInit, OnDestroy {
           this.notificationService.showError(
             'Media playback failed — the file could not be loaded.',
           );
+          this.startDelayTimer();
           return;
         }
         this.mediaUrlRetries++;
+        this.pendingResumeTime = resumeTime > 0 ? resumeTime : null;
         this.mediaUrl = freshUrl;
         this.cdr.detectChanges();
       });
@@ -373,17 +469,34 @@ export class FullscreenPlayerComponent implements OnInit, OnDestroy {
     }
   }
 
+  private cancelImageLoad(): void {
+    if (this.imageLoadSub) {
+      this.imageLoadSub.unsubscribe();
+      this.imageLoadSub = undefined;
+    }
+  }
+
+  private revokeBlobUrl(): void {
+    if (this.currentBlobUrl) {
+      URL.revokeObjectURL(this.currentBlobUrl);
+      this.currentBlobUrl = null;
+    }
+  }
+
   /**
    * FE-023: stop playback and detach the media element (the declared-but-unused
    * `mediaElement` ViewChild exists exactly for this).
    */
   private releaseMedia(): void {
+    this.cancelImageLoad();
+    this.pendingResumeTime = null;
     const el = this.mediaElement?.nativeElement;
     if (el) {
       el.pause();
       el.removeAttribute('src');
       el.load();
     }
+    this.revokeBlobUrl();
     this.mediaUrl = null;
   }
 

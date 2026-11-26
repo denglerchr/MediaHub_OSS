@@ -12,5 +12,5 @@ export enum EntryStatus {
   Queued = 'queued',
   Ready = 'ready',
   Error = 'error',
-  Deleted = `deleted`,
+  Deleting = 'deleting',
 }

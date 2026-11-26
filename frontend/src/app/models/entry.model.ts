@@ -44,18 +44,23 @@ export interface PartialEntryResponse {
   created_at: number;
   updated_at: number;
   database_id: string;
+  mime_type?: string;
   status: EntryStatus | string;
   custom_fields?: Record<string, any>;
 }
 
-export interface SearchFilter {
+export interface SearchCondition {
+  field: string;
   operator: string;
-  conditions?: SearchFilter[];
-  field?: string;
   // FE-042: `unknown` instead of `any` — search values are strings, numbers,
   // booleans, Coordinate or CoordinateBoundingBox; nothing may consume them
   // unchecked anymore.
-  value?: unknown;
+  value: unknown;
+}
+
+export interface SearchFilter {
+  operator: string;
+  conditions: SearchCondition[];
 }
 
 export interface SearchSort {
@@ -105,7 +110,7 @@ export interface UploadEntryMetadata {
  * (entryhandler ImportConfigPayload) — typed instead of `any`.
  */
 export interface ImportConfig {
-  mode: 'generate_new' | 'skip' | 'overwrite';
+  mode: 'generate_new' | 'skip';
   unmapped_fields: 'ignore' | 'fail';
   custom_field_mapping?: Record<string, string>;
 }

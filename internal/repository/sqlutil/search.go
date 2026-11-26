@@ -2,6 +2,7 @@ package sqlutil
 
 import (
 	"fmt"
+	"math"
 	"strings"
 
 	"github.com/Masterminds/squirrel"
@@ -163,11 +164,60 @@ func buildConditionExpr(
 	}
 
 	sqlOp := strings.ToUpper(cond.Operator)
+	if cond.Field == "status" {
+		if sqlOp != "=" && sqlOp != "!=" {
+			return nil, fmt.Errorf("%w: operator '%s' is not supported on status field; only '=' and '!=' are allowed", customerrors.ErrValidation, cond.Operator)
+		}
+		statusCode, err := parseStatusValue(cond.Value)
+		if err != nil {
+			return nil, err
+		}
+		return squirrel.Expr(fmt.Sprintf("%s %s ?", safeField, sqlOp), uint8(statusCode)), nil
+	}
+
 	if dialect.FormatOperator != nil {
 		sqlOp = dialect.FormatOperator(cond.Operator)
 	}
 
 	return squirrel.Expr(fmt.Sprintf("%s %s ?", safeField, sqlOp), cond.Value), nil
+}
+
+func parseStatusValue(val any) (repo.EntryStatus, error) {
+	switch v := val.(type) {
+	case string:
+		status, ok := repo.ParseEntryStatus(v)
+		if !ok {
+			return 0, fmt.Errorf("%w: invalid status value %q", customerrors.ErrValidation, v)
+		}
+		return status, nil
+	case repo.EntryStatus:
+		if v > repo.EntryStatusQueued {
+			return 0, fmt.Errorf("%w: status value %d out of range (0..4)", customerrors.ErrValidation, v)
+		}
+		return v, nil
+	case uint8:
+		if v > uint8(repo.EntryStatusQueued) {
+			return 0, fmt.Errorf("%w: status value %d out of range (0..4)", customerrors.ErrValidation, v)
+		}
+		return repo.EntryStatus(v), nil
+	case int:
+		if v < 0 || v > int(repo.EntryStatusQueued) {
+			return 0, fmt.Errorf("%w: status value %d out of range (0..4)", customerrors.ErrValidation, v)
+		}
+		return repo.EntryStatus(v), nil
+	case int64:
+		if v < 0 || v > int64(repo.EntryStatusQueued) {
+			return 0, fmt.Errorf("%w: status value %d out of range (0..4)", customerrors.ErrValidation, v)
+		}
+		return repo.EntryStatus(v), nil
+	case float64:
+		if math.IsNaN(v) || math.IsInf(v, 0) || math.Trunc(v) != v || v < 0 || v > float64(repo.EntryStatusQueued) {
+			return 0, fmt.Errorf("%w: status value %v must be an integer in 0..4", customerrors.ErrValidation, v)
+		}
+		return repo.EntryStatus(uint8(v)), nil
+	default:
+		return 0, fmt.Errorf("%w: invalid status value type %T", customerrors.ErrValidation, val)
+	}
 }
 
 func buildSearchOrderBy(

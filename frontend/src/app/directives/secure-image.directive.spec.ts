@@ -4,6 +4,7 @@ import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { By } from '@angular/platform-browser';
 import { HttpClientTestingModule, HttpTestingController } from '@angular/common/http/testing';
 import { SecureImageDirective } from './secure-image.directive';
+import { ImageCacheService } from '../services/image-cache.service';
 
 // Dummy component to host the directive
 @Component({
@@ -158,5 +159,36 @@ describe('SecureImageDirective', () => {
     fixture.detectChanges();
 
     expect(imgEl.nativeElement.getAttribute('src')).toBeNull();
+  });
+
+  it('releaseInFlight does not release displayedUrl when inFlightUrl matches displayedUrl', () => {
+    const cacheService = TestBed.inject(ImageCacheService);
+    const releaseSpy = spyOn(cacheService, 'release').and.callThrough();
+
+    // 1. Display /api/test/image
+    httpMock.expectOne('/api/test/image').flush(new Blob(['data1'], { type: 'image/jpeg' }));
+    fixture.detectChanges();
+    expect(imgEl.nativeElement.src).toContain('blob:');
+
+    // 2. Switch to /api/test/image2 (in-flight), then switch back to /api/test/image (now both inFlight and displayed)
+    component.src = '/api/test/image2';
+    fixture.detectChanges();
+    const req2 = httpMock.expectOne('/api/test/image2');
+    component.src = '/api/test/image';
+    fixture.detectChanges();
+
+    // 3. Switch to /api/test/image3 while /api/test/image is both inFlightUrl and displayedUrl:
+    // releaseInFlight() must NOT release /api/test/image while it is still displayed on screen.
+    releaseSpy.calls.reset();
+    component.src = '/api/test/image3';
+    fixture.detectChanges();
+
+    expect(releaseSpy).not.toHaveBeenCalledWith('/api/test/image');
+
+    // Once /api/test/image3 resolves and replaces displayedUrl, /api/test/image is released.
+    req2.flush(new Blob(['data2'], { type: 'image/jpeg' }));
+    httpMock.expectOne('/api/test/image3').flush(new Blob(['data3'], { type: 'image/jpeg' }));
+    fixture.detectChanges();
+    expect(releaseSpy).toHaveBeenCalledWith('/api/test/image');
   });
 });

@@ -35,6 +35,8 @@ export class ModalComponent implements OnInit, OnDestroy {
   @ViewChild('modalContent') modalContent?: ElementRef<HTMLDivElement>;
 
   public isOpen = false;
+  public overlayZIndex: number | null = null;
+  public contentZIndex: number | null = null;
   // FE-044: the element focus returns to when the modal closes.
   private previouslyFocused: HTMLElement | null = null;
   // FE-044/FE-043: pending initial-focus task (tracked and cleared on destroy).
@@ -52,13 +54,19 @@ export class ModalComponent implements OnInit, OnDestroy {
       .pipe(takeUntil(this.destroy$))
       .subscribe((event: ModalEvent) => {
         if (event.action === 'open') {
+          // Capture the trigger only on initial open so a re-open preserves the original element.
+          if (!this.isOpen) {
+            this.previouslyFocused =
+              document.activeElement instanceof HTMLElement ? document.activeElement : null;
+          }
           this.isOpen = true;
           document.body.classList.add('modal-open'); // Prevent background scrolling
-          // FE-044: remember the trigger element and move focus into the dialog once
-          // it is rendered (the tracked timeout fires after the current CD pass; the
-          // dialog lives behind an *ngIf and is not in the DOM yet).
-          this.previouslyFocused =
-            document.activeElement instanceof HTMLElement ? document.activeElement : null;
+          const stackIndex = Math.max(0, this.modalService.getStackIndex(this.modalId));
+          this.overlayZIndex = this.readZIndexVar('--z-modal-bg', 300) + stackIndex * 10;
+          this.contentZIndex = this.readZIndexVar('--z-modal', 400) + stackIndex * 10;
+          // FE-044: move focus into the dialog once it is rendered (the tracked timeout
+          // fires after the current CD pass; the dialog lives behind an *ngIf and is not
+          // in the DOM yet).
           this.cdr.markForCheck();
           if (this.focusTimer) {
             clearTimeout(this.focusTimer);
@@ -67,6 +75,12 @@ export class ModalComponent implements OnInit, OnDestroy {
           return;
         } else if (event.action === 'close') {
           this.isOpen = false;
+          this.overlayZIndex = null;
+          this.contentZIndex = null;
+          if (this.focusTimer) {
+            clearTimeout(this.focusTimer);
+            this.focusTimer = undefined;
+          }
           // N-D4: with stacked modals the scroll lock belongs to the stack — only
           // the last closing modal releases it.
           if (!this.modalService.hasOpenModals()) {
@@ -119,7 +133,16 @@ export class ModalComponent implements OnInit, OnDestroy {
       content.querySelectorAll<HTMLElement>(
         'a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])',
       ),
-    );
+    ).filter((el) => {
+      if (el instanceof HTMLInputElement && el.type === 'hidden') {
+        return false;
+      }
+      if (el.closest('[hidden]')) {
+        return false;
+      }
+      const style = getComputedStyle(el);
+      return style.visibility !== 'hidden' && style.display !== 'none';
+    });
 
     if (focusables.length === 0) {
       keyEvent.preventDefault();
@@ -169,6 +192,12 @@ export class ModalComponent implements OnInit, OnDestroy {
     if (target && document.contains(target)) {
       target.focus();
     }
+  }
+
+  private readZIndexVar(name: string, fallback: number): number {
+    const raw = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+    const parsed = parseInt(raw, 10);
+    return Number.isFinite(parsed) ? parsed : fallback;
   }
 
   ngOnDestroy(): void {

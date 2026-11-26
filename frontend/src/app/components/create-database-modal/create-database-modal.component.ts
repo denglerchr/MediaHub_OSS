@@ -1,5 +1,12 @@
 import { Component, OnInit, OnDestroy } from '@angular/core';
-import { FormBuilder, FormGroup, FormArray, Validators } from '@angular/forms';
+import {
+  AbstractControl,
+  FormArray,
+  FormBuilder,
+  FormGroup,
+  ValidationErrors,
+  Validators,
+} from '@angular/forms';
 import { DatabaseService } from '../../services/database.service';
 import { ModalService } from '../../services/modal.service';
 import { finalize, takeUntil } from 'rxjs/operators';
@@ -7,8 +14,13 @@ import { Subject } from 'rxjs';
 import { DatabaseConfig } from '../../models';
 import {
   CUSTOM_FIELD_NAME_PATTERN,
+  DATABASE_NAME_MAX_LENGTH,
+  DATABASE_NAME_PATTERN,
   reservedCustomFieldNameValidator,
 } from '../../utils/validation';
+
+const INTEGER_ONLY_PATTERN = /^\d+$/;
+const CUSTOM_FIELD_NAME_MAX_LENGTH = 64;
 
 @Component({
   selector: 'app-create-database-modal',
@@ -28,18 +40,37 @@ export class CreateDatabaseModalComponent implements OnInit, OnDestroy {
     private modalService: ModalService,
   ) {
     this.createDbForm = this.fb.group({
-      name: ['', [Validators.required, Validators.maxLength(100)]],
+      name: [
+        '',
+        [
+          Validators.required,
+          Validators.maxLength(DATABASE_NAME_MAX_LENGTH),
+          Validators.pattern(DATABASE_NAME_PATTERN),
+        ],
+      ],
       content_type: ['image', Validators.required],
-      n_max_queued: [0, [Validators.required, Validators.min(0)]],
+      n_max_queued: [
+        0,
+        [Validators.required, Validators.min(0), Validators.pattern(INTEGER_ONLY_PATTERN)],
+      ],
       create_preview: [true],
       auto_conversion: [''],
 
       housekeeping: this.fb.group({
-        interval_value: [1, [Validators.required, Validators.min(0)]],
+        interval_value: [
+          1,
+          [Validators.required, Validators.min(0), Validators.pattern(INTEGER_ONLY_PATTERN)],
+        ],
         interval_unit: ['h'],
-        disk_space_value: [100, [Validators.required, Validators.min(0)]],
+        disk_space_value: [
+          100,
+          [Validators.required, Validators.min(0), Validators.pattern(INTEGER_ONLY_PATTERN)],
+        ],
         disk_space_unit: ['G'],
-        max_age_value: [0, [Validators.required, Validators.min(0)]],
+        max_age_value: [
+          0,
+          [Validators.required, Validators.min(0), Validators.pattern(INTEGER_ONLY_PATTERN)],
+        ],
         max_age_unit: ['d'],
       }),
       custom_fields: this.fb.array([]),
@@ -47,13 +78,73 @@ export class CreateDatabaseModalComponent implements OnInit, OnDestroy {
   }
 
   ngOnInit(): void {
+    this.modalService
+      .getModalEvents(CreateDatabaseModalComponent.MODAL_ID)
+      .pipe(takeUntil(this.destroy$))
+      .subscribe((event) => {
+        if (event.action === 'open' || event.action === 'close') {
+          this.resetForm();
+        }
+      });
+
     this.createDbForm
       .get('content_type')
       ?.valueChanges.pipe(takeUntil(this.destroy$))
       .subscribe(() => {
         this.createDbForm.get('auto_conversion')?.setValue('');
       });
+
+    this.customFields.valueChanges.pipe(takeUntil(this.destroy$)).subscribe(() => {
+      this.customFields.controls.forEach((ctrl) => {
+        ctrl.get('name')?.updateValueAndValidity({ onlySelf: true, emitEvent: false });
+      });
+    });
   }
+
+  private resetForm(): void {
+    this.isLoading = false;
+    this.createDbForm.reset(
+      {
+        name: '',
+        content_type: 'image',
+        n_max_queued: 0,
+        create_preview: true,
+        auto_conversion: '',
+        housekeeping: {
+          interval_value: 1,
+          interval_unit: 'h',
+          disk_space_value: 100,
+          disk_space_unit: 'G',
+          max_age_value: 0,
+          max_age_unit: 'd',
+        },
+      },
+      { emitEvent: false },
+    );
+    this.customFields.clear();
+  }
+
+  private duplicateCustomFieldNameValidator = (
+    control: AbstractControl,
+  ): ValidationErrors | null => {
+    const value = typeof control.value === 'string' ? control.value.trim().toLowerCase() : '';
+    if (!value) {
+      return null;
+    }
+    const group = control.parent;
+    const array = group?.parent as FormArray | null;
+    if (!array || !Array.isArray(array.controls)) {
+      return null;
+    }
+    const isDuplicate = array.controls.some((sibling) => {
+      if (sibling === group) {
+        return false;
+      }
+      const siblingName = sibling.get('name')?.value;
+      return typeof siblingName === 'string' && siblingName.trim().toLowerCase() === value;
+    });
+    return isDuplicate ? { duplicate: true } : null;
+  };
 
   trackByIndex(index: number): number {
     return index;
@@ -71,8 +162,10 @@ export class CreateDatabaseModalComponent implements OnInit, OnDestroy {
         '',
         [
           Validators.required,
+          Validators.maxLength(CUSTOM_FIELD_NAME_MAX_LENGTH),
           Validators.pattern(CUSTOM_FIELD_NAME_PATTERN),
           reservedCustomFieldNameValidator,
+          this.duplicateCustomFieldNameValidator,
         ],
       ],
       type: ['TEXT', Validators.required],
@@ -86,6 +179,8 @@ export class CreateDatabaseModalComponent implements OnInit, OnDestroy {
   }
 
   onSubmit(): void {
+    if (this.isLoading) return;
+
     if (this.createDbForm.invalid) {
       this.createDbForm.markAllAsTouched();
       return;
@@ -119,28 +214,16 @@ export class CreateDatabaseModalComponent implements OnInit, OnDestroy {
 
     this.databaseService
       .createDatabase(payload)
-      .pipe(finalize(() => (this.isLoading = false)))
+      .pipe(
+        takeUntil(this.destroy$),
+        finalize(() => (this.isLoading = false)),
+      )
       .subscribe({
         next: () => {
           this.modalService.close(CreateDatabaseModalComponent.MODAL_ID, true);
-
-          this.createDbForm.reset({
-            name: '',
-            content_type: 'image',
-            n_max_queued: 0,
-            create_preview: true,
-            auto_conversion: '',
-            housekeeping: {
-              interval_value: 1,
-              interval_unit: 'h',
-              disk_space_value: 100,
-              disk_space_unit: 'G',
-              max_age_value: 0,
-              max_age_unit: 'd',
-            },
-          });
-          this.customFields.clear();
+          this.resetForm();
         },
+        error: () => {},
       });
   }
 

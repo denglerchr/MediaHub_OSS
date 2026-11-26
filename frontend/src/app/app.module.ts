@@ -39,6 +39,7 @@ import { OverviewPageComponent } from './pages/overview-page/overview-page.compo
 import { ProfilePageComponent } from './pages/profile-page/profile-page.component';
 import { AdminGlobalKeysComponent } from './components/admin-global-keys/admin-global-keys.component';
 import { ApiKeyModalComponent } from './components/api-key-modal/api-key-modal.component';
+import { ApiKeyTableComponent } from './components/api-key-table/api-key-table.component';
 
 // Pipes & Directives
 import { FormatBytesPipe } from './pipes/format-bytes.pipe';
@@ -84,6 +85,7 @@ import { jwtInterceptorFn } from './interceptors/jwt.interceptor';
     BrowserAnimationsModule,
     EntryGridComponent,
     EntryListViewComponent,
+    ApiKeyTableComponent,
     SecureImageDirective,
     FormatBytesPipe,
     FileDragDropDirective,

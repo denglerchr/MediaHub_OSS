@@ -113,6 +113,10 @@ body {
   font-size: var(--text-base);
 }
 
+body.modal-open {
+  overflow: hidden;
+}
+
 /* =========================================
    SCROLLBARS (Webkit Fallback)
    ========================================= */

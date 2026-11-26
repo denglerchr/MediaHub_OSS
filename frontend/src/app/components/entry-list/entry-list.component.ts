@@ -134,6 +134,7 @@ export class EntryListComponent implements OnInit, OnDestroy {
             this.entriesToShow = [];
             this.tableColumns = [];
             this.availableFilters = [];
+            this.loadError = false;
             this.isLoading = false;
             this.updatePermissions();
             this.cdr.markForCheck();
@@ -143,9 +144,11 @@ export class EntryListComponent implements OnInit, OnDestroy {
           this.dbId = id;
           this.entriesToShow = [];
           this.currentPage = 1;
+          this.imagesPerPage = 200;
           this.hasNextPage = false;
           this.clearSelection();
           this.currentFilterConditions = undefined;
+          this.loadError = false;
           this.isLoading = true;
           this.cdr.markForCheck();
 
@@ -167,6 +170,7 @@ export class EntryListComponent implements OnInit, OnDestroy {
               } else {
                 this.currentDb = null;
                 this.fileAcceptString = null;
+                this.loadError = true;
                 this.updatePermissions();
                 this.tableColumns = [];
                 this.availableFilters = [];
@@ -188,6 +192,7 @@ export class EntryListComponent implements OnInit, OnDestroy {
                 tap(({ isSilent }) => {
                   if (!isSilent) {
                     this.isLoading = true;
+                    this.loadError = false;
                     this.clearSelection();
                   }
                   this.cdr.markForCheck();
@@ -263,12 +268,23 @@ export class EntryListComponent implements OnInit, OnDestroy {
       if (!this.entriesToShow.some((e) => e.id === newEntry.id)) {
         const updated = [newEntry, ...this.entriesToShow];
         updated.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
-        this.entriesToShow = updated;
+        if (updated.length > this.imagesPerPage) {
+          this.entriesToShow = updated.slice(0, this.imagesPerPage);
+          this.hasNextPage = true;
+        } else {
+          this.entriesToShow = updated;
+        }
         this.cdr.markForCheck();
       }
     });
 
     this.entryService.entryUpdated$.pipe(takeUntil(this.destroy$)).subscribe((updatedEntry) => {
+      if (
+        !this.currentDb ||
+        (updatedEntry.database_id && updatedEntry.database_id !== this.currentDb.id)
+      ) {
+        return;
+      }
       const index = this.entriesToShow.findIndex((e) => e.id === updatedEntry.id);
       if (index !== -1) {
         this.entriesToShow[index] = { ...this.entriesToShow[index], ...updatedEntry };
@@ -323,9 +339,11 @@ export class EntryListComponent implements OnInit, OnDestroy {
    */
   retryLoad(): void {
     if (this.loadError && !this.currentDb && this.dbId) {
+      this.loadError = false;
       this.routeRetry$.next();
       return;
     }
+    this.loadError = false;
     this.manualFetchTrigger$.next();
   }
 
@@ -350,7 +368,7 @@ export class EntryListComponent implements OnInit, OnDestroy {
       { name: 'filesize', type: 'INTEGER' },
       { name: 'mime_type', type: 'TEXT' },
       { name: 'filename', type: 'TEXT' },
-      { name: 'status', type: 'TEXT' },
+      { name: 'status', type: 'STATUS' },
     ];
 
     if (db.content_type === 'image') {
@@ -426,11 +444,15 @@ export class EntryListComponent implements OnInit, OnDestroy {
 
   onBulkDownload(): void {
     if (!this.dbId || this.selectedEntryIds.size === 0) return; // UPDATED
+    const dbId = this.dbId;
     this.isBulkProcessing = true;
     const ids = Array.from(this.selectedEntryIds);
     this.entryService
-      .bulkExportEntries(this.dbId, ids) // UPDATED
-      .pipe(finalize(() => (this.isBulkProcessing = false)))
+      .bulkExportEntries(dbId, ids) // UPDATED
+      .pipe(
+        takeUntil(this.destroy$),
+        finalize(() => (this.isBulkProcessing = false)),
+      )
       .subscribe({
         next: (blob) => {
           const url = window.URL.createObjectURL(blob);
@@ -440,24 +462,26 @@ export class EntryListComponent implements OnInit, OnDestroy {
           document.body.appendChild(a);
           a.click();
           document.body.removeChild(a);
-          window.URL.revokeObjectURL(url);
+          setTimeout(() => window.URL.revokeObjectURL(url), 1000);
           this.notificationService.showSuccess('Export downloaded successfully.');
           this.clearSelection();
         },
-        error: () => this.notificationService.showError('Failed to generate export archive.'),
+        error: () => {},
       });
   }
 
   onBulkDelete(): void {
     if (!this.dbId || !this.currentDb || this.selectedEntryIds.size === 0) return; // UPDATED
-    const queuedSelected = this.entriesToShow.find(
-      (e) => this.selectedEntryIds.has(e.id) && e.status === 'queued',
+    const blockedSelected = this.entriesToShow.find(
+      (e) =>
+        this.selectedEntryIds.has(e.id) && (e.status === 'queued' || e.status === 'processing'),
     );
-    if (queuedSelected) {
+    if (blockedSelected) {
       return this.notificationService.showError(
-        'Cannot delete: entry ' + queuedSelected.id + ' is still queued.',
+        `Cannot delete: entry ${blockedSelected.id} is still ${blockedSelected.status}.`,
       );
     }
+    const dbId = this.dbId;
     const ids = Array.from(this.selectedEntryIds);
     const modalData: ConfirmationModalData = {
       title: 'Confirm Bulk Deletion',
@@ -468,15 +492,20 @@ export class EntryListComponent implements OnInit, OnDestroy {
       .pipe(
         take(1),
         filter((confirmed) => confirmed === true),
+        takeUntil(this.destroy$),
       )
       .subscribe(() => {
-        if (this.dbId) {
-          this.isBulkProcessing = true;
-          this.entryService
-            .bulkDeleteEntries(this.dbId, ids) // UPDATED
-            .pipe(finalize(() => (this.isBulkProcessing = false)))
-            .subscribe({ next: () => this.clearSelection() });
-        }
+        this.isBulkProcessing = true;
+        this.entryService
+          .bulkDeleteEntries(dbId, ids) // UPDATED
+          .pipe(
+            takeUntil(this.destroy$),
+            finalize(() => (this.isBulkProcessing = false)),
+          )
+          .subscribe({
+            next: () => this.clearSelection(),
+            error: () => {},
+          });
       });
   }
 
@@ -562,18 +591,20 @@ export class EntryListComponent implements OnInit, OnDestroy {
       return this.notificationService.showError('Cannot delete processing entry.');
     if (entry.status === 'queued')
       return this.notificationService.showError('Cannot delete queued entry.');
+    const dbId = this.currentDb.id;
     const modalData = { message: `Delete entry ${entry.id}?` };
     this.modalService
       .open(ConfirmationModalComponent.MODAL_ID, modalData)
       .pipe(
         take(1),
         filter((c) => c === true),
+        takeUntil(this.destroy$),
       )
       .subscribe(() => {
         this.entryService
-          .deleteEntry(this.currentDb!.id, entry.id)
+          .deleteEntry(dbId, entry.id)
           .pipe(takeUntil(this.destroy$))
-          .subscribe();
+          .subscribe({ error: () => {} });
       });
   }
 
@@ -585,14 +616,12 @@ export class EntryListComponent implements OnInit, OnDestroy {
 
     this.modalService
       .open<FullscreenSettings>(FullscreenSettingsModalComponent.MODAL_ID)
-      .pipe(take(1))
+      .pipe(take(1), takeUntil(this.destroy$))
       .subscribe((result) => {
         if (result) {
-          setTimeout(() => {
-            this.fullscreenSettings = result;
-            this.showFullscreenPlayer = true;
-            this.cdr.detectChanges();
-          }, 0);
+          this.fullscreenSettings = result;
+          this.showFullscreenPlayer = true;
+          this.cdr.detectChanges();
         }
       });
   }

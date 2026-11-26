@@ -52,7 +52,6 @@
         class="form-control"
         [(ngModel)]="startDate"
         (ngModelChange)="onDateChange()"
-        [disabled]="isLoading"
         appDatetimeDefault
       />
     </div>
@@ -65,7 +64,6 @@
         class="form-control"
         [(ngModel)]="endDate"
         (ngModelChange)="onDateChange()"
-        [disabled]="isLoading"
         appDatetimeDefault="end"
       />
     </div>

@@ -90,6 +90,7 @@ export class EntryListViewComponent implements OnChanges {
   }
 
   public onCheckboxClick(entry: Entry, event: MouseEvent): void {
+    event.preventDefault();
     event.stopPropagation();
 
     if (event.target instanceof HTMLElement) {

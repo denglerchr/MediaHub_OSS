@@ -20,6 +20,8 @@ describe('UploadEntryModalComponent — N3 background-upload auto-close', () => 
   let fixture: ComponentFixture<UploadEntryModalComponent>;
   let component: UploadEntryModalComponent;
   let modalService: ModalService;
+  let selectedDatabase$: BehaviorSubject<Database>;
+  let fetchCurrentUserSpy: jasmine.Spy;
   let upload$: Subject<void>;
   let uploadEntrySpy: jasmine.Spy;
 
@@ -35,6 +37,8 @@ describe('UploadEntryModalComponent — N3 background-upload auto-close', () => 
   beforeEach(async () => {
     upload$ = new Subject<void>();
     uploadEntrySpy = jasmine.createSpy('uploadEntry').and.returnValue(upload$);
+    selectedDatabase$ = new BehaviorSubject(db);
+    fetchCurrentUserSpy = jasmine.createSpy('fetchCurrentUser').and.returnValue(of(user));
 
     await TestBed.configureTestingModule({
       declarations: [UploadEntryModalComponent],
@@ -48,8 +52,8 @@ describe('UploadEntryModalComponent — N3 background-upload auto-close', () => 
             triggerImageListRefresh: jasmine.createSpy('triggerImageListRefresh'),
           },
         },
-        { provide: DatabaseService, useValue: { selectedDatabase$: new BehaviorSubject(db) } },
-        { provide: AuthService, useValue: { fetchCurrentUser: () => of(user) } },
+        { provide: DatabaseService, useValue: { selectedDatabase$ } },
+        { provide: AuthService, useValue: { fetchCurrentUser: fetchCurrentUserSpy } },
         {
           provide: NotificationService,
           useValue: jasmine.createSpyObj('NotificationService', [
@@ -227,5 +231,218 @@ describe('UploadEntryModalComponent — N3 background-upload auto-close', () => 
     expect(notificationSpy.showError)
       .withContext('an all-invalid drop must say so')
       .toHaveBeenCalled();
+  });
+
+  it('nests custom fields under custom_fields FormGroup so a custom field named "file" does not collide with root file control', fakeAsync(() => {
+    const dbWithCollidingField = {
+      id: 'db-cf',
+      name: 'DB Custom File',
+      content_type: ContentType.Image,
+      custom_fields: [
+        { id: 1, name: 'file', type: 'TEXT' },
+        { id: 2, name: 'verified', type: 'BOOLEAN' },
+      ],
+    } as unknown as Database;
+
+    selectedDatabase$.next(dbWithCollidingField);
+    modalService.open(UploadEntryModalComponent.MODAL_ID);
+    fixture.detectChanges();
+
+    const rootFileInput = fixture.nativeElement.querySelector('input#file') as HTMLInputElement;
+    const customFileInput = fixture.nativeElement.querySelector(
+      'input#upload-cf-file',
+    ) as HTMLInputElement;
+    expect(rootFileInput).toBeTruthy();
+    expect(customFileInput).toBeTruthy();
+
+    const uploadFile = new File(['img-bytes'], 'photo.jpg', { type: 'image/jpeg' });
+    component.selectedFile = uploadFile;
+    component.uploadForm.patchValue({
+      file: uploadFile,
+      timestamp: '2026-10-06T12:00:00',
+      custom_fields: {
+        file: 'original-source-name',
+        verified: true,
+      },
+    });
+
+    expect(component.uploadForm.get('file')?.value).toBe(uploadFile);
+    expect(component.uploadForm.get(['custom_fields', 'file'])?.value).toBe('original-source-name');
+
+    uploadEntrySpy.and.returnValue(of(undefined));
+    component.onSubmit();
+    tick();
+
+    expect(uploadEntrySpy).toHaveBeenCalledTimes(1);
+    const [, metadata, submittedFile] = uploadEntrySpy.calls.mostRecent().args;
+    expect(submittedFile).toBe(uploadFile);
+    expect(metadata.custom_fields).toEqual({
+      file: 'original-source-name',
+      verified: true,
+    });
+  }));
+
+  it('vetoes modalService.close via close guard while uploading and snapshots batch files across re-open', fakeAsync(() => {
+    const modalEvents: string[] = [];
+    const sub = modalService
+      .getModalEvents(UploadEntryModalComponent.MODAL_ID)
+      .subscribe((e) => modalEvents.push(e.action));
+
+    const userSubject = new Subject<User>();
+    fetchCurrentUserSpy.and.returnValue(userSubject);
+
+    modalService.open(UploadEntryModalComponent.MODAL_ID);
+    fixture.detectChanges();
+
+    const fileA = new File(['a'], 'a.png', { type: 'image/png' });
+    const fileB = new File(['b'], 'b.png', { type: 'image/png' });
+    const fileC = new File(['c'], 'c.png', { type: 'image/png' });
+    component.handleMultipleFiles([fileA, fileB]);
+
+    uploadEntrySpy.and.returnValue(of(undefined));
+    component.onSubmit();
+    expect(component.isLoading).toBeTrue();
+
+    // Attempting to close while isLoading === true must be vetoed by the close guard.
+    modalEvents.length = 0;
+    modalService.close(UploadEntryModalComponent.MODAL_ID);
+    expect(modalEvents).not.toContain('close');
+
+    // Re-opening replaces selectedFiles/selectedFile on the component instance.
+    modalService.open(UploadEntryModalComponent.MODAL_ID, { file: fileC });
+    fixture.detectChanges();
+    expect(component.isLoading).toBeFalse();
+    expect(component.isMultipleUpload).toBeFalse();
+    expect(component.selectedFile).toBe(fileC);
+    expect(component.selectedFiles).toEqual([]);
+
+    // Now the snapshotted in-flight upload resolves fetchCurrentUser and proceeds
+    // with the original [fileA, fileB] snapshot without touching the re-opened session.
+    userSubject.next(user);
+    userSubject.complete();
+    tick();
+
+    expect(uploadEntrySpy).toHaveBeenCalledTimes(2);
+    expect(uploadEntrySpy.calls.argsFor(0)[2]).toBe(fileA);
+    expect(uploadEntrySpy.calls.argsFor(1)[2]).toBe(fileB);
+    expect(component.selectedFile).toBe(fileC);
+    expect(component.totalUploads).toBe(0);
+
+    sub.unsubscribe();
+  }));
+
+  it('validates INTEGER custom fields and partial COORDINATE pairs and skips non-finite numeric coercion', fakeAsync(() => {
+    const schemaDb = {
+      id: 'db-schema',
+      name: 'Schema DB',
+      content_type: ContentType.Image,
+      custom_fields: [
+        { id: 1, name: 'count', type: 'INTEGER' },
+        { id: 2, name: 'score', type: 'REAL' },
+        { id: 3, name: 'coords', type: 'COORDINATE' },
+      ],
+    } as unknown as Database;
+
+    selectedDatabase$.next(schemaDb);
+    modalService.open(UploadEntryModalComponent.MODAL_ID);
+    fixture.detectChanges();
+
+    primeUploadForm();
+
+    const countCtrl = component.uploadForm.get(['custom_fields', 'count']);
+    const scoreCtrl = component.uploadForm.get(['custom_fields', 'score']);
+    const coordsGroup = component.uploadForm.get(['custom_fields', 'coords']);
+
+    countCtrl?.setValue(2.5);
+    expect(countCtrl?.invalid).toBeTrue();
+    expect(component.uploadForm.invalid).toBeTrue();
+
+    countCtrl?.setValue(-3);
+    expect(countCtrl?.valid).toBeTrue();
+
+    coordsGroup?.patchValue({ latitude: 48.1, longitude: null });
+    expect(coordsGroup?.hasError('incompleteCoordinate')).toBeTrue();
+    expect(component.uploadForm.invalid).toBeTrue();
+
+    coordsGroup?.patchValue({ latitude: 48.1, longitude: 11.5 });
+    scoreCtrl?.setValue('Infinity');
+    expect(component.uploadForm.valid).toBeTrue();
+
+    uploadEntrySpy.and.returnValue(of(undefined));
+    component.onSubmit();
+    tick();
+
+    expect(uploadEntrySpy).toHaveBeenCalledTimes(1);
+    const [, metadata] = uploadEntrySpy.calls.mostRecent().args;
+    expect(metadata.custom_fields).toEqual({
+      count: -3,
+      coords: { latitude: 48.1, longitude: 11.5 },
+    });
+  }));
+
+  it('marks timestamp pristine on handleFile and ignores stale extractMetadata results after switching files', async () => {
+    const notificationSpy = TestBed.inject(
+      NotificationService,
+    ) as jasmine.SpyObj<NotificationService>;
+
+    // Build a minimal valid JPEG with EXIF DateTimeOriginal = "2020:01:02 03:04:05"
+    const exifBytes = new Uint8Array(128);
+    // JPEG SOI + APP1 marker + length
+    exifBytes[0] = 0xff;
+    exifBytes[1] = 0xd8;
+    exifBytes[2] = 0xff;
+    exifBytes[3] = 0xe1;
+    exifBytes[4] = 0x00;
+    exifBytes[5] = 0x70;
+    // "Exif\0\0"
+    exifBytes.set([0x45, 0x78, 0x69, 0x66, 0x00, 0x00], 6);
+    // TIFF header at offset 12: "II" + 42 + IFD0 offset 8
+    const tiff = 12;
+    const view = new DataView(exifBytes.buffer);
+    view.setUint16(tiff, 0x4949, false);
+    view.setUint16(tiff + 2, 42, true);
+    view.setUint32(tiff + 4, 8, true);
+    // IFD0 at tiff + 8: 1 entry (ExifSubIFD 0x8769 -> offset 26)
+    view.setUint16(tiff + 8, 1, true);
+    view.setUint16(tiff + 10, 0x8769, true);
+    view.setUint16(tiff + 12, 4, true);
+    view.setUint32(tiff + 14, 1, true);
+    view.setUint32(tiff + 18, 26, true);
+    // ExifSubIFD at tiff + 26: 1 entry (DateTimeOriginal 0x9003, 20 bytes at offset 44)
+    view.setUint16(tiff + 26, 1, true);
+    view.setUint16(tiff + 28, 0x9003, true);
+    view.setUint16(tiff + 30, 2, true);
+    view.setUint32(tiff + 32, 20, true);
+    view.setUint32(tiff + 36, 44, true);
+    const dateStr = '2020:01:02 03:04:05\0';
+    for (let i = 0; i < dateStr.length; i++) {
+      exifBytes[tiff + 44 + i] = dateStr.charCodeAt(i);
+    }
+
+    let resolveSlice!: (buf: ArrayBuffer) => void;
+    const fileA = new File([exifBytes], 'first.jpg', { type: 'image/jpeg' });
+    spyOn(fileA, 'slice').and.returnValue({
+      arrayBuffer: () =>
+        new Promise<ArrayBuffer>((resolve) => {
+          resolveSlice = resolve;
+        }),
+    } as unknown as Blob);
+
+    const fileB = new File(['png'], 'second.png', { type: 'image/png' });
+
+    component.uploadForm.get('timestamp')?.markAsDirty();
+    const firstPromise = component.handleFile(fileA);
+    expect(component.uploadForm.get('timestamp')?.pristine).toBeTrue();
+
+    await component.handleFile(fileB);
+    expect(component.selectedFile).toBe(fileB);
+
+    // Resolve stale fileA extraction AFTER fileB is already active
+    resolveSlice(exifBytes.buffer);
+    await firstPromise;
+
+    expect(component.selectedFile).toBe(fileB);
+    expect(String(component.uploadForm.get('timestamp')?.value)).not.toContain('2020-01-02');
+    expect(notificationSpy.showSuccess).not.toHaveBeenCalled();
   });
 });

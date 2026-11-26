@@ -1,11 +1,31 @@
 import { Component, OnDestroy, OnInit } from '@angular/core';
-import { FormBuilder, FormGroup, Validators } from '@angular/forms';
+import {
+  AbstractControl,
+  FormBuilder,
+  FormGroup,
+  ValidationErrors,
+  ValidatorFn,
+  Validators,
+} from '@angular/forms';
 import { Subject } from 'rxjs';
 import { takeUntil, filter, finalize } from 'rxjs/operators';
-import { Database, Entry } from '../../models';
+import { CustomField, Database, Entry } from '../../models';
 import { EntryService } from '../../services/entry.service';
 import { DatabaseService } from '../../services/database.service';
 import { ModalService } from '../../services/modal.service';
+
+const completeCoordinateValidator: ValidatorFn = (
+  control: AbstractControl,
+): ValidationErrors | null => {
+  const lat = control.get('latitude')?.value;
+  const lng = control.get('longitude')?.value;
+  const hasLat = lat !== null && lat !== '' && lat !== undefined;
+  const hasLng = lng !== null && lng !== '' && lng !== undefined;
+  if (hasLat !== hasLng) {
+    return { incompleteCoordinate: true };
+  }
+  return null;
+};
 
 @Component({
   selector: 'app-edit-entry-modal',
@@ -42,6 +62,13 @@ export class EditEntryModalComponent implements OnInit, OnDestroy {
         filter((db): db is Database => !!db),
       )
       .subscribe((db) => {
+        if (
+          this.currentEntry &&
+          this.currentEntry.database_id &&
+          this.currentEntry.database_id !== db.id
+        ) {
+          this.currentEntry = null;
+        }
         this.currentDatabase = db;
         this.initializeForm(db);
 
@@ -50,18 +77,24 @@ export class EditEntryModalComponent implements OnInit, OnDestroy {
         }
       });
 
-    this.entryService.selectedEntry$
-      .pipe(
-        takeUntil(this.destroy$),
-        filter((entry): entry is Entry => !!entry && !!this.currentDatabase),
-      )
-      .subscribe((entry) => {
-        this.currentEntry = entry;
-        this.patchForm(entry);
-      });
+    this.entryService.selectedEntry$.pipe(takeUntil(this.destroy$)).subscribe((entry) => {
+      if (
+        !entry ||
+        !this.currentDatabase ||
+        (entry.database_id && entry.database_id !== this.currentDatabase.id)
+      ) {
+        this.currentEntry = null;
+        return;
+      }
+      this.currentEntry = entry;
+      this.patchForm(entry);
+    });
   }
 
   private getLocalISOString(date: Date): string {
+    if (isNaN(date.getTime())) {
+      return '';
+    }
     const offset = date.getTimezoneOffset();
     const shiftedDate = new Date(date.getTime() - offset * 60 * 1000);
     // FE-005: keep second precision — slicing at 16 truncated every saved timestamp
@@ -80,14 +113,18 @@ export class EditEntryModalComponent implements OnInit, OnDestroy {
       if (field.type === 'COORDINATE') {
         customGroup.addControl(
           field.name,
-          this.fb.group({
-            latitude: [null, [Validators.min(-90), Validators.max(90)]],
-            longitude: [null, [Validators.min(-180), Validators.max(180)]],
-          }),
+          this.fb.group(
+            {
+              latitude: [null, [Validators.min(-90), Validators.max(90)]],
+              longitude: [null, [Validators.min(-180), Validators.max(180)]],
+            },
+            { validators: completeCoordinateValidator },
+          ),
         );
       } else {
         const defaultValue = field.type === 'BOOLEAN' ? false : '';
-        customGroup.addControl(field.name, this.fb.control(defaultValue));
+        const validators = field.type === 'INTEGER' ? [Validators.pattern(/^-?\d+$/)] : [];
+        customGroup.addControl(field.name, this.fb.control(defaultValue, validators));
       }
     });
 
@@ -178,9 +215,13 @@ export class EditEntryModalComponent implements OnInit, OnDestroy {
       if (field.type === 'BOOLEAN') {
         customFields[field.name] = !!val;
       } else if (field.type === 'INTEGER' || field.type === 'REAL') {
-        // FE-004: omit blank numeric fields. Sending "" makes the backend reject the
-        // whole request (validateCustomFields requires a number) and broke every edit.
+        // FE-004: omit blank numeric fields when already unset (sending "" makes the
+        // backend reject the whole request), but send explicit null when clearing an
+        // existing value so the backend resets the column to SQL NULL.
         if (val === '' || val === null || val === undefined) {
+          if (this.currentEntry?.custom_fields?.[field.name] != null) {
+            customFields[field.name] = null;
+          }
           return;
         }
         const num = Number(val);
@@ -200,8 +241,11 @@ export class EditEntryModalComponent implements OnInit, OnDestroy {
         takeUntil(this.destroy$),
         finalize(() => (this.isLoading = false)),
       )
-      .subscribe(() => {
-        this.modalService.close(EditEntryModalComponent.MODAL_ID, true);
+      .subscribe({
+        next: () => {
+          this.modalService.close(EditEntryModalComponent.MODAL_ID, true);
+        },
+        error: () => {},
       });
   }
 
@@ -209,7 +253,7 @@ export class EditEntryModalComponent implements OnInit, OnDestroy {
     this.modalService.close(EditEntryModalComponent.MODAL_ID, false);
   }
 
-  trackByFieldId(index: number, field: any): number | string {
+  trackByFieldId(index: number, field: CustomField): number | string {
     return field.id ?? field.name;
   }
 

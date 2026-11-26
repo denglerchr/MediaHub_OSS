@@ -6,8 +6,8 @@ import {
   ActivatedRouteSnapshot,
   RouterStateSnapshot,
 } from '@angular/router';
-import { Observable, of } from 'rxjs';
-import { map, take, switchMap } from 'rxjs/operators';
+import { Observable, of, from } from 'rxjs';
+import { map, take, switchMap, catchError } from 'rxjs/operators';
 import { AuthService } from '../services/auth.service';
 import { AppInfoService } from '../services/app-info.service';
 
@@ -33,9 +33,10 @@ export class AuthGuard implements CanActivate {
           return of(true);
         }
 
-        // 2. If unauthenticated, check if an authorization code was passed in the target route params
+        // 2. If unauthenticated, check if an OIDC authorization code or error was passed in the target route params
         const code = route.queryParamMap.get('code');
-        if (code) {
+        const error = route.queryParamMap.get('error');
+        if (code || error) {
           const queryParams: Record<string, string> = {};
           route.queryParamMap.keys.forEach((key) => {
             const val = route.queryParamMap.get(key);
@@ -49,7 +50,7 @@ export class AuthGuard implements CanActivate {
         // 3. If unauthenticated and no code, check if local login page is disabled
         return this.appInfoService.loadInfo().pipe(
           take(1),
-          map((info) => {
+          switchMap((info) => {
             const oidc = info?.oidc;
             if (
               oidc?.enabled &&
@@ -57,11 +58,20 @@ export class AuthGuard implements CanActivate {
               oidc?.oidc_issuer_url &&
               oidc?.oidc_client_id
             ) {
-              this.authService.redirectToOidc(oidc);
-              return false;
+              return from(this.authService.redirectToOidc(oidc)).pipe(
+                map(() => false),
+                catchError((err) => {
+                  console.error('OIDC redirect failed:', err);
+                  return of(
+                    this.router.createUrlTree(['/login'], {
+                      queryParams: { error: 'sso_failed' },
+                    }),
+                  );
+                }),
+              );
             }
 
-            return this.router.createUrlTree(['/login']);
+            return of(this.router.createUrlTree(['/login']));
           }),
         );
       }),

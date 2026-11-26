@@ -1,5 +1,12 @@
 import { Component, OnDestroy, OnInit, ChangeDetectorRef } from '@angular/core';
-import { FormBuilder, FormGroup, Validators } from '@angular/forms';
+import {
+  AbstractControl,
+  FormBuilder,
+  FormGroup,
+  ValidationErrors,
+  ValidatorFn,
+  Validators,
+} from '@angular/forms';
 import { Subject, firstValueFrom } from 'rxjs';
 import { takeUntil, filter, switchMap } from 'rxjs/operators';
 import { Database, CustomField, UploadEntryMetadata } from '../../models';
@@ -10,6 +17,19 @@ import { isMimeTypeAllowed, getFileAcceptString } from '../../utils/mime-types';
 import { NotificationService } from '../../services/notification.service';
 import { AuthService } from '../../services/auth.service';
 import { extractMetadata } from '../../utils/metadata-extractor';
+
+const completeCoordinateValidator: ValidatorFn = (
+  control: AbstractControl,
+): ValidationErrors | null => {
+  const lat = control.get('latitude')?.value;
+  const lng = control.get('longitude')?.value;
+  const hasLat = lat !== null && lat !== '' && lat !== undefined;
+  const hasLng = lng !== null && lng !== '' && lng !== undefined;
+  if (hasLat !== hasLng) {
+    return { incompleteCoordinate: true };
+  }
+  return null;
+};
 
 @Component({
   selector: 'app-upload-entry-modal',
@@ -37,6 +57,7 @@ export class UploadEntryModalComponent implements OnInit, OnDestroy {
   // a new generation, so a background upload from a dismissed session can never
   // close (or lock) it.
   private uploadGeneration = 0;
+  private isDestroyed = false;
 
   public fileAcceptString: string | null = null;
 
@@ -59,6 +80,8 @@ export class UploadEntryModalComponent implements OnInit, OnDestroy {
   }
 
   ngOnInit(): void {
+    this.modalService.registerCloseGuard(UploadEntryModalComponent.MODAL_ID, () => !this.isLoading);
+
     this.databaseService.selectedDatabase$
       .pipe(
         takeUntil(this.destroy$),
@@ -126,21 +149,28 @@ export class UploadEntryModalComponent implements OnInit, OnDestroy {
     );
     this.uploadForm.addControl('file', this.fb.control(null, Validators.required));
 
+    const customFieldsGroup = this.fb.group({});
+    this.uploadForm.addControl('custom_fields', customFieldsGroup);
+
     this.resetFileState();
 
     if (this.currentDatabase) {
       this.currentDatabase.custom_fields.forEach((field: CustomField) => {
         if (field.type === 'COORDINATE') {
-          this.uploadForm.addControl(
+          customFieldsGroup.addControl(
             field.name,
-            this.fb.group({
-              latitude: [null, [Validators.min(-90), Validators.max(90)]],
-              longitude: [null, [Validators.min(-180), Validators.max(180)]],
-            }),
+            this.fb.group(
+              {
+                latitude: [null, [Validators.min(-90), Validators.max(90)]],
+                longitude: [null, [Validators.min(-180), Validators.max(180)]],
+              },
+              { validators: completeCoordinateValidator },
+            ),
           );
         } else {
           const defaultValue = field.type === 'BOOLEAN' ? false : '';
-          this.uploadForm.addControl(field.name, this.fb.control(defaultValue));
+          const validators = field.type === 'INTEGER' ? [Validators.pattern(/^-?\d+$/)] : [];
+          customFieldsGroup.addControl(field.name, this.fb.control(defaultValue, validators));
         }
       });
     }
@@ -203,12 +233,16 @@ export class UploadEntryModalComponent implements OnInit, OnDestroy {
 
     this.uploadForm.get('timestamp')?.setValidators([Validators.required]);
     this.uploadForm.get('timestamp')?.setValue(this.getLocalISOString(new Date()));
+    this.uploadForm.get('timestamp')?.markAsPristine();
     this.uploadForm.get('timestamp')?.updateValueAndValidity();
 
     this.cdr.detectChanges();
 
     try {
       const ext = await extractMetadata(file);
+      if (this.selectedFile !== file || this.isDestroyed) {
+        return;
+      }
       if (ext) {
         if (ext.timestamp) {
           this.singleFileTimestamp = ext.timestamp;
@@ -223,7 +257,7 @@ export class UploadEntryModalComponent implements OnInit, OnDestroy {
           );
           if (coordFields.length > 0) {
             coordFields.forEach((cf) => {
-              this.uploadForm.get(cf.name)?.patchValue({
+              this.uploadForm.get(['custom_fields', cf.name])?.patchValue({
                 latitude: ext.coordinates!.latitude,
                 longitude: ext.coordinates!.longitude,
               });
@@ -282,6 +316,8 @@ export class UploadEntryModalComponent implements OnInit, OnDestroy {
   }
 
   onSubmit(): void {
+    if (this.isLoading) return;
+
     if (
       this.uploadForm.invalid ||
       !this.currentDatabase ||
@@ -296,8 +332,17 @@ export class UploadEntryModalComponent implements OnInit, OnDestroy {
     // N3: capture the modal session this upload belongs to.
     const generation = this.uploadGeneration;
 
-    // Destructure to separate the core fields from the dynamic custom fields
-    const { timestamp, file, ...rawCustomFields } = this.uploadForm.value;
+    // Snapshot mutable session inputs before any async step so dismissing and
+    // re-opening the modal cannot mutate the array, null out singleFile, or swap db.
+    const db = this.currentDatabase;
+    const isMulti = this.isMultipleUpload;
+    const filesToUpload = [...this.selectedFiles];
+    const singleFile = this.selectedFile;
+    const singleTimestamp = this.singleFileTimestamp;
+    const tsDirty = !!this.uploadForm.get('timestamp')?.dirty;
+    const timestamp = this.uploadForm.value.timestamp;
+
+    const rawCustomFields = (this.uploadForm.value.custom_fields || {}) as Record<string, unknown>;
 
     // FE-042: typed coordinate sanitizer (was `(val: any)`).
     const sanitizeCoord = (val: unknown): { latitude: number; longitude: number } | null => {
@@ -322,24 +367,26 @@ export class UploadEntryModalComponent implements OnInit, OnDestroy {
 
     const custom_fields: Record<string, unknown> = {};
 
-    this.currentDatabase.custom_fields.forEach((field) => {
-      if (rawCustomFields.hasOwnProperty(field.name)) {
-        let value = rawCustomFields[field.name];
+    db.custom_fields.forEach((field) => {
+      if (Object.prototype.hasOwnProperty.call(rawCustomFields, field.name)) {
+        const rawValue = rawCustomFields[field.name];
 
         if (field.type === 'BOOLEAN') {
-          value = !!value;
-        } else if (
-          (field.type === 'INTEGER' || field.type === 'REAL') &&
-          value !== '' &&
-          value !== null
-        ) {
-          value = Number(value);
+          custom_fields[field.name] = !!rawValue;
+        } else if (field.type === 'INTEGER' || field.type === 'REAL') {
+          if (rawValue !== '' && rawValue !== null && rawValue !== undefined) {
+            const num = Number(rawValue);
+            if (Number.isFinite(num)) {
+              custom_fields[field.name] = num;
+            }
+          }
         } else if (field.type === 'COORDINATE') {
-          value = sanitizeCoord(value);
-        }
-
-        if (value !== null && value !== undefined && value !== '') {
-          custom_fields[field.name] = value;
+          const coord = sanitizeCoord(rawValue);
+          if (coord !== null) {
+            custom_fields[field.name] = coord;
+          }
+        } else if (rawValue !== null && rawValue !== undefined && rawValue !== '') {
+          custom_fields[field.name] = rawValue;
         }
       }
     });
@@ -348,36 +395,39 @@ export class UploadEntryModalComponent implements OnInit, OnDestroy {
     this.authService
       .fetchCurrentUser()
       .pipe(
+        takeUntil(this.destroy$),
         switchMap(async (user) => {
           if (!user) {
             throw new Error('User session is invalid or expired.');
           }
 
-          if (this.isMultipleUpload) {
-            this.totalUploads = this.selectedFiles.length;
-            this.uploadProgressIndex = 0;
-            this.uploadProgressPercent = 0;
+          if (isMulti) {
+            if (generation === this.uploadGeneration && !this.isDestroyed) {
+              this.totalUploads = filesToUpload.length;
+              this.uploadProgressIndex = 0;
+              this.uploadProgressPercent = 0;
+            }
 
             // FE-022: continue past failures — one bad file must never discard the
             // rest of the queue. Per-file errors are collected and reported once.
             let okCount = 0;
             const failures: string[] = [];
 
-            for (let i = 0; i < this.selectedFiles.length; i++) {
-              const f = this.selectedFiles[i];
-              this.uploadProgressIndex = i + 1;
-              this.currentUploadingFileName = f.name;
-              this.uploadProgressPercent = Math.round((i / this.selectedFiles.length) * 100);
-              this.cdr.detectChanges();
+            for (let i = 0; i < filesToUpload.length; i++) {
+              const f = filesToUpload[i];
+              if (generation === this.uploadGeneration && !this.isDestroyed) {
+                this.uploadProgressIndex = i + 1;
+                this.currentUploadingFileName = f.name;
+                this.uploadProgressPercent = Math.round((i / filesToUpload.length) * 100);
+                this.cdr.detectChanges();
+              }
 
               const ext = await extractMetadata(f);
               const ts = ext?.timestamp ? ext.timestamp.getTime() : Date.now();
               const itemCustomFields: Record<string, unknown> = { ...custom_fields };
 
-              if (ext?.coordinates && this.currentDatabase) {
-                const coordFields = this.currentDatabase.custom_fields.filter(
-                  (cf) => cf.type === 'COORDINATE',
-                );
+              if (ext?.coordinates) {
+                const coordFields = db.custom_fields.filter((cf) => cf.type === 'COORDINATE');
                 coordFields.forEach((cf) => {
                   itemCustomFields[cf.name] = ext.coordinates;
                 });
@@ -391,17 +441,19 @@ export class UploadEntryModalComponent implements OnInit, OnDestroy {
 
               try {
                 await firstValueFrom(
-                  this.entryService.uploadEntry(this.currentDatabase!.id, metadata, f, {
+                  this.entryService.uploadEntry(db.id, metadata, f, {
                     // FE-022: per-file error toasts would be noise — the summary below
                     // reports the outcome of the whole batch exactly once.
                     silentSuccess: true,
                     silentError: true,
                     // FE-032: roll the per-byte progress of this file into the batch bar.
                     onProgress: (percent) => {
-                      this.uploadProgressPercent = Math.round(
-                        ((i + percent / 100) / this.totalUploads) * 100,
-                      );
-                      this.cdr.detectChanges();
+                      if (generation === this.uploadGeneration && !this.isDestroyed) {
+                        this.uploadProgressPercent = Math.round(
+                          ((i + percent / 100) / filesToUpload.length) * 100,
+                        );
+                        this.cdr.detectChanges();
+                      }
                     },
                   }),
                 );
@@ -410,14 +462,16 @@ export class UploadEntryModalComponent implements OnInit, OnDestroy {
                 failures.push(`${f.name}: ${err instanceof Error ? err.message : 'upload failed'}`);
               }
 
-              this.uploadProgressPercent = Math.round(((i + 1) / this.selectedFiles.length) * 100);
-              this.cdr.detectChanges();
+              if (generation === this.uploadGeneration && !this.isDestroyed) {
+                this.uploadProgressPercent = Math.round(((i + 1) / filesToUpload.length) * 100);
+                this.cdr.detectChanges();
+              }
             }
 
             // FE-022: one summary notification for the batch (success or partial failure).
             if (failures.length > 0) {
               this.notificationService.showError(
-                `Uploaded ${okCount} of ${this.totalUploads} entries. Failed — ${failures.join('; ')}`,
+                `Uploaded ${okCount} of ${filesToUpload.length} entries. Failed — ${failures.join('; ')}`,
               );
             } else {
               this.notificationService.showSuccess(`Successfully uploaded ${okCount} entries.`);
@@ -430,43 +484,42 @@ export class UploadEntryModalComponent implements OnInit, OnDestroy {
             // FE-005: an untouched timestamp input keeps the extracted capture time to
             // the millisecond (like the multi-upload path above); once the user edits
             // the input, its second-precision value is authoritative.
-            const tsControl = this.uploadForm.get('timestamp');
             const ts =
-              !tsControl?.dirty && this.singleFileTimestamp
-                ? this.singleFileTimestamp.getTime()
+              !tsDirty && singleTimestamp
+                ? singleTimestamp.getTime()
                 : new Date(timestamp).getTime();
             const metadata: UploadEntryMetadata = {
               timestamp: ts,
-              filename: this.selectedFile!.name,
+              filename: singleFile!.name,
               custom_fields: custom_fields,
             };
             // FE-022: silent service error — the single failure toast is raised by the
             // subscriber below (the service toast + component toast used to stack up).
             // FE-032: per-byte progress for the single-file bar.
-            this.uploadProgressPercent = 0;
+            if (generation === this.uploadGeneration && !this.isDestroyed) {
+              this.uploadProgressPercent = 0;
+            }
             await firstValueFrom(
-              this.entryService.uploadEntry(
-                this.currentDatabase!.id,
-                metadata,
-                this.selectedFile!,
-                {
-                  silentError: true,
-                  onProgress: (percent) => {
+              this.entryService.uploadEntry(db.id, metadata, singleFile!, {
+                silentError: true,
+                onProgress: (percent) => {
+                  if (generation === this.uploadGeneration && !this.isDestroyed) {
                     this.uploadProgressPercent = percent;
                     this.cdr.detectChanges();
-                  },
+                  }
                 },
-              ),
+              }),
             );
             return { okCount: 1, failureCount: 0 };
           }
         }),
+        takeUntil(this.destroy$),
       )
       .subscribe({
         next: (result) => {
           // N3: this upload belongs to a dismissed (and possibly re-opened) modal
           // session — never auto-close the modal that is showing now.
-          if (generation !== this.uploadGeneration) {
+          if (generation !== this.uploadGeneration || this.isDestroyed) {
             return;
           }
           this.isLoading = false;
@@ -481,7 +534,7 @@ export class UploadEntryModalComponent implements OnInit, OnDestroy {
         error: (err) => {
           // N3: report the failure no matter which modal session is showing now, but
           // only the owning session may touch the modal's state.
-          if (generation === this.uploadGeneration) {
+          if (generation === this.uploadGeneration && !this.isDestroyed) {
             this.isLoading = false;
           }
           this.notificationService.showError(err?.message || 'Upload failed.');
@@ -503,11 +556,13 @@ export class UploadEntryModalComponent implements OnInit, OnDestroy {
     return file.name;
   }
 
-  trackByFieldId(index: number, field: any): number | string {
+  trackByFieldId(index: number, field: CustomField): number | string {
     return field.id ?? field.name;
   }
 
   ngOnDestroy(): void {
+    this.isDestroyed = true;
+    this.modalService.unregisterCloseGuard(UploadEntryModalComponent.MODAL_ID);
     this.destroy$.next();
     this.destroy$.complete();
   }

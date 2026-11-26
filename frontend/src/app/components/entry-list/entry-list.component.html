@@ -133,14 +133,20 @@
         <p>Loading entries...</p>
       </div>
 
+      <!-- FE-012: distinguish "the load/search failed" from "no permission" or "no results". -->
+      <div *ngIf="!isLoading && loadError" class="state-message">
+        <p>Could not load entries. Please check your connection and try again.</p>
+        <button type="button" class="btn btn-primary" (click)="retryLoad()">Retry</button>
+      </div>
+
       <!-- FE-015: the entries list requires can_view; upload-only users get an
            explanation instead of a failed search. -->
-      <div *ngIf="!isLoading && !canView" class="state-message">
+      <div *ngIf="!isLoading && !loadError && !canView" class="state-message">
         <p>You do not have permission to view entries in this database.</p>
         <p *ngIf="canCreate">You can still add new entries with the upload button.</p>
       </div>
 
-      <ng-container *ngIf="!isLoading && canView">
+      <ng-container *ngIf="!isLoading && !loadError && canView">
         <ng-container *ngIf="entriesToShow.length > 0; else emptyState">
           <app-entry-list-view
             *ngIf="viewMode === 'list'"
@@ -178,12 +184,7 @@
         </ng-container>
 
         <ng-template #emptyState>
-          <!-- FE-012: distinguish "the search failed" from "no results". -->
-          <div class="state-message" *ngIf="loadError">
-            <p>Could not load entries. Please check your connection and try again.</p>
-            <button type="button" class="btn btn-primary" (click)="retryLoad()">Retry</button>
-          </div>
-          <div class="state-message" *ngIf="!loadError">
+          <div class="state-message">
             <p>No entries found that match the current filters.</p>
           </div>
         </ng-template>

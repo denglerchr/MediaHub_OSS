@@ -21,10 +21,20 @@ export class AuditService {
    */
   private handleError(error: HttpErrorResponse): Observable<never> {
     let errorMessage = 'An unknown error occurred.';
-    if (error.error && error.error.error) {
+    if (error.error && typeof error.error.error === 'string') {
       errorMessage = error.error.error;
-    } else if (error.message) {
-      errorMessage = error.message;
+    } else if (error.status === 0) {
+      errorMessage = 'Network error: Server is unreachable.';
+    } else if (error.status === 401) {
+      errorMessage = 'Unauthorized: Please log in again.';
+    } else if (error.status === 403) {
+      errorMessage = 'Forbidden: You lack permission for this operation.';
+    } else if (error.status === 404) {
+      errorMessage = 'Not Found: The requested audit log resource does not exist.';
+    } else if (error.status >= 500) {
+      errorMessage = `Server Error (${error.status}): ${error.statusText || 'Internal Error'}`;
+    } else if (error.statusText) {
+      errorMessage = `Error ${error.status}: ${error.statusText}`;
     }
 
     // Display the error using your global notification service
@@ -48,17 +58,19 @@ export class AuditService {
     tstart?: number,
     tend?: number,
   ): Observable<AuditLog[]> {
+    const safeLimit = Number.isFinite(limit) ? Math.min(Math.max(Math.trunc(limit), 1), 1000) : 50;
+
     // Build the HTTP Query Parameters dynamically
     let params = new HttpParams()
-      .set('limit', limit.toString())
+      .set('limit', safeLimit.toString())
       .set('offset', offset.toString())
       .set('order', order);
 
-    if (tstart !== undefined && tstart !== null) {
+    if (typeof tstart === 'number' && Number.isFinite(tstart)) {
       params = params.set('tstart', tstart.toString());
     }
 
-    if (tend !== undefined && tend !== null) {
+    if (typeof tend === 'number' && Number.isFinite(tend)) {
       params = params.set('tend', tend.toString());
     }
 

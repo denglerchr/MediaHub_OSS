@@ -20,7 +20,7 @@ import { NO_ERRORS_SCHEMA } from '@angular/core';
 import { TestBed, ComponentFixture } from '@angular/core/testing';
 import { ReactiveFormsModule, FormsModule } from '@angular/forms';
 import { ActivatedRoute, convertToParamMap } from '@angular/router';
-import { BehaviorSubject, of } from 'rxjs';
+import { BehaviorSubject, of, throwError } from 'rxjs';
 import { DatabaseSettingsComponent } from './database-settings.component';
 import { AuthService } from '../../services/auth.service';
 import { DatabaseService, DatabaseUpdatePayload } from '../../services/database.service';
@@ -214,5 +214,79 @@ describe('DatabaseSettingsComponent — FE-002 regression', () => {
     expect(hk.interval).toBe('25h');
     expect(hk.disk_space).toBe('1536M');
     expect(hk.max_age).toBe('0');
+  });
+
+  it('validates database name length and pattern and resets isLoading when selectDatabase errors', () => {
+    const nameCtrl = component.settingsForm.get('name');
+    nameCtrl?.setValue('Invalid Name');
+    nameCtrl?.markAsTouched();
+    fixture.detectChanges();
+
+    expect(nameCtrl?.hasError('pattern')).toBeTrue();
+
+    nameCtrl?.setValue('a'.repeat(65));
+    fixture.detectChanges();
+    expect(nameCtrl?.hasError('maxlength')).toBeTrue();
+
+    const databaseSpy = TestBed.inject(DatabaseService) as jasmine.SpyObj<DatabaseService>;
+    databaseSpy.selectDatabase.and.returnValue(throwError(() => new Error('load failed')));
+    component.ngOnInit();
+    expect(component.isLoading).toBeFalse();
+  });
+
+  it('preserves dirty settingsForm edits when custom field CRUD re-emits selectedDatabase$', () => {
+    component.settingsForm.get('name')?.setValue('RenamedMusic');
+    component.settingsForm.get('name')?.markAsDirty();
+    component.settingsForm.markAsDirty();
+
+    const updatedDb: Database = {
+      ...musicDb,
+      custom_fields: [{ id: 1, name: 'genre', type: 'TEXT', is_indexed: true }],
+    };
+    dbSubject.next(updatedDb);
+    fixture.detectChanges();
+
+    expect(component.currentDb?.custom_fields.length).toBe(1);
+    expect(component.settingsForm.get('name')?.value).toBe('RenamedMusic');
+    expect(component.settingsForm.dirty).toBeTrue();
+  });
+
+  it('keeps editingFieldId open when updateCustomField fails and closes it on success', () => {
+    const databaseSpy = TestBed.inject(DatabaseService) as jasmine.SpyObj<DatabaseService>;
+    const field = { id: 7, name: 'artist', type: 'TEXT' as const, is_indexed: true };
+    dbSubject.next({ ...musicDb, custom_fields: [field] });
+    fixture.detectChanges();
+
+    component.onStartEditField(field);
+    component.editingFieldName = 'composer';
+    databaseSpy.updateCustomField.and.returnValue(throwError(() => new Error('update failed')));
+
+    component.onSaveField(7);
+    expect(component.editingFieldId).toBe(7);
+    expect(component.isMutatingField).toBeFalse();
+
+    databaseSpy.updateCustomField.and.returnValue(
+      of({ id: 7, name: 'composer', type: 'TEXT', is_indexed: true }),
+    );
+    component.onSaveField(7);
+    expect(component.editingFieldId).toBeNull();
+    expect(component.isMutatingField).toBeFalse();
+  });
+
+  it('handles errors cleanly across mutating operations without leaving loading flags stuck', () => {
+    const databaseSpy = TestBed.inject(DatabaseService) as jasmine.SpyObj<DatabaseService>;
+    databaseSpy.updateDatabase.and.returnValue(throwError(() => new Error('save failed')));
+    databaseSpy.addCustomField.and.returnValue(throwError(() => new Error('add failed')));
+
+    component.settingsForm.get('name')?.setValue('MusicRenamed');
+    component.settingsForm.markAsDirty();
+    component.onSaveSettings();
+    expect(component.isSavingSettings).toBeFalse();
+    expect(component.settingsForm.dirty).toBeTrue();
+
+    component.newFieldName = 'album';
+    component.onAddField();
+    expect(component.isMutatingField).toBeFalse();
+    expect(component.newFieldName).toBe('album');
   });
 });

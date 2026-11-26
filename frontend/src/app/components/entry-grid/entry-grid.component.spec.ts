@@ -77,4 +77,22 @@ describe('EntryGridComponent — FE-027 group layout metrics at init', () => {
     expect(group).not.toBeNull();
     expect(group!.classList.contains('large-group')).toBeFalse();
   });
+
+  it('clears aspectRatios and failedImageIds when dbId changes', () => {
+    host.entries = [makeEntry(1)];
+    fixture.detectChanges();
+
+    const gridComp = fixture.debugElement.query(By.css('app-entry-grid'))
+      .componentInstance as EntryGridComponent;
+    gridComp.onAspectLoaded(1, 2.0);
+    gridComp.onImageError(1);
+    expect(gridComp.aspectRatios.get(1)).toBe(2.0);
+    expect(gridComp.failedImageIds.has(1)).toBeTrue();
+
+    host.dbId = 'db2';
+    fixture.detectChanges();
+
+    expect(gridComp.aspectRatios.size).toBe(0);
+    expect(gridComp.failedImageIds.size).toBe(0);
+  });
 });

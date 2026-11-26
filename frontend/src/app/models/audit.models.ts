@@ -4,5 +4,5 @@ export interface AuditLog {
   action: string;
   actor: string;
   resource: string;
-  details: Record<string, any>;
+  details: Record<string, unknown> | null;
 }

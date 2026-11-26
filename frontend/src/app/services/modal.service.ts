@@ -47,6 +47,13 @@ export class ModalService {
   }
 
   /**
+   * Returns the 0-based stacking index of `id` in the open modal stack, or -1 if not open.
+   */
+  getStackIndex(id: string): number {
+    return this.openStack.indexOf(id);
+  }
+
+  /**
    * N-D4: drops `id` from the open stack without emitting events — cleanup for a
    * modal component that is destroyed while still open.
    */

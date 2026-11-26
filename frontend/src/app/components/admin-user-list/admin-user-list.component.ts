@@ -2,9 +2,10 @@
 
 import { Component, OnInit, OnDestroy, ChangeDetectorRef } from '@angular/core';
 import { FormBuilder, FormGroup, FormArray, Validators, AbstractControl } from '@angular/forms';
+import { Router } from '@angular/router';
 import { Subject, combineLatest, of } from 'rxjs';
-import { takeUntil, finalize, filter, take, switchMap, catchError } from 'rxjs/operators';
-import { User, Permission, Database, ApiKey } from '../../models';
+import { takeUntil, finalize, filter, take, switchMap, catchError, map } from 'rxjs/operators';
+import { User, ApiKey } from '../../models';
 import { AuthService } from '../../services/auth.service';
 import { DatabaseService } from '../../services/database.service';
 import { ModalService } from '../../services/modal.service';
@@ -42,12 +43,15 @@ export class AdminUserListComponent implements OnInit, OnDestroy {
   public activeDetailTab: 'settings' | 'keys' = 'settings';
   public userKeys: ApiKey[] = [];
   public isKeysLoading = false;
+  public keysLoadedForUserId: string | null = null;
 
   private destroy$ = new Subject<void>();
   // FE-020: selection events funnel through this Subject so `switchMap` cancels the
   // in-flight `GET /api/user/{id}` of the previously selected user. Two fast clicks
   // used to race two requests and could populate the form with the *other* user.
   private selectUser$ = new Subject<User>();
+  private loadKeysTrigger$ = new Subject<string>();
+  private loadDataTrigger$ = new Subject<void>();
 
   constructor(
     private authService: AuthService,
@@ -56,6 +60,7 @@ export class AdminUserListComponent implements OnInit, OnDestroy {
     private notificationService: NotificationService,
     private fb: FormBuilder,
     private cdr: ChangeDetectorRef,
+    private router: Router,
   ) {
     // Initialize the Reactive Form for the detail pane
     this.detailForm = this.fb.group({
@@ -76,7 +81,54 @@ export class AdminUserListComponent implements OnInit, OnDestroy {
   }
 
   ngOnInit(): void {
-    this.loadData();
+    this.loadDataTrigger$
+      .pipe(
+        switchMap(() => {
+          this.isLoading = true;
+          this.cdr.markForCheck();
+
+          let filterAccountType: string | undefined;
+          if (this.activeListTab === 'service') filterAccountType = 'service_account';
+          else if (this.activeListTab === 'oidc') filterAccountType = 'oidc';
+          else filterAccountType = 'local';
+
+          return combineLatest([
+            this.authService.getUsers(filterAccountType),
+            this.databaseService.loadDatabases(),
+          ]).pipe(
+            take(1),
+            catchError((err) => {
+              console.error('Failed to load admin user data:', err);
+              this.notificationService.showError('Could not load user data.');
+              return of(null);
+            }),
+            finalize(() => {
+              this.isLoading = false;
+              this.cdr.markForCheck();
+            }),
+          );
+        }),
+        takeUntil(this.destroy$),
+      )
+      .subscribe((result) => {
+        if (!result) {
+          return;
+        }
+        const [users, databases] = result;
+        this.users = users;
+        this.availableDatabases = databases.map((db) => ({ id: db.id, name: db.name }));
+
+        // If we reloaded data and a user is selected, refresh their form data
+        if (this.selectedUser) {
+          const refreshedUser = this.users.find((u) => u.id === this.selectedUser!.id);
+          if (refreshedUser) {
+            this.selectUser(refreshedUser);
+          } else {
+            this.clearSelection();
+          }
+        }
+        this.cdr.markForCheck();
+      });
 
     // FE-020: resolve the full user record through switchMap — a newer selection
     // cancels the older request, so a slow response can never overwrite the form
@@ -102,6 +154,35 @@ export class AdminUserListComponent implements OnInit, OnDestroy {
         this.cdr.markForCheck();
       });
 
+    this.loadKeysTrigger$
+      .pipe(
+        switchMap((userId) => {
+          this.isKeysLoading = true;
+          this.cdr.markForCheck();
+          return this.authService.getUserKeys(userId).pipe(
+            map((keys) => ({ userId, keys: keys || [], error: false })),
+            catchError((err) => {
+              console.error('Failed to load user keys', err);
+              this.notificationService.showError('Could not load user API keys.');
+              return of({ userId, keys: [] as ApiKey[], error: true });
+            }),
+            finalize(() => {
+              this.isKeysLoading = false;
+              this.cdr.markForCheck();
+            }),
+          );
+        }),
+        takeUntil(this.destroy$),
+      )
+      .subscribe(({ userId, keys, error }) => {
+        if (!this.selectedUser || this.selectedUser.id !== userId) {
+          return;
+        }
+        this.userKeys = keys;
+        this.keysLoadedForUserId = error ? null : userId;
+        this.cdr.markForCheck();
+      });
+
     // Listen to changes on the is_admin toggle to disable/enable the permissions table
     this.detailForm
       .get('is_admin')
@@ -113,6 +194,8 @@ export class AdminUserListComponent implements OnInit, OnDestroy {
           this.permissions.enable();
         }
       });
+
+    this.loadData();
   }
 
   /**
@@ -138,46 +221,7 @@ export class AdminUserListComponent implements OnInit, OnDestroy {
    * Fetches both users and databases simultaneously.
    */
   loadData(): void {
-    this.isLoading = true;
-    this.cdr.markForCheck();
-
-    let filterAccountType: string | undefined;
-    if (this.activeListTab === 'service') filterAccountType = 'service_account';
-    else if (this.activeListTab === 'oidc') filterAccountType = 'oidc';
-    else filterAccountType = 'local';
-
-    combineLatest([
-      this.authService.getUsers(filterAccountType),
-      this.databaseService.loadDatabases(),
-    ])
-      .pipe(
-        take(1),
-        takeUntil(this.destroy$),
-        finalize(() => {
-          this.isLoading = false;
-          this.cdr.markForCheck();
-        }),
-      )
-      .subscribe({
-        next: ([users, databases]) => {
-          this.users = users;
-          this.availableDatabases = databases.map((db) => ({ id: db.id, name: db.name }));
-
-          // If we reloaded data and a user is selected, refresh their form data
-          if (this.selectedUser) {
-            const refreshedUser = this.users.find((u) => u.id === this.selectedUser!.id);
-            if (refreshedUser) {
-              this.selectUser(refreshedUser);
-            } else {
-              this.clearSelection();
-            }
-          }
-        },
-        error: (err) => {
-          console.error('Failed to load admin user data:', err);
-          this.notificationService.showError('Could not load user data.');
-        },
-      });
+    this.loadDataTrigger$.next();
   }
 
   // --- Form Array Getter ---
@@ -196,16 +240,16 @@ export class AdminUserListComponent implements OnInit, OnDestroy {
     this.submitted = false;
     this.selectedUser = user;
     this.activeDetailTab = 'settings';
+    this.userKeys = [];
+    this.keysLoadedForUserId = null;
 
     // 1. Immediately populate form controls synchronously
     this.buildForm(user);
-    // FE-043: no `loadUserKeys()` here — the keys tab reloads them itself
-    // (setDetailTab('keys')); fetching on every selection was redundant.
 
-    // 2. Fetch the full user record asynchronously (permissions may be stale in the
-    //    list). FE-020: routed through selectUser$ so switchMap cancels out-of-order
-    //    responses.
+    // 2. Fetch the full user record and API keys asynchronously (switchMap cancels
+    //    stale requests if another user is clicked first).
     this.selectUser$.next(user);
+    this.loadKeysTrigger$.next(user.id);
   }
 
   createNewUser(): void {
@@ -219,6 +263,8 @@ export class AdminUserListComponent implements OnInit, OnDestroy {
     this.selectedUser = null;
     this.activeDetailTab = 'settings';
     this.userKeys = [];
+    this.keysLoadedForUserId = null;
+    this.isKeysLoading = false;
 
     const isService = this.activeListTab === 'service';
     const emptyUser: Partial<User> = {
@@ -250,6 +296,8 @@ export class AdminUserListComponent implements OnInit, OnDestroy {
     this.detailForm.reset();
     this.permissions.clear();
     this.userKeys = [];
+    this.keysLoadedForUserId = null;
+    this.isKeysLoading = false;
     this.cdr.markForCheck();
   }
 
@@ -359,7 +407,13 @@ export class AdminUserListComponent implements OnInit, OnDestroy {
     this.detailForm.markAsDirty();
   }
 
+  public isSelectedCurrentUser(): boolean {
+    return !!this.selectedUser && this.selectedUser.id === this.authService.getCurrentUser()?.id;
+  }
+
   onSaveUser(): void {
+    if (this.isSaving) return;
+
     this.submitted = true;
     if (this.detailForm.invalid) {
       this.detailForm.markAllAsTouched();
@@ -379,7 +433,9 @@ export class AdminUserListComponent implements OnInit, OnDestroy {
       delete formData.password;
     }
 
-    if (formData.permissions) {
+    if (formData.is_admin === true) {
+      delete formData.permissions;
+    } else if (formData.permissions) {
       // FE-042: typed instead of `(p: any)` — strip the display-only column name.
       formData.permissions = formData.permissions.map((p: Record<string, unknown>) => {
         const { database_name, ...rest } = p;
@@ -387,29 +443,69 @@ export class AdminUserListComponent implements OnInit, OnDestroy {
       });
     }
 
-    if (this.isNewUser) {
+    const wasNew = this.isNewUser;
+    const targetUserId = this.selectedUser?.id;
+    const passwordUpdated = !wasNew && !!formData.password;
+
+    if (wasNew) {
       delete formData.id;
     }
 
-    const apiCall$ = this.isNewUser
+    const apiCall$ = wasNew
       ? this.authService.createUser(formData)
       : this.authService.updateUser(formData.id, formData);
 
-    apiCall$.pipe(finalize(() => (this.isSaving = false))).subscribe({
-      next: (savedUser) => {
-        const action = this.isNewUser ? 'created' : 'updated';
-        this.notificationService.showSuccess(`User ${savedUser.username} ${action} successfully!`);
-        this.loadData();
-      },
-      error: () => {
-        // FE-046: the shared AuthService.handleError already surfaced the reason.
-      },
-    });
+    apiCall$
+      .pipe(
+        takeUntil(this.destroy$),
+        finalize(() => (this.isSaving = false)),
+      )
+      .subscribe({
+        next: (savedUser) => {
+          if (wasNew) {
+            this.isNewUser = false;
+            this.selectUser(savedUser);
+            this.notificationService.showSuccess(
+              `User ${savedUser.username} created successfully!`,
+            );
+            this.loadData();
+            return;
+          }
+
+          const editedUserId = savedUser.id ?? targetUserId;
+          if (editedUserId === this.authService.getCurrentUser()?.id) {
+            if (passwordUpdated) {
+              this.notificationService.showSuccess(
+                'User updated successfully. Signing out because your password changed.',
+              );
+              this.authService.logout(false);
+              return;
+            }
+
+            this.notificationService.showSuccess(
+              `User ${savedUser.username} updated successfully!`,
+            );
+            this.authService.fetchCurrentUser().pipe(takeUntil(this.destroy$)).subscribe();
+            if (!savedUser.is_admin) {
+              this.router.navigate(['/dashboard/overview']);
+              return;
+            }
+            this.loadData();
+            return;
+          }
+
+          this.notificationService.showSuccess(`User ${savedUser.username} updated successfully!`);
+          this.loadData();
+        },
+        error: () => {
+          // FE-046: the shared AuthService.handleError already surfaced the reason.
+        },
+      });
   }
 
   openDeleteConfirm(): void {
     const userToDelete = this.selectedUser;
-    if (!userToDelete) return;
+    if (!userToDelete || userToDelete.id === this.authService.getCurrentUser()?.id) return;
 
     const modalData: ConfirmationModalData = {
       title: 'Delete User',
@@ -419,6 +515,7 @@ export class AdminUserListComponent implements OnInit, OnDestroy {
     this.modalService
       .open(ConfirmationModalComponent.MODAL_ID, modalData)
       .pipe(
+        takeUntil(this.destroy$),
         take(1),
         filter((isConfirmed) => isConfirmed === true),
       )
@@ -443,34 +540,17 @@ export class AdminUserListComponent implements OnInit, OnDestroy {
 
   loadUserKeys(): void {
     if (!this.selectedUser) return;
-    this.isKeysLoading = true;
-    this.authService
-      .getUserKeys(this.selectedUser.id)
-      .pipe(
-        takeUntil(this.destroy$),
-        finalize(() => {
-          this.isKeysLoading = false;
-          this.cdr.markForCheck();
-        }),
-      )
-      .subscribe({
-        next: (keys) => {
-          this.userKeys = keys || [];
-        },
-        error: (err) => {
-          console.error('Failed to load user keys', err);
-          this.notificationService.showError('Could not load user API keys.');
-        },
-      });
+    this.loadKeysTrigger$.next(this.selectedUser.id);
   }
 
   openCreateKeyModal(): void {
     if (!this.selectedUser) return;
+    const userId = this.selectedUser.id;
     this.modalService
-      .open(ApiKeyModalComponent.MODAL_ID, { userId: this.selectedUser.id })
-      .pipe(take(1))
+      .open(ApiKeyModalComponent.MODAL_ID, { userId })
+      .pipe(takeUntil(this.destroy$), take(1))
       .subscribe((created) => {
-        if (created) {
+        if (created && this.selectedUser?.id === userId) {
           this.loadUserKeys();
         }
       });
@@ -478,11 +558,12 @@ export class AdminUserListComponent implements OnInit, OnDestroy {
 
   openEditKeyModal(key: ApiKey): void {
     if (!this.selectedUser) return;
+    const userId = this.selectedUser.id;
     this.modalService
-      .open(ApiKeyModalComponent.MODAL_ID, { userId: this.selectedUser.id, apiKey: key })
-      .pipe(take(1))
+      .open(ApiKeyModalComponent.MODAL_ID, { userId, apiKey: key })
+      .pipe(takeUntil(this.destroy$), take(1))
       .subscribe((updated) => {
-        if (updated) {
+        if (updated && this.selectedUser?.id === userId) {
           this.loadUserKeys();
         }
       });
@@ -503,6 +584,7 @@ export class AdminUserListComponent implements OnInit, OnDestroy {
     this.modalService
       .open(ConfirmationModalComponent.MODAL_ID, modalData)
       .pipe(
+        takeUntil(this.destroy$),
         take(1),
         filter((isConfirmed) => isConfirmed === true),
       )
@@ -513,7 +595,9 @@ export class AdminUserListComponent implements OnInit, OnDestroy {
           .subscribe({
             next: () => {
               this.notificationService.showSuccess('API key revoked successfully.');
-              this.loadUserKeys();
+              if (this.selectedUser?.id === keyOwner.id) {
+                this.loadUserKeys();
+              }
             },
             error: () => {
               // FE-046: the shared AuthService.handleError already surfaced the
@@ -527,13 +611,11 @@ export class AdminUserListComponent implements OnInit, OnDestroy {
     return control?.get ? (control.get('database_id')?.value ?? index) : index;
   }
 
-  trackByKeyId(index: number, key: ApiKey): string {
-    return key.id;
-  }
-
   ngOnDestroy(): void {
     this.destroy$.next();
     this.destroy$.complete();
     this.selectUser$.complete();
+    this.loadKeysTrigger$.complete();
+    this.loadDataTrigger$.complete();
   }
 }

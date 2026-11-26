@@ -251,6 +251,162 @@ describe('AuthService — FE-007/FE-008/FE-009/FE-010/FE-018 regressions', () =>
 
     expect(routerSpy.navigate).toHaveBeenCalledWith(['/login'], { queryParams: { local: '1' } });
   });
+
+  it('safe storage: migrateLegacyStoredTokens and sessionStorage helpers do not throw when storage fails', () => {
+    spyOn(Storage.prototype, 'getItem').and.throwError('Storage disabled');
+    spyOn(Storage.prototype, 'setItem').and.throwError('Storage disabled');
+    spyOn(Storage.prototype, 'removeItem').and.throwError('Storage disabled');
+
+    expect(
+      () =>
+        new AuthService(TestBed.inject(HttpClient), routerSpy, TestBed.inject(NotificationService)),
+    ).not.toThrow();
+
+    expect(service.getRefreshToken()).toBeNull();
+    expect(() => service.logout(false)).not.toThrow();
+  });
+
+  it('session generation: logout(false) prevents an in-flight refresh or /api/me from resurrecting the session', () => {
+    sessionStorage.setItem('refresh_token', 'R1');
+
+    service.refreshToken().subscribe({ error: () => {} });
+    const refreshReq = httpMock.expectOne('/api/token/refresh');
+
+    service.logout(false);
+    expect(service.getRefreshToken()).toBeNull();
+
+    // Late refresh response from before logout(false) must be ignored.
+    refreshReq.flush({ access_token: 'A-stale', refresh_token: 'R-stale' } as TokenResponse);
+    expect(service.getAccessToken()).toBeNull();
+    expect(service.getRefreshToken()).toBeNull();
+
+    // Same for an in-flight /api/me response arriving after logout(false).
+    sessionStorage.setItem('refresh_token', 'R2');
+    service.refreshToken().subscribe();
+    httpMock
+      .expectOne('/api/token/refresh')
+      .flush({ access_token: 'A2', refresh_token: 'R2' } as TokenResponse);
+
+    let receivedUser: User | null = null;
+    service.fetchCurrentUser().subscribe((u) => (receivedUser = u));
+    const meReq = httpMock.expectOne('/api/me');
+
+    service.logout(false);
+    meReq.flush(user);
+
+    expect(receivedUser).toBeNull();
+    expect(service.getCurrentUser()).toBeNull();
+  });
+
+  it('OIDC: redirectToOidc validates endpoint URL and protocol', async () => {
+    await expectAsync(
+      service.redirectToOidc({
+        oidc_issuer_url: 'javascript:alert(1)',
+        oidc_client_id: 'mediahub',
+      }),
+    ).toBeRejectedWithError('Invalid OIDC authorization endpoint URL');
+
+    await expectAsync(
+      service.redirectToOidc({
+        oidc_issuer_url: 'https://idp.example.com/realms/main',
+        oidc_client_id: 'mediahub',
+        oidc_auth_endpoint: 'not a url',
+      }),
+    ).toBeRejectedWithError('Invalid OIDC authorization endpoint URL');
+  });
+
+  it('OIDC: redirectToOidc throws when Web Crypto API is unavailable', async () => {
+    const originalCrypto = window.crypto;
+    try {
+      spyOnProperty(window, 'crypto', 'get').and.returnValue({
+        getRandomValues: originalCrypto.getRandomValues.bind(originalCrypto),
+      } as unknown as Crypto);
+
+      await expectAsync(
+        service.redirectToOidc({
+          oidc_issuer_url: 'https://idp.example.com/realms/main',
+          oidc_client_id: 'mediahub',
+        }),
+      ).toBeRejectedWithError(/Web Crypto API is unavailable/);
+      expect(sessionStorage.getItem('oidc_state')).toBeNull();
+    } catch {
+      // If window.crypto is non-configurable in the test browser, skip cleanly.
+    }
+  });
+
+  it('OIDC: redirectToOidc persists state, code_verifier, and nonce and builds authorization URL', async () => {
+    const navSpy = spyOn(
+      service as unknown as { navigateExternal: (url: string) => void },
+      'navigateExternal',
+    );
+
+    await service.redirectToOidc({
+      oidc_issuer_url: 'https://idp.example.com/realms/main/',
+      oidc_client_id: 'mediahub-web',
+      oidc_redirect_url: 'https://app.example.com/auth/callback',
+    });
+
+    const state = sessionStorage.getItem('oidc_state');
+    const verifier = sessionStorage.getItem('oidc_code_verifier');
+    const nonce = sessionStorage.getItem('oidc_nonce');
+
+    expect(state).toBeTruthy();
+    expect(verifier).toBeTruthy();
+    expect(nonce).toBeTruthy();
+    expect(navSpy).toHaveBeenCalledTimes(1);
+
+    const targetUrl = new URL(navSpy.calls.mostRecent().args[0] as string);
+    expect(targetUrl.origin + targetUrl.pathname).toBe(
+      'https://idp.example.com/realms/main/protocol/openid-connect/auth',
+    );
+    expect(targetUrl.searchParams.get('client_id')).toBe('mediahub-web');
+    expect(targetUrl.searchParams.get('redirect_uri')).toBe(
+      'https://app.example.com/auth/callback',
+    );
+    expect(targetUrl.searchParams.get('response_type')).toBe('code');
+    expect(targetUrl.searchParams.get('scope')).toBe('openid profile email');
+    expect(targetUrl.searchParams.get('state')).toBe(state);
+    expect(targetUrl.searchParams.get('nonce')).toBe(nonce);
+    expect(targetUrl.searchParams.get('code_challenge_method')).toBe('S256');
+    expect(targetUrl.searchParams.get('code_challenge')).toBeTruthy();
+  });
+
+  it('OIDC: oidcLogin includes nonce in the token exchange payload when provided', () => {
+    let loggedInUser: User | undefined;
+    service
+      .oidcLogin('auth-code', 'https://app.example.com/auth/callback', 'verifier-1', 'nonce-1')
+      .subscribe((u) => (loggedInUser = u));
+
+    const oidcReq = httpMock.expectOne('/api/token/oidc');
+    expect(oidcReq.request.body).toEqual({
+      code: 'auth-code',
+      redirect_uri: 'https://app.example.com/auth/callback',
+      code_verifier: 'verifier-1',
+      nonce: 'nonce-1',
+    });
+    oidcReq.flush({ access_token: 'A1', refresh_token: 'R1' } as TokenResponse);
+    httpMock.expectOne('/api/me').flush(user);
+
+    expect(loggedInUser).toEqual(user);
+  });
+
+  it('changeOwnPassword ensures a fresh access token before sending PATCH /api/me', () => {
+    sessionStorage.setItem('refresh_token', 'R1');
+
+    let done = false;
+    service.changeOwnPassword('old-pw', 'new-pw').subscribe(() => (done = true));
+
+    httpMock
+      .expectOne('/api/token/refresh')
+      .flush({ access_token: 'A2', refresh_token: 'R2' } as TokenResponse);
+    const patchReq = httpMock.expectOne('/api/me');
+    expect(patchReq.request.method).toBe('PATCH');
+    expect(patchReq.request.body).toEqual({ old_password: 'old-pw', new_password: 'new-pw' });
+    patchReq.flush({ message: 'updated' });
+
+    expect(done).toBeTrue();
+    expect(service.getAccessToken()).toBe('A2');
+  });
 });
 
 // --- Phase E: FE-007/N2/N4 corrections — refresh BEFORE logout -----------------
@@ -408,5 +564,28 @@ describe('AuthService — FE-007/N2/N4 refresh-before-logout corrections', () =>
     logoutReq.flush({ message: 'Logged out successfully.' });
     expect(service.getRefreshToken()).toBeNull();
     expect(service.getAccessToken()).toBeNull();
+  });
+
+  it('logout idempotency: duplicate logout() calls and external refreshToken() during logout are blocked', () => {
+    sessionStorage.setItem('refresh_token', 'R1');
+
+    service.logout();
+    // Second click while logout is already in flight must be a no-op.
+    service.logout();
+
+    // External 401 refresh caller must fail with 'Logout in progress' instead of rotating behind logout's back.
+    let refreshError: Error | null = null;
+    service.refreshToken().subscribe({ error: (err: Error) => (refreshError = err) });
+    expect((refreshError as Error | null)?.message).toBe('Logout in progress');
+
+    // Only one silent refresh and one /api/logout should be issued.
+    httpMock
+      .expectOne('/api/token/refresh')
+      .flush({ access_token: 'A2', refresh_token: 'R2' } as TokenResponse);
+    const logoutReq = httpMock.expectOne('/api/logout');
+    expect(logoutReq.request.body.refresh_token).toBe('R2');
+    logoutReq.flush({ message: 'Logged out successfully.' });
+
+    expect(routerSpy.navigate).toHaveBeenCalledTimes(1);
   });
 });

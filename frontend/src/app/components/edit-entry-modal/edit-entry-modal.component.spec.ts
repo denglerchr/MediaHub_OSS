@@ -12,7 +12,7 @@
 import { TestBed, ComponentFixture } from '@angular/core/testing';
 import { CUSTOM_ELEMENTS_SCHEMA } from '@angular/core';
 import { ReactiveFormsModule, FormsModule } from '@angular/forms';
-import { BehaviorSubject, of } from 'rxjs';
+import { BehaviorSubject, of, throwError } from 'rxjs';
 import { EditEntryModalComponent } from './edit-entry-modal.component';
 import { EntryService } from '../../services/entry.service';
 import { DatabaseService } from '../../services/database.service';
@@ -255,5 +255,97 @@ describe('EditEntryModalComponent — FE-003/FE-004/FE-005 regressions', () => {
     expect(updateEntrySpy).toHaveBeenCalledTimes(2);
     const secondPayload = updateEntrySpy.calls.mostRecent().args[2] as Partial<Entry>;
     expect(secondPayload.timestamp).toBe(PRE_1970_TIMESTAMP);
+  });
+
+  it('clears currentEntry when selectedEntry$ emits null or a different database_id', () => {
+    entrySubject.next({ ...makeEntry(1, { artist: 'A' }), database_id: 'db1' });
+    expect(component.currentEntry?.id).toBe(1);
+
+    entrySubject.next(null);
+    expect(component.currentEntry).toBeNull();
+
+    entrySubject.next({ ...makeEntry(2, { artist: 'B' }), database_id: 'db2' });
+    expect(component.currentEntry).toBeNull();
+  });
+
+  it('clears currentEntry when selectedDatabase$ switches away from currentEntry.database_id', () => {
+    entrySubject.next({ ...makeEntry(1, { artist: 'A' }), database_id: 'db1' });
+    expect(component.currentEntry?.id).toBe(1);
+
+    const otherDb: Database = {
+      ...musicDb,
+      id: 'db2',
+      name: 'Photos',
+      content_type: ContentType.Image,
+      custom_fields: [{ id: 10, name: 'camera', type: 'TEXT' }],
+    };
+    dbSubject.next(otherDb);
+
+    expect(component.currentEntry).toBeNull();
+    expect(component.editForm.get(['custom_fields', 'camera'])).toBeTruthy();
+    expect(component.editForm.get(['custom_fields', 'artist'])).toBeNull();
+  });
+
+  it('sends explicit null when clearing an existing INTEGER/REAL custom field value', () => {
+    const entry = makeEntry(1, { artist: 'X', rating: 5 });
+    entrySubject.next(entry);
+
+    field('rating')?.setValue('');
+    component.onSubmit();
+
+    expect(updateEntrySpy).toHaveBeenCalledTimes(1);
+    const payload = updateEntrySpy.calls.mostRecent().args[2] as Partial<Entry>;
+    expect('rating' in (payload.custom_fields ?? {})).toBeTrue();
+    expect(payload.custom_fields?.['rating']).toBeNull();
+  });
+
+  it('validates INTEGER pattern and complete COORDINATE pairs', () => {
+    const geoDb: Database = {
+      ...musicDb,
+      id: 'db-geo',
+      custom_fields: [
+        { id: 1, name: 'rating', type: 'INTEGER' },
+        { id: 2, name: 'location', type: 'COORDINATE' },
+      ],
+    };
+    dbSubject.next(geoDb);
+    entrySubject.next(makeEntry(10, {}));
+
+    field('rating')?.setValue(3.5);
+    expect(field('rating')?.invalid).toBeTrue();
+    expect(component.editForm.invalid).toBeTrue();
+
+    field('rating')?.setValue(-4);
+    expect(field('rating')?.valid).toBeTrue();
+
+    const coordGroup = field('location');
+    coordGroup?.patchValue({ latitude: 48.1, longitude: null });
+    expect(coordGroup?.invalid).toBeTrue();
+    expect(coordGroup?.hasError('incompleteCoordinate')).toBeTrue();
+    expect(component.editForm.invalid).toBeTrue();
+
+    coordGroup?.patchValue({ latitude: 48.1, longitude: 11.5 });
+    expect(coordGroup?.valid).toBeTrue();
+    expect(component.editForm.valid).toBeTrue();
+
+    coordGroup?.patchValue({ latitude: null, longitude: null });
+    expect(coordGroup?.valid).toBeTrue();
+  });
+
+  it('returns empty timestamp string instead of throwing on invalid Date', () => {
+    const invalidEntry = { ...makeEntry(99, {}), timestamp: Number.NaN };
+    expect(() => entrySubject.next(invalidEntry)).not.toThrow();
+    expect(component.editForm.get('timestamp')?.value).toBe('');
+  });
+
+  it('resets isLoading on updateEntry error without closing the modal', () => {
+    const modalSpy = TestBed.inject(ModalService) as jasmine.SpyObj<ModalService>;
+    updateEntrySpy.and.returnValue(throwError(() => new Error('update failed')));
+
+    entrySubject.next(makeEntry(1, { artist: 'X' }));
+    component.onSubmit();
+
+    expect(component.isLoading).toBeFalse();
+    expect(modalSpy.close).not.toHaveBeenCalled();
   });
 });

@@ -9,6 +9,7 @@ import { NotificationService } from './notification.service';
 import { Router } from '@angular/router';
 import {
   generateRandomState,
+  generateRandomNonce,
   generateCodeVerifier,
   generateCodeChallenge,
 } from '../utils/pkce.utils';
@@ -32,6 +33,9 @@ export class AuthService {
 
   // FE-009: single-flight refresh shared by every 401 handler in this tab.
   private refreshInFlight$: Observable<TokenResponse> | null = null;
+  private sessionGeneration = 0;
+  private logoutInProgress = false;
+  private revokingLogoutRequest = false;
 
   private currentUserSubject = new BehaviorSubject<User | null>(null);
   public currentUser$ = this.currentUserSubject.asObservable();
@@ -56,11 +60,11 @@ export class AuthService {
       if (legacyRefreshToken && !sessionStorage.getItem(this.REFRESH_TOKEN_KEY)) {
         sessionStorage.setItem(this.REFRESH_TOKEN_KEY, legacyRefreshToken);
       }
+      localStorage.removeItem(this.ACCESS_TOKEN_KEY);
+      localStorage.removeItem(this.REFRESH_TOKEN_KEY);
     } catch {
       // Storage can be unavailable (private mode); nothing to migrate then.
     }
-    localStorage.removeItem(this.ACCESS_TOKEN_KEY);
-    localStorage.removeItem(this.REFRESH_TOKEN_KEY);
   }
 
   /**
@@ -68,6 +72,7 @@ export class AuthService {
    * then fetching the user's profile.
    */
   basicAuthLogin(username: string, password: string): Observable<User> {
+    const gen = ++this.sessionGeneration;
     // 1. Prepare Basic Auth header for the token endpoint (Unicode-safe base64 encoding)
     const bytes = new TextEncoder().encode(`${username}:${password}`);
     const binString = Array.from(bytes, (b) => String.fromCharCode(b)).join('');
@@ -77,7 +82,9 @@ export class AuthService {
     // 2. Call POST /api/token to get the tokens
     return this.http.post<TokenResponse>(`${this.apiUrl}/token`, {}, { headers }).pipe(
       tap((tokens) => {
-        this.storeTokens(tokens);
+        if (gen === this.sessionGeneration) {
+          this.storeTokens(tokens);
+        }
       }),
       // 3. Once we have tokens, fetch the user profile (Interceptor will inject Bearer token)
       switchMap(() => this.fetchCurrentUser()),
@@ -88,8 +95,10 @@ export class AuthService {
       catchError((err: HttpErrorResponse) => {
         // FE-018: clean up the partial session *without navigating* — a failed local
         // login must not drop the ?local=1 escape hatch from the URL.
-        this.clearTokens();
-        this.currentUserSubject.next(null);
+        if (gen === this.sessionGeneration) {
+          this.clearTokens();
+          this.currentUserSubject.next(null);
+        }
         return throwError(() => err);
       }),
     );
@@ -98,18 +107,34 @@ export class AuthService {
   /**
    * Logs the user in via OIDC code exchange (POST /api/token/oidc).
    */
-  oidcLogin(code: string, redirectUri?: string, codeVerifier?: string): Observable<User> {
-    const payload: { code: string; redirect_uri?: string; code_verifier?: string } = {
+  oidcLogin(
+    code: string,
+    redirectUri?: string,
+    codeVerifier?: string,
+    nonce?: string,
+  ): Observable<User> {
+    const gen = ++this.sessionGeneration;
+    const payload: {
+      code: string;
+      redirect_uri?: string;
+      code_verifier?: string;
+      nonce?: string;
+    } = {
       code,
       redirect_uri: redirectUri || `${window.location.origin}/auth/callback`,
     };
     if (codeVerifier) {
       payload.code_verifier = codeVerifier;
     }
+    if (nonce) {
+      payload.nonce = nonce;
+    }
 
     return this.http.post<TokenResponse>(`${this.apiUrl}/token/oidc`, payload).pipe(
       tap((tokens) => {
-        this.storeTokens(tokens);
+        if (gen === this.sessionGeneration) {
+          this.storeTokens(tokens);
+        }
       }),
       switchMap(() => this.fetchCurrentUser()),
       map((user) => {
@@ -117,15 +142,17 @@ export class AuthService {
         return user;
       }),
       catchError((err: HttpErrorResponse) => {
-        this.clearTokens();
-        this.currentUserSubject.next(null);
+        if (gen === this.sessionGeneration) {
+          this.clearTokens();
+          this.currentUserSubject.next(null);
+        }
         return throwError(() => err);
       }),
     );
   }
 
   /**
-   * Generates PKCE challenge and CSRF state, stores them in sessionStorage,
+   * Generates PKCE challenge, nonce, and CSRF state, stores them in sessionStorage,
    * and navigates to the OIDC authorization endpoint.
    */
   async redirectToOidc(oidcConfig: {
@@ -142,30 +169,47 @@ export class AuthService {
       oidcConfig.oidc_auth_endpoint ||
       `${oidcConfig.oidc_issuer_url.replace(/\/+$/, '')}/protocol/openid-connect/auth`;
 
+    let url: URL;
+    try {
+      url = new URL(authEndpoint);
+    } catch {
+      throw new Error('Invalid OIDC authorization endpoint URL');
+    }
+    if (url.protocol !== 'https:' && url.protocol !== 'http:') {
+      throw new Error('Invalid OIDC authorization endpoint URL');
+    }
+
+    if (!window.crypto?.subtle) {
+      throw new Error(
+        'Web Crypto API is unavailable on this insecure origin. HTTPS or localhost is required for SSO.',
+      );
+    }
+
     const state = generateRandomState();
-    sessionStorage.setItem('oidc_state', state);
-
     const codeVerifier = generateCodeVerifier();
-    sessionStorage.setItem('oidc_code_verifier', codeVerifier);
-
+    const nonce = generateRandomNonce();
     const codeChallenge = await generateCodeChallenge(codeVerifier);
 
-    const clientId = encodeURIComponent(oidcConfig.oidc_client_id);
-    const redirectUri = encodeURIComponent(
-      oidcConfig.oidc_redirect_url || `${window.location.origin}/auth/callback`,
-    );
+    this.setSessionStorageItem('oidc_state', state);
+    this.setSessionStorageItem('oidc_code_verifier', codeVerifier);
+    this.setSessionStorageItem('oidc_nonce', nonce);
 
-    const queryParams = [
-      `client_id=${clientId}`,
-      `redirect_uri=${redirectUri}`,
-      `response_type=code`,
-      `scope=${encodeURIComponent('openid profile email')}`,
-      `state=${encodeURIComponent(state)}`,
-      `code_challenge=${encodeURIComponent(codeChallenge)}`,
-      `code_challenge_method=S256`,
-    ].join('&');
+    const redirectUri = oidcConfig.oidc_redirect_url || `${window.location.origin}/auth/callback`;
 
-    window.location.href = `${authEndpoint}?${queryParams}`;
+    url.searchParams.set('client_id', oidcConfig.oidc_client_id);
+    url.searchParams.set('redirect_uri', redirectUri);
+    url.searchParams.set('response_type', 'code');
+    url.searchParams.set('scope', 'openid profile email');
+    url.searchParams.set('state', state);
+    url.searchParams.set('nonce', nonce);
+    url.searchParams.set('code_challenge', codeChallenge);
+    url.searchParams.set('code_challenge_method', 'S256');
+
+    this.navigateExternal(url.toString());
+  }
+
+  private navigateExternal(url: string): void {
+    window.location.href = url;
   }
 
   /**
@@ -174,7 +218,12 @@ export class AuthService {
    * @param notifyServer Whether to call the API to revoke the token (default: true)
    */
   logout(notifyServer: boolean = true): void {
+    if (this.logoutInProgress) {
+      return;
+    }
+
     if (notifyServer && this.getRefreshToken()) {
+      this.logoutInProgress = true;
       // FE-007: POST /api/logout sits behind AuthMiddleware (router.go:33), so an
       // expired/absent access token 401s the request *before* the Logout handler
       // ever deletes the refresh token. Establish a valid access token first
@@ -184,6 +233,7 @@ export class AuthService {
       this.prepareAccessTokenForLogout()
         .pipe(
           switchMap(() => {
+            this.revokingLogoutRequest = true;
             const refreshToken = this.getRefreshToken();
             if (!refreshToken) {
               // The silent refresh already proved the session dead (401) and cleared
@@ -226,10 +276,14 @@ export class AuthService {
           catchError(() => of(undefined)),
         )
       : of(undefined);
-    return settled.pipe(switchMap(() => this.ensureAccessToken()));
+    return settled.pipe(switchMap(() => this.ensureAccessToken(true)));
   }
 
   private clearSessionAndRedirect(): void {
+    this.sessionGeneration++;
+    this.logoutInProgress = false;
+    this.revokingLogoutRequest = false;
+    this.refreshInFlight$ = null;
     this.clearTokens();
     this.currentUserSubject.next(null);
     // FE-018: keep the ?local=1 escape hatch alive when bouncing to the login page.
@@ -248,7 +302,11 @@ export class AuthService {
    * declared dead — rotation elsewhere (e.g. a duplicated tab) invalidates the token
    * we attempted with while a fresh one may already be stored.
    */
-  refreshToken(): Observable<TokenResponse> {
+  refreshToken(allowDuringLogout: boolean = false): Observable<TokenResponse> {
+    if (this.logoutInProgress && !allowDuringLogout) {
+      return throwError(() => new Error('Logout in progress'));
+    }
+
     if (this.refreshInFlight$) {
       return this.refreshInFlight$;
     }
@@ -258,7 +316,7 @@ export class AuthService {
       return throwError(() => new Error('No refresh token available'));
     }
 
-    this.refreshInFlight$ = this.requestTokenRefresh(tokenAtAttempt).pipe(
+    const inFlight$ = this.requestTokenRefresh(tokenAtAttempt).pipe(
       catchError((err: HttpErrorResponse) => {
         const latestToken = this.getRefreshToken();
         if (
@@ -272,22 +330,28 @@ export class AuthService {
         return throwError(() => err);
       }),
       finalize(() => {
-        this.refreshInFlight$ = null;
+        if (this.refreshInFlight$ === inFlight$) {
+          this.refreshInFlight$ = null;
+        }
       }),
       shareReplay(1),
     );
 
-    return this.refreshInFlight$;
+    this.refreshInFlight$ = inFlight$;
+    return inFlight$;
   }
 
   private requestTokenRefresh(refreshToken: string): Observable<TokenResponse> {
+    const gen = this.sessionGeneration;
     return this.http
       .post<TokenResponse>(`${this.apiUrl}/token/refresh`, {
         refresh_token: refreshToken,
       })
       .pipe(
         tap((tokens) => {
-          this.storeTokens(tokens);
+          if (gen === this.sessionGeneration && !this.revokingLogoutRequest) {
+            this.storeTokens(tokens);
+          }
         }),
       );
   }
@@ -296,20 +360,25 @@ export class AuthService {
    * Fetches the current user's data using the stored access token.
    */
   public fetchCurrentUser(): Observable<User | null> {
+    const gen = this.sessionGeneration;
     return this.ensureAccessToken().pipe(
       switchMap(() => {
-        if (!this.getAccessToken()) {
+        if (!this.getAccessToken() || gen !== this.sessionGeneration || this.logoutInProgress) {
           return of(null);
         }
 
         return this.http.get<User>(`${this.apiUrl}/me`).pipe(
-          tap((user) => {
-            this.currentUserSubject.next(user);
+          map((user) => {
+            if (gen === this.sessionGeneration && !this.logoutInProgress) {
+              this.currentUserSubject.next(user);
+              return user;
+            }
+            return null;
           }),
           catchError((err: HttpErrorResponse) => {
             // FE-010: only an actual 401 invalidates the session. Transient failures
             // (status 0, 5xx) must keep the session alive and just report "no user".
-            if (err?.status === 401) {
+            if (err?.status === 401 && gen === this.sessionGeneration && !this.logoutInProgress) {
               this.clearSessionAndRedirect();
             }
             return of(null);
@@ -325,11 +394,11 @@ export class AuthService {
    * concluding the session is gone. A transient refresh failure keeps the refresh
    * token; only a 401 drops it.
    */
-  private ensureAccessToken(): Observable<void> {
+  private ensureAccessToken(allowDuringLogout: boolean = false): Observable<void> {
     if ((this.getAccessToken() && !this.isAccessTokenExpired()) || !this.getRefreshToken()) {
       return of(undefined);
     }
-    return this.forceAccessTokenRefresh();
+    return this.forceAccessTokenRefresh(allowDuringLogout);
   }
 
   /**
@@ -340,11 +409,12 @@ export class AuthService {
    * current token in place (only a 401 drops the session) so the caller can still
    * regenerate and compare its URL.
    */
-  public forceAccessTokenRefresh(): Observable<void> {
-    return this.refreshToken().pipe(
+  public forceAccessTokenRefresh(allowDuringLogout: boolean = false): Observable<void> {
+    const gen = this.sessionGeneration;
+    return this.refreshToken(allowDuringLogout).pipe(
       map(() => undefined),
       catchError((err: HttpErrorResponse) => {
-        if (err?.status === 401) {
+        if (err?.status === 401 && gen === this.sessionGeneration) {
           this.clearTokens();
           this.currentUserSubject.next(null);
         }
@@ -399,12 +469,12 @@ export class AuthService {
   private storeTokens(tokens: TokenResponse): void {
     // FE-008: access token in memory only, refresh token in per-tab sessionStorage.
     this.accessToken = tokens.access_token;
-    sessionStorage.setItem(this.REFRESH_TOKEN_KEY, tokens.refresh_token);
+    this.setSessionStorageItem(this.REFRESH_TOKEN_KEY, tokens.refresh_token);
   }
 
   private clearTokens(): void {
     this.accessToken = null;
-    sessionStorage.removeItem(this.REFRESH_TOKEN_KEY);
+    this.removeSessionStorageItem(this.REFRESH_TOKEN_KEY);
   }
 
   public getAccessToken(): string | null {
@@ -412,7 +482,31 @@ export class AuthService {
   }
 
   public getRefreshToken(): string | null {
-    return sessionStorage.getItem(this.REFRESH_TOKEN_KEY);
+    return this.getSessionStorageItem(this.REFRESH_TOKEN_KEY);
+  }
+
+  private getSessionStorageItem(key: string): string | null {
+    try {
+      return sessionStorage.getItem(key);
+    } catch {
+      return null;
+    }
+  }
+
+  private setSessionStorageItem(key: string, value: string): void {
+    try {
+      sessionStorage.setItem(key, value);
+    } catch {
+      // Storage can be unavailable (private mode / quota exceeded).
+    }
+  }
+
+  private removeSessionStorageItem(key: string): void {
+    try {
+      sessionStorage.removeItem(key);
+    } catch {
+      // Storage can be unavailable.
+    }
   }
 
   public getCurrentUser(): User | null {
@@ -453,7 +547,9 @@ export class AuthService {
     };
     // FE-046: deliberately *not* routed through handleError — the caller maps the
     // outcome to password-specific messages (401 → "Incorrect current password.").
-    return this.http.patch(`${this.apiUrl}/me`, payload);
+    return this.ensureAccessToken().pipe(
+      switchMap(() => this.http.patch(`${this.apiUrl}/me`, payload)),
+    );
   }
 
   /**

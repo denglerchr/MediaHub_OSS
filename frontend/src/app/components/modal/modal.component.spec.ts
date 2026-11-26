@@ -20,6 +20,7 @@ import { ModalService } from '../../services/modal.service';
       <button id="top-last">Top last</button>
     </app-modal>
     <app-modal [modalId]="bottomId" [modalTitle]="'Bottom Modal'">
+      <input type="hidden" id="bottom-hidden" />
       <button id="bottom-first">Bottom first</button>
       <button id="bottom-last">Bottom last</button>
     </app-modal>
@@ -52,7 +53,7 @@ describe('ModalComponent — FE-044 dialog accessibility / N-D4 stacked modals',
   const focusablesOf = (content: HTMLElement): HTMLElement[] => {
     return Array.from(
       content.querySelectorAll<HTMLElement>(
-        'a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])',
+        'a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]):not([type="hidden"]), select:not([disabled]), [tabindex]:not([tabindex="-1"])',
       ),
     );
   };
@@ -212,5 +213,42 @@ describe('ModalComponent — FE-044 dialog accessibility / N-D4 stacked modals',
     fixture.detectChanges();
     tick();
     expect(document.body.classList.contains('modal-open')).toBeFalse();
+  }));
+
+  it('excludes input[type="hidden"] from the Tab focus trap', fakeAsync(() => {
+    modalService.open('bottomModal');
+    fixture.detectChanges();
+    tick();
+
+    const content = dialogOf('bottomModal')!;
+    const hiddenInput = content.querySelector('#bottom-hidden') as HTMLElement;
+    const last = content.querySelector('#bottom-last') as HTMLElement;
+    const closeBtn = content.querySelector('.close-button') as HTMLElement;
+
+    last.focus();
+    dispatchKey('Tab');
+    expect(document.activeElement).toBe(closeBtn);
+    expect(document.activeElement).not.toBe(hiddenInput);
+  }));
+
+  it('preserves previouslyFocused trigger when an open modal is re-opened', fakeAsync(() => {
+    const trigger = fixture.nativeElement.querySelector('#trigger') as HTMLElement;
+    trigger.focus();
+    expect(document.activeElement).toBe(trigger);
+
+    modalService.open('bottomModal');
+    fixture.detectChanges();
+    tick();
+    expect(document.activeElement).toBe(dialogOf('bottomModal'));
+
+    // Re-open while already open (focus is currently inside the dialog)
+    modalService.open('bottomModal');
+    fixture.detectChanges();
+    tick();
+
+    modalService.close('bottomModal');
+    fixture.detectChanges();
+    tick();
+    expect(document.activeElement).toBe(trigger);
   }));
 });

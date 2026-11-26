@@ -56,6 +56,22 @@
             >The display name of your database. Changing this will not break any existing file links
             or uploads.</small
           >
+          <div
+            *ngIf="settingsForm.get('name')?.invalid && settingsForm.get('name')?.touched"
+            class="form-error"
+            style="color: var(--text-danger); font-size: 0.85rem; margin-top: 0.25rem"
+          >
+            <span *ngIf="settingsForm.get('name')?.hasError('required')"
+              >Database name is required.</span
+            >
+            <span *ngIf="settingsForm.get('name')?.hasError('maxlength')"
+              >Database name cannot exceed 64 characters.</span
+            >
+            <span *ngIf="settingsForm.get('name')?.hasError('pattern')"
+              >Database name must start with a letter or underscore and contain only letters,
+              digits, or underscores.</span
+            >
+          </div>
         </div>
 
         <div class="form-group" style="margin-top: 1.5rem">
@@ -140,6 +156,7 @@
                     class="btn-icon btn-icon-danger"
                     (click)="onDeleteField(field)"
                     title="Delete field"
+                    [disabled]="isMutatingField"
                   >
                     🗑️
                   </button>
@@ -179,7 +196,7 @@
                     class="btn-icon btn-icon-success"
                     (click)="onSaveField(field.id!)"
                     title="Save changes"
-                    [disabled]="isLoading || !editingFieldName"
+                    [disabled]="isMutatingField || !editingFieldName"
                   >
                     ✔️
                   </button>
@@ -264,7 +281,7 @@
               type="button"
               class="btn btn-primary"
               (click)="onAddField()"
-              [disabled]="isLoading || !newFieldName"
+              [disabled]="isMutatingField || !newFieldName"
               style="padding: 0.5rem 1.5rem"
             >
               Add
@@ -495,20 +512,20 @@
             [disabled]="
               settingsForm.invalid ||
               settingsForm.pristine ||
-              isLoading ||
+              isSavingSettings ||
               hasUnparseableHousekeeping
             "
           >
-            {{ isLoading ? 'Saving...' : 'Save Changes' }}
+            {{ isSavingSettings ? 'Saving...' : 'Save Changes' }}
           </button>
           <button
             *ngIf="canDelete"
             type="button"
             class="btn btn-secondary"
             (click)="onTriggerHousekeeping()"
-            [disabled]="isLoading"
+            [disabled]="isRunningHousekeeping"
           >
-            {{ isLoading ? 'Running...' : 'Run Housekeeping Now' }}
+            {{ isRunningHousekeeping ? 'Running...' : 'Run Housekeeping Now' }}
           </button>
         </div>
       </div>
@@ -540,8 +557,8 @@
           Deleting a database is permanent and cannot be undone. This will remove all entries and
           metadata associated with it.
         </p>
-        <button class="btn btn-danger" (click)="onDeleteDatabase()" [disabled]="isLoading">
-          Delete this Database
+        <button class="btn btn-danger" (click)="onDeleteDatabase()" [disabled]="isDeletingDatabase">
+          {{ isDeletingDatabase ? 'Deleting...' : 'Delete this Database' }}
         </button>
       </div>
     </div>

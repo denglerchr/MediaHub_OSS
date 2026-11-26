@@ -29,11 +29,14 @@ import { trigger, transition, style, animate } from '@angular/animations';
   ],
 })
 export class NotificationHostComponent implements OnInit, OnDestroy {
+  private static readonly MAX_TOAST_QUEUE = 10;
+
   public globalError: string | null = null;
   public toast: Notification | null = null;
 
   private destroy$ = new Subject<void>();
   private toastTimer?: ReturnType<typeof setTimeout>; // UPDATED: Strict typing instead of 'any'
+  private nextToastTimer?: ReturnType<typeof setTimeout>;
   // FE-038: toasts queue up — a new toast must not silently replace an
   // unexpired one (and the old BehaviorSubject must not replay stale ones).
   private toastQueue: Notification[] = [];
@@ -52,14 +55,22 @@ export class NotificationHostComponent implements OnInit, OnDestroy {
     this.notificationService.toastNotification$
       .pipe(takeUntil(this.destroy$))
       .subscribe((notification) => {
-        this.toastQueue.push(notification);
-        this.showNextToast();
+        const isDuplicate =
+          (this.toast?.type === notification.type &&
+            this.toast?.message === notification.message) ||
+          this.toastQueue.some(
+            (item) => item.type === notification.type && item.message === notification.message,
+          );
+        if (!isDuplicate && this.toastQueue.length < NotificationHostComponent.MAX_TOAST_QUEUE) {
+          this.toastQueue.push(notification);
+          this.showNextToast();
+        }
       });
   }
 
   // FE-038: display one toast at a time, FIFO, 4 s each.
   private showNextToast(): void {
-    if (this.toast || this.toastQueue.length === 0) {
+    if (this.toast || this.nextToastTimer || this.toastQueue.length === 0) {
       return;
     }
 
@@ -67,10 +78,21 @@ export class NotificationHostComponent implements OnInit, OnDestroy {
     this.cdr.markForCheck(); // Inform Angular to update the view
 
     this.toastTimer = setTimeout(() => {
+      this.toastTimer = undefined;
       this.toast = null;
       this.cdr.markForCheck(); // Inform Angular to update the view when hiding
-      this.showNextToast();
+      this.scheduleNextToast();
     }, 4000);
+  }
+
+  private scheduleNextToast(): void {
+    if (this.toastQueue.length === 0 || this.nextToastTimer) {
+      return;
+    }
+    this.nextToastTimer = setTimeout(() => {
+      this.nextToastTimer = undefined;
+      this.showNextToast();
+    }, 50);
   }
 
   clearGlobalError(): void {
@@ -84,9 +106,13 @@ export class NotificationHostComponent implements OnInit, OnDestroy {
       clearTimeout(this.toastTimer);
       this.toastTimer = undefined;
     }
+    if (this.nextToastTimer) {
+      clearTimeout(this.nextToastTimer);
+      this.nextToastTimer = undefined;
+    }
     this.toast = null;
     this.cdr.markForCheck();
-    this.showNextToast();
+    this.scheduleNextToast();
   }
 
   ngOnDestroy(): void {
@@ -94,6 +120,9 @@ export class NotificationHostComponent implements OnInit, OnDestroy {
     this.destroy$.complete();
     if (this.toastTimer) {
       clearTimeout(this.toastTimer);
+    }
+    if (this.nextToastTimer) {
+      clearTimeout(this.nextToastTimer);
     }
     this.toastQueue = [];
   }

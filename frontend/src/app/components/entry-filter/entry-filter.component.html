@@ -28,6 +28,9 @@
           <input
             id="limitPerPage"
             type="number"
+            min="1"
+            max="999"
+            step="1"
             formControlName="limitPerPage"
             class="form-control"
           />
@@ -38,7 +41,7 @@
             "
             class="form-error"
           >
-            Limit required (min 1).
+            Limit must be a whole number between 1 and 999.
           </div>
         </div>
 
@@ -74,51 +77,73 @@
                 <option value="false">False</option>
               </select>
 
-              <div *ngSwitchCase="'COORDINATE'" class="bbox-input-group">
-                <input
-                  type="number"
-                  step="any"
-                  min="-90"
-                  max="90"
-                  [value]="getBboxCoord(i, 'min_lat')"
-                  (input)="setBboxCoord(i, 'min_lat', $event)"
-                  placeholder="Min Lat"
-                  class="form-control"
-                  title="Min Latitude (-90 to 90)"
-                />
-                <input
-                  type="number"
-                  step="any"
-                  min="-90"
-                  max="90"
-                  [value]="getBboxCoord(i, 'max_lat')"
-                  (input)="setBboxCoord(i, 'max_lat', $event)"
-                  placeholder="Max Lat"
-                  class="form-control"
-                  title="Max Latitude (-90 to 90)"
-                />
-                <input
-                  type="number"
-                  step="any"
-                  min="-180"
-                  max="180"
-                  [value]="getBboxCoord(i, 'min_lng')"
-                  (input)="setBboxCoord(i, 'min_lng', $event)"
-                  placeholder="Min Lng"
-                  class="form-control"
-                  title="Min Longitude (-180 to 180)"
-                />
-                <input
-                  type="number"
-                  step="any"
-                  min="-180"
-                  max="180"
-                  [value]="getBboxCoord(i, 'max_lng')"
-                  (input)="setBboxCoord(i, 'max_lng', $event)"
-                  placeholder="Max Lng"
-                  class="form-control"
-                  title="Max Longitude (-180 to 180)"
-                />
+              <select *ngSwitchCase="'STATUS'" formControlName="value" class="form-control">
+                <option value="ready">ready</option>
+                <option value="processing">processing</option>
+                <option value="queued">queued</option>
+                <option value="error">error</option>
+                <option value="deleting">deleting</option>
+              </select>
+
+              <div
+                *ngSwitchCase="'COORDINATE'"
+                style="display: flex; flex-direction: column; flex: 2 1 260px"
+              >
+                <div class="bbox-input-group" style="flex: 0 0 auto; width: 100%">
+                  <input
+                    type="number"
+                    step="any"
+                    min="-90"
+                    max="90"
+                    [value]="getBboxCoord(i, 'min_lat')"
+                    (input)="setBboxCoord(i, 'min_lat', $event)"
+                    placeholder="Min Lat"
+                    class="form-control"
+                    title="Min Latitude (-90 to 90)"
+                  />
+                  <input
+                    type="number"
+                    step="any"
+                    min="-90"
+                    max="90"
+                    [value]="getBboxCoord(i, 'max_lat')"
+                    (input)="setBboxCoord(i, 'max_lat', $event)"
+                    placeholder="Max Lat"
+                    class="form-control"
+                    title="Max Latitude (-90 to 90)"
+                  />
+                  <input
+                    type="number"
+                    step="any"
+                    min="-180"
+                    max="180"
+                    [value]="getBboxCoord(i, 'min_lng')"
+                    (input)="setBboxCoord(i, 'min_lng', $event)"
+                    placeholder="Min Lng"
+                    class="form-control"
+                    title="Min Longitude (-180 to 180)"
+                  />
+                  <input
+                    type="number"
+                    step="any"
+                    min="-180"
+                    max="180"
+                    [value]="getBboxCoord(i, 'max_lng')"
+                    (input)="setBboxCoord(i, 'max_lng', $event)"
+                    placeholder="Max Lng"
+                    class="form-control"
+                    title="Max Longitude (-180 to 180)"
+                  />
+                </div>
+                <div
+                  *ngIf="
+                    group.get('value')?.invalid &&
+                    (group.get('value')?.touched || group.get('value')?.dirty)
+                  "
+                  class="form-error"
+                >
+                  Enter valid coordinates (Lat -90..90, Lng -180..180, Min Lat &le; Max Lat).
+                </div>
               </div>
 
               <input

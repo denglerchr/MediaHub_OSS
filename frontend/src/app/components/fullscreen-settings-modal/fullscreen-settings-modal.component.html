@@ -33,6 +33,8 @@
             formControlName="entryLimit"
             class="form-control"
             min="1"
+            max="1000"
+            step="1"
           />
           <small class="text-muted block mt-1"
             >How many of the most recent entries to include in the loop (N=1 waits for new
@@ -44,7 +46,7 @@
             "
             class="form-error"
           >
-            Limit must be at least 1.
+            Limit must be a whole number between 1 and 1000.
           </div>
         </div>
       </div>

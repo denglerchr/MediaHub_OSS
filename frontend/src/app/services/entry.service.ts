@@ -1,6 +1,6 @@
 // frontend/src/app/services/entry.service.ts
 
-import { Injectable } from '@angular/core';
+import { Injectable, Optional } from '@angular/core';
 import {
   HttpClient,
   HttpErrorResponse,
@@ -15,6 +15,7 @@ import {
   Observable,
   Subject,
   Subscription,
+  from,
   of,
   throwError,
   timer,
@@ -30,6 +31,7 @@ import {
 } from '../models';
 import { NotificationService } from './notification.service';
 import { AuthService } from './auth.service';
+import { ImageCacheService } from './image-cache.service';
 
 @Injectable({
   providedIn: 'root',
@@ -44,8 +46,10 @@ export class EntryService {
   private entryUpdatedNotifier = new Subject<Entry>();
   private processingEntriesSubject = new BehaviorSubject<number[]>([]);
 
-  // FE-013: subscriptions of the service-owned status polls, keyed by entry id.
-  private activePolls = new Map<number, Subscription>();
+  // FE-013: subscriptions of the service-owned status polls, keyed by `${dbId}:${entryId}`.
+  private activePolls = new Map<string, Subscription>();
+  private processingKeys = new Set<string>();
+  private lastUserId: string | null = null;
 
   public selectedEntry$ = this.selectedEntrySubject.asObservable();
   public refreshRequired$ = this.refreshNotifier.asObservable();
@@ -57,14 +61,20 @@ export class EntryService {
     private http: HttpClient,
     private notificationService: NotificationService,
     private authService: AuthService,
+    @Optional() private imageCacheService?: ImageCacheService,
   ) {
     // FE-013: service-owned polls must not outlive the session. A poll surviving
     // logout keeps firing unauthenticated requests whose 401 → refreshToken() →
     // "No refresh token available" → logout(false) can bounce a freshly logged-in
     // user straight back to /login.
-    this.authService.currentUser$
-      .pipe(filter((user) => user === null))
-      .subscribe(() => this.stopAllPolls());
+    this.authService.currentUser$.subscribe((user) => {
+      const nextUserId = user?.id ?? null;
+      if (user === null || (this.lastUserId !== null && nextUserId !== this.lastUserId)) {
+        this.stopAllPolls();
+        this.clearSelectedEntry();
+      }
+      this.lastUserId = nextUserId;
+    });
   }
 
   public triggerImageListRefresh(): void {
@@ -78,37 +88,60 @@ export class EntryService {
    * it must never swallow the error itself.
    */
   private handleError(error: HttpErrorResponse, options?: { silent?: boolean }): Observable<never> {
-    let errorMessage: string;
-    let isAuthError = false;
+    let fallbackMessage: string;
+    const isAuthError = error.status === 401;
 
     if (error.error && typeof error.error.error === 'string') {
-      errorMessage = error.error.error;
+      fallbackMessage = error.error.error;
     } else if (error.status === 0) {
-      errorMessage = 'Network error or backend unreachable. Check CORS or server status.';
+      fallbackMessage = 'Network error or backend unreachable. Check CORS or server status.';
     } else if (error.status === 401) {
-      errorMessage = 'Authentication failed or session expired. Please log in again.';
-      isAuthError = true;
+      fallbackMessage = 'Authentication failed or session expired. Please log in again.';
     } else if (error.status === 403) {
-      errorMessage = 'Forbidden: You lack permission for this action.';
+      fallbackMessage = 'Forbidden: You lack permission for this operation.';
     } else if (error.status === 400) {
-      errorMessage = `Bad Request: ${error.error?.error || 'Invalid input.'}`;
+      fallbackMessage = `Bad Request: ${error.error?.error || 'Invalid input.'}`;
     } else if (error.status >= 500) {
-      errorMessage = `Server Error (${error.status}): ${error.statusText}. Please try again later.`;
+      fallbackMessage = `Server Error (${error.status}): ${error.statusText}. Please try again later.`;
     } else if (error.statusText) {
-      errorMessage = `Error ${error.status}: ${error.statusText}`;
+      fallbackMessage = `Error ${error.status}: ${error.statusText}`;
     } else {
-      errorMessage = 'An unknown error occurred.';
+      fallbackMessage = 'An unknown error occurred.';
     }
 
-    if (!options?.silent) {
-      if (isAuthError) {
-        this.notificationService.showGlobalError(errorMessage);
-      } else {
-        this.notificationService.showError(errorMessage);
+    const emitError = (errorMessage: string): Observable<never> => {
+      if (!options?.silent) {
+        if (isAuthError) {
+          this.notificationService.showGlobalError(errorMessage);
+        } else {
+          this.notificationService.showError(errorMessage);
+        }
       }
+      return throwError(() => new Error(errorMessage));
+    };
+
+    if (
+      typeof Blob !== 'undefined' &&
+      error.error instanceof Blob &&
+      (error.error.type.includes('json') || error.error.size < 4096)
+    ) {
+      return from(error.error.text()).pipe(
+        switchMap((text) => {
+          let errorMessage = fallbackMessage;
+          try {
+            const parsed = JSON.parse(text);
+            if (typeof parsed?.error === 'string' && parsed.error) {
+              errorMessage = parsed.error;
+            }
+          } catch {
+            // Non-JSON blob — fall back to the HTTP status message.
+          }
+          return emitError(errorMessage);
+        }),
+      );
     }
 
-    return throwError(() => new Error(errorMessage));
+    return emitError(fallbackMessage);
   }
 
   // --- ENTRIES (BULK) ENDPOINTS ---
@@ -118,8 +151,25 @@ export class EntryService {
     payload: SearchRequest,
     options?: { silent?: boolean },
   ): Observable<Entry[]> {
+    let requestPayload = payload;
+    if (payload.pagination) {
+      const rawLimit = payload.pagination.limit;
+      const clampedLimit = Number.isFinite(rawLimit)
+        ? Math.min(Math.max(Math.trunc(rawLimit), 1), 1000)
+        : 1;
+      if (clampedLimit !== payload.pagination.limit) {
+        requestPayload = {
+          ...payload,
+          pagination: {
+            ...payload.pagination,
+            limit: clampedLimit,
+          },
+        };
+      }
+    }
+
     return this.http
-      .post<Entry[]>(`${this.apiUrl}/database/${dbId}/entries/search`, payload)
+      .post<Entry[]>(`${this.apiUrl}/database/${dbId}/entries/search`, requestPayload)
       .pipe(catchError((err) => (options?.silent ? throwError(() => err) : this.handleError(err))));
   }
 
@@ -131,6 +181,14 @@ export class EntryService {
         // A partial failure answers 200 with deleted_count < requested and a composed
         // `errors` string (entryhandler/models.go BulkDeleteResponse).
         tap((res) => {
+          ids.forEach((id) =>
+            this.imageCacheService?.invalidate(this.getEntryPreviewUrl(dbId, id)),
+          );
+          const selected = this.selectedEntrySubject.value;
+          if (selected && ids.includes(selected.id) && (selected.database_id ?? dbId) === dbId) {
+            this.clearSelectedEntry();
+          }
+
           const deleted = res?.deleted_count ?? 0;
           if (res?.errors) {
             const failed = Math.max(ids.length - deleted, 0);
@@ -240,8 +298,12 @@ export class EntryService {
               }
 
               if (entry) {
-                if (entry.status === 'processing' || entry.status === 'queued') {
-                  this.addProcessingEntry(entry.id);
+                if (
+                  (entry.status === 'processing' || entry.status === 'queued') &&
+                  this.authService.hasDatabasePermission(dbId, 'can_view')
+                ) {
+                  this.stopPollingEntry(dbId, entry.id);
+                  this.addProcessingEntry(dbId, entry.id);
                   this.startPollingEntryStatus(dbId, entry.id);
                 }
                 this.entryCreatedNotifier.next(entry);
@@ -249,35 +311,41 @@ export class EntryService {
             }
 
             if (response.status === 202) {
-              const partialEntry = response.body as PartialEntryResponse;
-              // The backend decides whether the entry is processed right away ("processing")
-              // or waiting for a free conversion slot ("queued"). Reflect the real status.
-              const status = partialEntry.status === 'queued' ? 'queued' : 'processing';
-              const entry: Entry = {
-                id: partialEntry.id,
-                timestamp: partialEntry.timestamp ?? metadata.timestamp ?? Date.now(),
-                created_at: partialEntry.created_at ?? Date.now(),
-                updated_at: partialEntry.updated_at ?? Date.now(),
-                database_id: dbId,
-                filename: file.name,
-                filesize: file.size,
-                mime_type: file.type,
-                status,
-              };
-              this.addProcessingEntry(partialEntry.id);
-              if (!options?.silentSuccess) {
-                if (status === 'queued') {
-                  this.notificationService.showInfo(
-                    `Large file (ID: ${partialEntry.id}) is queued for processing...`,
-                  );
-                } else {
-                  this.notificationService.showInfo(
-                    `Large file (ID: ${partialEntry.id}) is processing...`,
-                  );
+              const partialEntry = response.body as PartialEntryResponse | null;
+              if (partialEntry) {
+                // The backend decides whether the entry is processed right away ("processing")
+                // or waiting for a free conversion slot ("queued"). Reflect the real status.
+                const status = partialEntry.status === 'queued' ? 'queued' : 'processing';
+                const entry: Entry = {
+                  id: partialEntry.id,
+                  timestamp: partialEntry.timestamp ?? metadata.timestamp ?? Date.now(),
+                  created_at: partialEntry.created_at ?? Date.now(),
+                  updated_at: partialEntry.updated_at ?? Date.now(),
+                  database_id: dbId,
+                  filename: file.name,
+                  filesize: file.size,
+                  mime_type: partialEntry.mime_type || file.type,
+                  custom_fields: partialEntry.custom_fields ?? metadata.custom_fields,
+                  status,
+                };
+                if (!options?.silentSuccess) {
+                  if (status === 'queued') {
+                    this.notificationService.showInfo(
+                      `Large file (ID: ${partialEntry.id}) is queued for processing...`,
+                    );
+                  } else {
+                    this.notificationService.showInfo(
+                      `Large file (ID: ${partialEntry.id}) is processing...`,
+                    );
+                  }
                 }
+                if (this.authService.hasDatabasePermission(dbId, 'can_view')) {
+                  this.stopPollingEntry(dbId, partialEntry.id);
+                  this.addProcessingEntry(dbId, partialEntry.id);
+                  this.startPollingEntryStatus(dbId, partialEntry.id);
+                }
+                this.entryCreatedNotifier.next(entry);
               }
-              this.startPollingEntryStatus(dbId, partialEntry.id);
-              this.entryCreatedNotifier.next(entry);
             }
           }
         }),
@@ -361,6 +429,11 @@ export class EntryService {
       .delete<{ message: string }>(`${this.apiUrl}/database/${dbId}/entry/${entryId}`)
       .pipe(
         tap((res) => {
+          this.imageCacheService?.invalidate(this.getEntryPreviewUrl(dbId, entryId));
+          const selected = this.selectedEntrySubject.value;
+          if (selected && selected.id === entryId && (selected.database_id ?? dbId) === dbId) {
+            this.clearSelectedEntry();
+          }
           this.notificationService.showSuccess(res.message || `Entry ${entryId} deleted.`);
           this.triggerImageListRefresh();
         }),
@@ -370,16 +443,35 @@ export class EntryService {
 
   // --- HELPER METHODS FOR ASYNC UPLOAD ---
 
-  private addProcessingEntry(id: number): void {
-    const current = this.processingEntriesSubject.value;
-    if (!current.includes(id)) {
-      this.processingEntriesSubject.next([...current, id]);
+  private pollKey(dbId: string, entryId: number): string {
+    return `${dbId}:${entryId}`;
+  }
+
+  private emitProcessingEntries(): void {
+    const uniqueIds = Array.from(
+      new Set(
+        Array.from(this.processingKeys).map((key) => {
+          const sep = key.lastIndexOf(':');
+          return Number(key.slice(sep + 1));
+        }),
+      ),
+    );
+    this.processingEntriesSubject.next(uniqueIds);
+  }
+
+  private addProcessingEntry(dbId: string, entryId: number): void {
+    const key = this.pollKey(dbId, entryId);
+    if (!this.processingKeys.has(key)) {
+      this.processingKeys.add(key);
+      this.emitProcessingEntries();
     }
   }
 
-  private removeProcessingEntry(id: number): void {
-    const current = this.processingEntriesSubject.value;
-    this.processingEntriesSubject.next(current.filter((entryId) => entryId !== id));
+  private removeProcessingEntry(dbId: string, entryId: number): void {
+    const key = this.pollKey(dbId, entryId);
+    if (this.processingKeys.delete(key)) {
+      this.emitProcessingEntries();
+    }
   }
 
   // FE-013: polling cadence — start fast, back off while nothing changes. There is
@@ -417,6 +509,8 @@ export class EntryService {
           if (err?.status === 404 || err?.status === 410) {
             terminate = true;
             this.handleEntryGone(dbId, entryId);
+          } else if (err?.status === 401 || err?.status === 403) {
+            terminate = true;
           } else if (++consecutiveFailures >= EntryService.POLL_MAX_CONSECUTIVE_FAILURES) {
             terminate = true;
           }
@@ -469,9 +563,7 @@ export class EntryService {
       }),
       map(() => void 0),
       finalize(() => {
-        if (this.processingEntriesSubject.value.includes(entryId)) {
-          this.removeProcessingEntry(entryId);
-        }
+        this.removeProcessingEntry(dbId, entryId);
       }),
     );
   }
@@ -488,18 +580,20 @@ export class EntryService {
 
   /** FE-013: subscribes a status poll and keeps track of it for session teardown. */
   private startPollingEntryStatus(dbId: string, entryId: number): void {
-    this.stopPollingEntry(entryId);
+    const key = this.pollKey(dbId, entryId);
+    this.stopPollingEntry(dbId, entryId);
     const subscription = this.pollForEntryStatus(dbId, entryId)
-      .pipe(finalize(() => this.activePolls.delete(entryId)))
+      .pipe(finalize(() => this.activePolls.delete(key)))
       .subscribe();
-    this.activePolls.set(entryId, subscription);
+    this.activePolls.set(key, subscription);
   }
 
-  private stopPollingEntry(entryId: number): void {
-    const subscription = this.activePolls.get(entryId);
+  private stopPollingEntry(dbId: string, entryId: number): void {
+    const key = this.pollKey(dbId, entryId);
+    const subscription = this.activePolls.get(key);
     if (subscription) {
       subscription.unsubscribe();
-      this.activePolls.delete(entryId);
+      this.activePolls.delete(key);
     }
   }
 
@@ -507,5 +601,9 @@ export class EntryService {
   private stopAllPolls(): void {
     this.activePolls.forEach((subscription) => subscription.unsubscribe());
     this.activePolls.clear();
+    if (this.processingKeys.size > 0) {
+      this.processingKeys.clear();
+      this.emitProcessingEntries();
+    }
   }
 }

@@ -10,7 +10,7 @@
             type="text"
             formControlName="name"
             class="form-control"
-            placeholder="e.g. My Vacation Photos"
+            placeholder="e.g. my_vacation_photos"
           />
 
           <div
@@ -19,7 +19,11 @@
           >
             <span *ngIf="createDbForm.get('name')?.hasError('required')">Name is required.</span>
             <span *ngIf="createDbForm.get('name')?.hasError('maxlength')"
-              >Name cannot exceed 100 characters.</span
+              >Name cannot exceed 64 characters.</span
+            >
+            <span *ngIf="createDbForm.get('name')?.hasError('pattern')"
+              >Name must start with a letter or underscore and contain only letters, digits, or
+              underscores.</span
             >
           </div>
         </div>
@@ -59,6 +63,9 @@
             >
             <span *ngIf="createDbForm.get('n_max_queued')?.hasError('min')"
               >Max queued conversions cannot be negative.</span
+            >
+            <span *ngIf="createDbForm.get('n_max_queued')?.hasError('pattern')"
+              >Max queued conversions must be a whole number.</span
             >
           </div>
         </div>
@@ -203,6 +210,23 @@
             </select>
           </div>
           <small class="text-muted">Set to 0 to disable automated runs.</small>
+          <div
+            *ngIf="
+              createDbForm.get('housekeeping.interval_value')?.invalid &&
+              createDbForm.get('housekeeping.interval_value')?.touched
+            "
+            class="form-error"
+          >
+            <span *ngIf="createDbForm.get('housekeeping.interval_value')?.hasError('required')"
+              >Run interval is required.</span
+            >
+            <span *ngIf="createDbForm.get('housekeeping.interval_value')?.hasError('min')"
+              >Run interval cannot be negative.</span
+            >
+            <span *ngIf="createDbForm.get('housekeeping.interval_value')?.hasError('pattern')"
+              >Run interval must be a whole number.</span
+            >
+          </div>
         </div>
 
         <div class="form-group">
@@ -218,6 +242,23 @@
               <option value="T">TB</option>
             </select>
           </div>
+          <div
+            *ngIf="
+              createDbForm.get('housekeeping.disk_space_value')?.invalid &&
+              createDbForm.get('housekeeping.disk_space_value')?.touched
+            "
+            class="form-error"
+          >
+            <span *ngIf="createDbForm.get('housekeeping.disk_space_value')?.hasError('required')"
+              >Max disk space is required.</span
+            >
+            <span *ngIf="createDbForm.get('housekeeping.disk_space_value')?.hasError('min')"
+              >Max disk space cannot be negative.</span
+            >
+            <span *ngIf="createDbForm.get('housekeeping.disk_space_value')?.hasError('pattern')"
+              >Max disk space must be a whole number.</span
+            >
+          </div>
         </div>
 
         <div class="form-group">
@@ -231,6 +272,23 @@
               <option value="h">Hours</option>
               <option value="d">Days</option>
             </select>
+          </div>
+          <div
+            *ngIf="
+              createDbForm.get('housekeeping.max_age_value')?.invalid &&
+              createDbForm.get('housekeeping.max_age_value')?.touched
+            "
+            class="form-error"
+          >
+            <span *ngIf="createDbForm.get('housekeeping.max_age_value')?.hasError('required')"
+              >Max entry age is required.</span
+            >
+            <span *ngIf="createDbForm.get('housekeeping.max_age_value')?.hasError('min')"
+              >Max entry age cannot be negative.</span
+            >
+            <span *ngIf="createDbForm.get('housekeeping.max_age_value')?.hasError('pattern')"
+              >Max entry age must be a whole number.</span
+            >
           </div>
         </div>
       </div>
@@ -248,24 +306,6 @@
           class="custom-field-row"
         >
           <input type="text" formControlName="name" placeholder="Field Name" class="form-control" />
-          <!-- FE-053: specific validation text (the invalid name used to silently
-               disable Create with no explanation) -->
-          <div
-            *ngIf="
-              field.get('name')?.invalid && (field.get('name')?.touched || field.get('name')?.dirty)
-            "
-            class="form-error"
-            style="flex-basis: 100%"
-          >
-            <span *ngIf="field.get('name')?.errors?.['required']">Field name is required.</span>
-            <span *ngIf="field.get('name')?.errors?.['pattern']"
-              >Field name must start with a letter or underscore and contain only letters, digits or
-              underscores.</span
-            >
-            <span *ngIf="field.get('name')?.errors?.['reserved']"
-              >This name is reserved (standard/media field) — please choose another.</span
-            >
-          </div>
           <select formControlName="type" class="form-control">
             <option value="TEXT">Text</option>
             <option value="INTEGER">Integer</option>
@@ -295,6 +335,29 @@
           >
             🗑️
           </button>
+          <!-- FE-053: specific validation text (the invalid name used to silently
+               disable Create with no explanation) -->
+          <div
+            *ngIf="
+              field.get('name')?.invalid && (field.get('name')?.touched || field.get('name')?.dirty)
+            "
+            class="form-error"
+          >
+            <span *ngIf="field.get('name')?.errors?.['required']">Field name is required.</span>
+            <span *ngIf="field.get('name')?.errors?.['maxlength']"
+              >Field name cannot exceed 64 characters.</span
+            >
+            <span *ngIf="field.get('name')?.errors?.['pattern']"
+              >Field name must start with a letter or underscore and contain only letters, digits or
+              underscores.</span
+            >
+            <span *ngIf="field.get('name')?.errors?.['reserved']"
+              >This name is reserved (standard/media field) — please choose another.</span
+            >
+            <span *ngIf="field.get('name')?.errors?.['duplicate']"
+              >Duplicate custom field name — field names must be unique.</span
+            >
+          </div>
         </div>
       </div>
     </div>

@@ -122,6 +122,45 @@ describe('JwtInterceptor — FE-006/FE-007 regressions', () => {
     expect(authSpy.logout).toHaveBeenCalledWith(false);
   });
 
+  [401, 403].forEach((status) => {
+    it(`FE-010: a ${status} from refreshToken() logs out locally`, () => {
+      authSpy.refreshToken.and.returnValue(
+        throwError(() => new HttpErrorResponse({ status, statusText: 'Auth Error' })),
+      );
+
+      http.get('/api/database/db1/entry/dead').subscribe({
+        error: (err: HttpErrorResponse) => (capturedError = err),
+      });
+
+      httpMock
+        .expectOne('/api/database/db1/entry/dead')
+        .flush(null, { status: 401, statusText: 'Unauthorized' });
+
+      expect(authSpy.logout).toHaveBeenCalledTimes(1);
+      expect(authSpy.logout).toHaveBeenCalledWith(false);
+      expect(capturedError?.status).toBe(status);
+    });
+  });
+
+  [0, 500, 502, 503, 429].forEach((status) => {
+    it(`FE-010: a transient ${status} from refreshToken() preserves the session (no logout)`, () => {
+      authSpy.refreshToken.and.returnValue(
+        throwError(() => new HttpErrorResponse({ status, statusText: 'Transient Error' })),
+      );
+
+      http.get('/api/database/db1/entry/transient').subscribe({
+        error: (err: HttpErrorResponse) => (capturedError = err),
+      });
+
+      httpMock
+        .expectOne('/api/database/db1/entry/transient')
+        .flush(null, { status: 401, statusText: 'Unauthorized' });
+
+      expect(authSpy.logout).not.toHaveBeenCalled();
+      expect(capturedError?.status).toBe(status);
+    });
+  });
+
   it('FE-007: a 401 on the logout request must NOT trigger refresh + retry', () => {
     http
       .post(

@@ -1,7 +1,9 @@
-# v3.2.1
+# v3.3
 
 Features:
 - add `idstart` and `idend` query parameters to `GET /api/database/{database_id}/entries`
+- add preview upload endpoint
+- switch to OpenAPI v3.0
 
 Bug fixes:
 - fix regression for display of timestamps <1970

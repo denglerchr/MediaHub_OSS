@@ -1,5 +1,6 @@
 import {
   generateRandomState,
+  generateRandomNonce,
   generateCodeVerifier,
   generateCodeChallenge,
   bufferToBase64Url,
@@ -16,6 +17,17 @@ describe('PKCE and State Utilities', () => {
     // 24 bytes in base64url is 32 characters
     expect(state1.length).toBe(32);
     expect(state1).toMatch(/^[A-Za-z0-9_-]+$/);
+  });
+
+  it('should generate non-empty unique random nonces', () => {
+    const nonce1 = generateRandomNonce();
+    const nonce2 = generateRandomNonce();
+
+    expect(nonce1).toBeTruthy();
+    expect(nonce2).toBeTruthy();
+    expect(nonce1).not.toEqual(nonce2);
+    expect(nonce1.length).toBe(32);
+    expect(nonce1).toMatch(/^[A-Za-z0-9_-]+$/);
   });
 
   it('should generate valid code verifier of 43 characters', () => {

@@ -88,9 +88,33 @@
 
     <div class="form-group">
       <label for="expiry" class="form-label">Expiration Date (Optional)</label>
-      <input type="datetime-local" id="expiry" formControlName="expires_at" class="form-control" />
+      <input
+        type="datetime-local"
+        id="expiry"
+        formControlName="expires_at"
+        class="form-control"
+        [ngClass]="{
+          'is-invalid':
+            keyForm.get('expires_at')?.invalid &&
+            (keyForm.get('expires_at')?.dirty || keyForm.get('expires_at')?.touched),
+        }"
+      />
+      <div
+        *ngIf="
+          keyForm.get('expires_at')?.invalid &&
+          (keyForm.get('expires_at')?.dirty || keyForm.get('expires_at')?.touched)
+        "
+        class="form-error"
+      >
+        <div *ngIf="keyForm.get('expires_at')?.errors?.['invalidDate']">
+          Please enter a valid date and time.
+        </div>
+        <div *ngIf="keyForm.get('expires_at')?.errors?.['pastDate']">
+          Expiration date must be in the future.
+        </div>
+      </div>
       <span class="description-subtext"
-        >Leave empty for a key that never expires. Expiry dates are validated database-side.</span
+        >Optional. Must be a valid future date and time in your local timezone.</span
       >
     </div>
 
@@ -142,15 +166,36 @@
           <span class="form-label">Delete</span>
         </label>
 
-        <label class="checkbox-group">
+        <label
+          class="checkbox-group"
+          [class.disabled]="!isCallerGlobalAdmin"
+          [style.opacity]="!isCallerGlobalAdmin ? '0.6' : null"
+          [style.cursor]="!isCallerGlobalAdmin ? 'not-allowed' : null"
+          [title]="!isCallerGlobalAdmin ? 'Only global administrators can grant Admin scope.' : ''"
+        >
           <input type="checkbox" formControlName="scope_admin" class="form-checkbox" />
           <span class="form-label" style="color: #f6ad55; font-weight: 600">Admin</span>
         </label>
       </div>
+
+      <div
+        *ngIf="hasNoScopesSelected"
+        class="description-subtext"
+        style="color: var(--text-warning); margin-top: 0.75rem"
+      >
+        No scopes selected — this key will have no permissions
+      </div>
     </div>
 
     <div class="form-actions">
-      <button type="button" (click)="cancelModal()" class="btn btn-secondary">Cancel</button>
+      <button
+        type="button"
+        (click)="cancelModal()"
+        class="btn btn-secondary"
+        [disabled]="isLoading"
+      >
+        Cancel
+      </button>
       <button type="submit" class="btn btn-primary" [disabled]="keyForm.invalid || isLoading">
         <span *ngIf="!isLoading">{{ isEditMode ? 'Update Key' : 'Create Key' }}</span>
         <span *ngIf="isLoading">Saving...</span>

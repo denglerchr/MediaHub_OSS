@@ -24,6 +24,13 @@ export function generateRandomState(): string {
 }
 
 /**
+ * Generates a cryptographically strong random nonce for OIDC authentication requests.
+ */
+export function generateRandomNonce(): string {
+  return generateRandomState();
+}
+
+/**
  * Generates a high-entropy PKCE code verifier (RFC 7636 Section 4.1).
  * 32 random bytes results in a 43-character base64url string.
  */

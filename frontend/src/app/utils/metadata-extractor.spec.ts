@@ -254,4 +254,129 @@ describe('MetadataExtractor', () => {
     const result = await extractMetadata(file);
     expect(result?.coordinates).toBeUndefined();
   });
+
+  function createJpegWithExifDate(dateStr: string): File {
+    return createJpegWithExif((view) => {
+      view.setUint16(0, 0x4949);
+      view.setUint16(2, 0x002a, true);
+      view.setUint32(4, 8, true);
+
+      view.setUint16(8, 1, true);
+      view.setUint16(10, 0x8769, true);
+      view.setUint16(12, 4, true);
+      view.setUint32(14, 1, true);
+      view.setUint32(18, 30, true);
+
+      view.setUint16(30, 1, true);
+      view.setUint16(32, 0x9003, true);
+      view.setUint16(34, 2, true);
+      view.setUint32(36, dateStr.length + 1, true);
+      view.setUint32(40, 50, true);
+
+      for (let i = 0; i < dateStr.length; i++) {
+        view.setUint8(50 + i, dateStr.charCodeAt(i));
+      }
+      view.setUint8(50 + dateStr.length, 0);
+
+      return { byteLength: 50 + dateStr.length + 1 };
+    });
+  }
+
+  it('should return no timestamp for zeroed EXIF date "0000:00:00 00:00:00"', async () => {
+    const file = createJpegWithExifDate('0000:00:00 00:00:00');
+    const result = await extractMetadata(file);
+    expect(result?.timestamp).toBeUndefined();
+  });
+
+  it('should return no timestamp for calendar-invalid EXIF date "2024:02:31 12:00:00"', async () => {
+    const file = createJpegWithExifDate('2024:02:31 12:00:00');
+    const result = await extractMetadata(file);
+    expect(result?.timestamp).toBeUndefined();
+  });
+
+  it('should return no coordinates when GPS rational denominators are zero (0/0)', async () => {
+    const file = createJpegWithExif((view) => {
+      view.setUint16(0, 0x4949);
+      view.setUint16(2, 0x002a, true);
+      view.setUint32(4, 8, true);
+
+      view.setUint16(8, 1, true);
+      view.setUint16(10, 0x8825, true);
+      view.setUint16(12, 4, true);
+      view.setUint32(14, 1, true);
+      view.setUint32(18, 30, true);
+
+      view.setUint16(30, 4, true);
+
+      view.setUint16(32, 0x0001, true);
+      view.setUint16(34, 2, true);
+      view.setUint32(36, 2, true);
+      view.setUint8(40, 0x4e); // 'N'
+
+      view.setUint16(44, 0x0002, true);
+      view.setUint16(46, 5, true);
+      view.setUint32(48, 3, true);
+      view.setUint32(52, 90, true);
+
+      view.setUint16(56, 0x0003, true);
+      view.setUint16(58, 2, true);
+      view.setUint32(60, 2, true);
+      view.setUint8(64, 0x45); // 'E'
+
+      view.setUint16(68, 0x0004, true);
+      view.setUint16(70, 5, true);
+      view.setUint32(72, 3, true);
+      view.setUint32(76, 114, true);
+
+      // 0/0 rationals for latitude and longitude
+      for (let offset = 90; offset < 138; offset += 4) {
+        view.setUint32(offset, 0, true);
+      }
+
+      return { byteLength: 150 };
+    });
+
+    const result = await extractMetadata(file);
+    expect(result?.coordinates).toBeUndefined();
+  });
+
+  function writeBoxType(view: DataView, offset: number, type: string): void {
+    for (let i = 0; i < 4; i++) {
+      view.setUint8(offset + i, type.charCodeAt(i));
+    }
+  }
+
+  it('should return null when MP4 mvhd has size === 1 and truncated 64-bit size header', async () => {
+    // moov box (32 bytes): 8-byte header + mvhd box (size=1, truncated to 12 bytes < 16)
+    const buffer = new ArrayBuffer(20);
+    const view = new DataView(buffer);
+    view.setUint32(0, 20);
+    writeBoxType(view, 4, 'moov');
+    view.setUint32(8, 1);
+    writeBoxType(view, 12, 'mvhd');
+
+    const file = new File([buffer], 'truncated.mp4', { type: 'video/mp4' });
+    const result = await extractMetadata(file);
+    expect(result).toBeNull();
+  });
+
+  it('should extract MP4 timestamp when mvhd has size === 0 extending to EOF', async () => {
+    // moov box (size=0 -> EOF) containing mvhd box (size=0 -> EOF)
+    const buffer = new ArrayBuffer(32);
+    const view = new DataView(buffer);
+    view.setUint32(0, 0);
+    writeBoxType(view, 4, 'moov');
+
+    view.setUint32(8, 0);
+    writeBoxType(view, 12, 'mvhd');
+    // mvhd payload at offset 16: version 0, flags 0, creation_time at offset 20
+    const creationTime1975 = 2082844800 + 157766400; // 1975-01-01T00:00:00Z
+    view.setUint8(16, 0);
+    view.setUint32(20, creationTime1975);
+
+    const file = new File([buffer], 'eof-box.mp4', { type: 'video/mp4' });
+    const result = await extractMetadata(file);
+    expect(result?.timestamp).toBeDefined();
+    expect(result?.timestamp?.getUTCFullYear()).toBe(1975);
+  });
 });

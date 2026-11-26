@@ -11,7 +11,9 @@ import { NO_ERRORS_SCHEMA } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { ReactiveFormsModule } from '@angular/forms';
 import { ActivatedRoute, Router } from '@angular/router';
-import { of } from 'rxjs';
+import { HttpEvent, HttpEventType, HttpResponse } from '@angular/common/http';
+import { Subject, of, throwError } from 'rxjs';
+import JSZip from 'jszip';
 import { ImportPageComponent } from './import-page.component';
 import { DatabaseService } from '../../services/database.service';
 import { EntryService } from '../../services/entry.service';
@@ -23,13 +25,16 @@ import { ContentType, Database } from '../../models';
 describe('ImportPageComponent — FE-050/N-D7 content-type-aware hidden columns', () => {
   let fixture: ComponentFixture<ImportPageComponent>;
   let component: ImportPageComponent;
+  let selectDatabaseSpy: jasmine.Spy;
+  let importEntriesSpy: jasmine.Spy;
+  let notificationSpy: jasmine.SpyObj<NotificationService>;
 
   const makeDb = (contentType: ContentType): Database =>
     ({
       id: 'db1',
       name: 'DB One',
       content_type: contentType,
-      custom_fields: [],
+      custom_fields: [{ id: 1, name: 'tag', type: 'TEXT' }],
     }) as unknown as Database;
 
   const csvWith = (extraHeaders: string[]): string =>
@@ -54,6 +59,16 @@ describe('ImportPageComponent — FE-050/N-D7 content-type-aware hidden columns'
   };
 
   beforeEach(async () => {
+    selectDatabaseSpy = jasmine
+      .createSpy('selectDatabase')
+      .and.returnValue(of(makeDb(ContentType.Image)));
+    importEntriesSpy = jasmine.createSpy('importEntries');
+    notificationSpy = jasmine.createSpyObj('NotificationService', [
+      'showError',
+      'showSuccess',
+      'showInfo',
+    ]);
+
     await TestBed.configureTestingModule({
       declarations: [ImportPageComponent],
       imports: [CommonModule, ReactiveFormsModule, FormatBytesPipe],
@@ -62,17 +77,13 @@ describe('ImportPageComponent — FE-050/N-D7 content-type-aware hidden columns'
         { provide: ActivatedRoute, useValue: { snapshot: { paramMap: new Map([['id', 'db1']]) } } },
         {
           provide: DatabaseService,
-          useValue: { selectDatabase: () => of(makeDb(ContentType.Image)) },
+          useValue: { selectDatabase: selectDatabaseSpy },
         },
-        { provide: EntryService, useValue: {} },
+        { provide: EntryService, useValue: { importEntries: importEntriesSpy } },
         { provide: AuthService, useValue: {} },
         {
           provide: NotificationService,
-          useValue: jasmine.createSpyObj('NotificationService', [
-            'showError',
-            'showSuccess',
-            'showInfo',
-          ]),
+          useValue: notificationSpy,
         },
         // Router is only needed for DI — the specs never navigate.
         { provide: Router, useValue: {} },
@@ -110,5 +121,132 @@ describe('ImportPageComponent — FE-050/N-D7 content-type-aware hidden columns'
       'preview_filesize',
       'note',
     ]);
+  });
+
+  it('extracts CSV headers from a real ZIP archive via extractEntriesCsvHeaderLine', async () => {
+    component.currentDatabase = makeDb(ContentType.Image);
+
+    const zip = new JSZip();
+    zip.file(
+      'entries.csv',
+      csvWith(['width', 'height', 'custom_tag']) +
+        '1,img.jpg,1700000000000,100,20,image/jpeg,ready,800,600,nature\n',
+    );
+    zip.file('media/img.jpg', new Uint8Array([1, 2, 3, 4]));
+    const blob = await zip.generateAsync({ type: 'blob', compression: 'DEFLATE' });
+    const zipFile = new File([blob], 'archive.zip', { type: 'application/zip' });
+
+    await component.onFileSelected(zipFile);
+
+    expect(component.selectedFile).toBe(zipFile);
+    expect(component.isParsingZip).toBeFalse();
+    expect(component.customCsvHeaders).toEqual(['custom_tag']);
+    expect(notificationSpy.showError).not.toHaveBeenCalled();
+  });
+
+  it('shows an error and resets when a real ZIP archive lacks entries.csv', async () => {
+    component.currentDatabase = makeDb(ContentType.Image);
+
+    const zip = new JSZip();
+    zip.file('media/img.jpg', new Uint8Array([1, 2, 3]));
+    const blob = await zip.generateAsync({ type: 'blob', compression: 'STORE' });
+    const zipFile = new File([blob], 'missing-csv.zip', { type: 'application/zip' });
+
+    await component.onFileSelected(zipFile);
+
+    expect(component.selectedFile).toBeNull();
+    expect(component.isParsingZip).toBeFalse();
+    expect(notificationSpy.showError).toHaveBeenCalledWith(
+      'The archive does not contain an entries.csv file in the root folder.',
+    );
+  });
+
+  it('handles selectDatabase errors in ngOnInit and renders an error panel', () => {
+    selectDatabaseSpy.and.returnValue(throwError(() => new Error('DB not found')));
+
+    expect(() => component.ngOnInit()).not.toThrow();
+    expect(component.currentDatabase).toBeNull();
+    expect(component.dbLoadError).toBeTrue();
+
+    fixture.detectChanges();
+    expect(fixture.nativeElement.textContent).toContain('Failed to Load Database');
+  });
+
+  it('strips UTF-8 BOM from entries.csv headers before parsing', async () => {
+    component.currentDatabase = makeDb(ContentType.Image);
+
+    await parseHeaders('\uFEFF' + csvWith(['note']));
+
+    expect(component.customCsvHeaders).toEqual(['note']);
+    expect(notificationSpy.showError).not.toHaveBeenCalled();
+  });
+
+  it('rejects entries.csv with invalid or out-of-order standard headers', async () => {
+    component.currentDatabase = makeDb(ContentType.Image);
+    component.selectedFile = new File(['x'], 'bad.zip', { type: 'application/zip' });
+
+    await parseHeaders('filename,id,timestamp,filesize,previewsize,mime_type,status\n');
+
+    expect(notificationSpy.showError).toHaveBeenCalled();
+    expect(component.selectedFile).toBeNull();
+  });
+
+  it('rejects entries.csv with duplicate headers (exact or case-insensitive)', async () => {
+    component.currentDatabase = makeDb(ContentType.Image);
+    component.selectedFile = new File(['x'], 'dup1.zip', { type: 'application/zip' });
+
+    await parseHeaders(csvWith(['note', 'note']));
+    expect(notificationSpy.showError).toHaveBeenCalled();
+    expect(component.selectedFile).toBeNull();
+
+    notificationSpy.showError.calls.reset();
+    component.selectedFile = new File(['x'], 'dup2.zip', { type: 'application/zip' });
+    await parseHeaders(csvWith(['note', 'NOTE']));
+    expect(notificationSpy.showError).toHaveBeenCalled();
+    expect(component.selectedFile).toBeNull();
+  });
+
+  it('blocks startImport when two CSV columns map to the same custom field', async () => {
+    component.currentDatabase = makeDb(ContentType.Image);
+    component.selectedFile = new File(['x'], 'ok.zip', { type: 'application/zip' });
+
+    await parseHeaders(csvWith(['col_a', 'col_b']));
+    component.mappingStepForm.patchValue({ col_a: 'tag', col_b: 'tag' });
+
+    component.startImport();
+
+    expect(notificationSpy.showError).toHaveBeenCalled();
+    expect(importEntriesSpy).not.toHaveBeenCalled();
+    expect(component.isUploading).toBeFalse();
+  });
+
+  it('cancels an in-flight import upload and resets upload state', () => {
+    component.currentDatabase = makeDb(ContentType.Image);
+    component.selectedFile = new File(['x'], 'ok.zip', { type: 'application/zip' });
+    component.currentStep = 4;
+
+    const upload$ = new Subject<HttpEvent<unknown>>();
+    importEntriesSpy.and.returnValue(upload$.asObservable());
+
+    component.startImport();
+    upload$.next({ type: HttpEventType.UploadProgress, loaded: 50, total: 100 });
+    expect(component.isUploading).toBeTrue();
+    expect(component.uploadProgress).toBe(50);
+
+    fixture.detectChanges();
+    const cancelBtn = Array.from(
+      fixture.nativeElement.querySelectorAll('button') as NodeListOf<HTMLButtonElement>,
+    ).find((btn) => btn.textContent?.includes('Cancel Upload'));
+    expect(cancelBtn).toBeTruthy();
+
+    cancelBtn!.click();
+
+    expect(component.isUploading).toBeFalse();
+    expect(component.uploadProgress).toBe(0);
+    expect(notificationSpy.showInfo).toHaveBeenCalledWith('Import upload cancelled.');
+
+    // Further events on the cancelled stream must not complete the upload
+    upload$.next(new HttpResponse({ status: 200 }));
+    expect(component.isUploadComplete).toBeFalse();
   });
 });

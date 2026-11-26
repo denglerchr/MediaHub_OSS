@@ -53,4 +53,18 @@ describe('FullscreenSettingsModalComponent — N7 T | null result contract', () 
       repeat: false,
     });
   });
+
+  it('validates entryLimit as a whole integer in [1, 1000]', () => {
+    const entryLimitCtrl = component.settingsForm.get('entryLimit')!;
+
+    for (const invalid of [0, -5, 1001, 12.5]) {
+      entryLimitCtrl.setValue(invalid);
+      expect(entryLimitCtrl.invalid).withContext(`expected ${invalid} to be invalid`).toBeTrue();
+    }
+
+    for (const valid of [1, 50, 1000]) {
+      entryLimitCtrl.setValue(valid);
+      expect(entryLimitCtrl.valid).withContext(`expected ${valid} to be valid`).toBeTrue();
+    }
+  });
 });

@@ -4,6 +4,9 @@ import { AbstractControl, ValidationErrors } from '@angular/forms';
 
 export const CUSTOM_FIELD_NAME_PATTERN = /^[a-zA-Z_][a-zA-Z0-9_]*$/;
 
+export const DATABASE_NAME_PATTERN = /^[a-zA-Z_][a-zA-Z0-9_]*$/;
+export const DATABASE_NAME_MAX_LENGTH = 64;
+
 /**
  * FE-049: custom-field names colliding with the standard entry/media fields break
  * the UI (duplicate trackBy keys, wrong filter column) and are now rejected by the

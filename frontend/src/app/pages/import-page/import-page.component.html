@@ -1,3 +1,15 @@
+<div class="import-page-container page-container" *ngIf="dbLoadError && !currentDatabase">
+  <div
+    class="alert alert-danger"
+    role="alert"
+    style="margin: 2rem auto; max-width: 500px; text-align: center"
+  >
+    <h3>Failed to Load Database</h3>
+    <p>Could not load the selected database. It may not exist or you may lack access.</p>
+    <a routerLink="/dashboard" class="btn btn-secondary">Back to Dashboard</a>
+  </div>
+</div>
+
 <div class="import-page-container page-container" *ngIf="currentDatabase">
   <div
     class="sticky-header"
@@ -222,6 +234,11 @@
 
           <p class="progress-text">{{ uploadProgress }}% Complete</p>
           <p class="text-muted text-small">Please do not close this window.</p>
+          <div class="step-actions center-actions">
+            <button type="button" class="btn btn-danger" (click)="cancelUpload()">
+              Cancel Upload
+            </button>
+          </div>
         </div>
 
         <div *ngIf="isUploadComplete" class="success-state">

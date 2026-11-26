@@ -65,7 +65,12 @@
 }
 
 .toast-success {
-  background-color: #48bb78; /* Clean dark-mode green */
+  background-color: #2f855a; /* WCAG AA contrast with #ffffff */
+  color: #ffffff;
+}
+
+.toast-success .close-btn {
+  color: #ffffff;
 }
 
 .toast-error {

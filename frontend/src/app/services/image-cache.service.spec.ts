@@ -1,7 +1,10 @@
 // frontend/src/app/services/image-cache.service.spec.ts
 import { TestBed } from '@angular/core/testing';
 import { HttpClientTestingModule, HttpTestingController } from '@angular/common/http/testing';
+import { BehaviorSubject } from 'rxjs';
 import { ImageCacheService } from './image-cache.service';
+import { AuthService } from './auth.service';
+import { User } from '../models';
 
 describe('ImageCacheService', () => {
   let service: ImageCacheService;
@@ -212,5 +215,124 @@ describe('ImageCacheService', () => {
     });
 
     httpMock.expectOne(testUrl).flush(new Blob(['first'], { type: 'image/jpeg' }));
+  });
+
+  it('revokes in-flight blob immediately when invalidated while unreferenced', () => {
+    const testUrl = '/api/media/inflight-invalidate/preview';
+    const revokeSpy = spyOn(URL, 'revokeObjectURL');
+
+    service.getBlobUrl(testUrl).subscribe();
+    const req = httpMock.expectOne(testUrl);
+
+    service.invalidate(testUrl);
+    req.flush(new Blob(['late'], { type: 'image/jpeg' }));
+
+    expect(revokeSpy).toHaveBeenCalledTimes(1);
+    expect(revokeSpy.calls.mostRecent().args[0]).toContain('blob:');
+  });
+
+  it('revokes in-flight blob immediately on clearAll() when unreferenced, and defers when referenced', () => {
+    const unrefUrl = '/api/media/inflight-unref/preview';
+    const refUrl = '/api/media/inflight-ref/preview';
+    const revokeSpy = spyOn(URL, 'revokeObjectURL');
+
+    service.getBlobUrl(unrefUrl).subscribe();
+    service.retain(refUrl);
+    service.getBlobUrl(refUrl).subscribe();
+
+    const unrefReq = httpMock.expectOne(unrefUrl);
+    const refReq = httpMock.expectOne(refUrl);
+
+    service.clearAll();
+
+    // Unreferenced in-flight entry revokes as soon as it materializes.
+    unrefReq.flush(new Blob(['unref'], { type: 'image/jpeg' }));
+    expect(revokeSpy).toHaveBeenCalledTimes(1);
+
+    // Referenced in-flight entry stays alive until release().
+    refReq.flush(new Blob(['ref'], { type: 'image/jpeg' }));
+    expect(revokeSpy).toHaveBeenCalledTimes(1);
+
+    // Release drops refCount to 0 and revokes the deferred blob.
+    service.release(refUrl);
+    expect(revokeSpy).toHaveBeenCalledTimes(2);
+    const materializedBlob = revokeSpy.calls.mostRecent().args[0];
+    expect(materializedBlob).toContain('blob:');
+  });
+
+  it('does not delete a newer cache entry if an invalidated in-flight request errors later', () => {
+    const testUrl = '/api/media/race-error/preview';
+
+    let firstErrored = false;
+    service.getBlobUrl(testUrl).subscribe({ error: () => (firstErrored = true) });
+    const req1 = httpMock.expectOne(testUrl);
+
+    service.invalidate(testUrl);
+
+    let secondBlob = '';
+    service.getBlobUrl(testUrl).subscribe((b) => (secondBlob = b));
+    const req2 = httpMock.expectOne(testUrl);
+
+    req1.flush(null, { status: 500, statusText: 'Server Error' });
+    expect(firstErrored).toBeTrue();
+
+    // Newer entry must still be cached and resolve normally.
+    const cached$ = service.getBlobUrl(testUrl);
+    req2.flush(new Blob(['ok'], { type: 'image/jpeg' }));
+    expect(secondBlob).toContain('blob:');
+
+    let replayBlob = '';
+    cached$.subscribe((b) => (replayBlob = b));
+    expect(replayBlob).toBe(secondBlob);
+    httpMock.expectNone(testUrl);
+  });
+});
+
+describe('ImageCacheService — AuthService user lifecycle clearing', () => {
+  let currentUser$: BehaviorSubject<User | null>;
+  let service: ImageCacheService;
+  let httpMock: HttpTestingController;
+
+  const user1 = { id: 'u1', username: 'alice' } as unknown as User;
+  const user2 = { id: 'u2', username: 'bob' } as unknown as User;
+
+  beforeEach(() => {
+    currentUser$ = new BehaviorSubject<User | null>(user1);
+    TestBed.configureTestingModule({
+      imports: [HttpClientTestingModule],
+      providers: [
+        ImageCacheService,
+        { provide: AuthService, useValue: { currentUser$: currentUser$.asObservable() } },
+      ],
+    });
+    service = TestBed.inject(ImageCacheService);
+    httpMock = TestBed.inject(HttpTestingController);
+  });
+
+  afterEach(() => {
+    httpMock.verify();
+  });
+
+  it('clears cached blobs on logout (null) and user switch, but keeps them when same user re-emits', () => {
+    const revokeSpy = spyOn(URL, 'revokeObjectURL');
+    let blobUrl = '';
+    service.getBlobUrl('/api/media/u1/preview').subscribe((b) => (blobUrl = b));
+    httpMock.expectOne('/api/media/u1/preview').flush(new Blob(['u1'], { type: 'image/jpeg' }));
+
+    // Re-emitting the same user does not clear the cache.
+    currentUser$.next({ ...user1 });
+    expect(revokeSpy).not.toHaveBeenCalled();
+
+    // Switching to another user clears the cache.
+    currentUser$.next(user2);
+    expect(revokeSpy).toHaveBeenCalledWith(blobUrl);
+
+    // Fetch for user2, then log out (null) -> clears cache.
+    let blobUrl2 = '';
+    service.getBlobUrl('/api/media/u2/preview').subscribe((b) => (blobUrl2 = b));
+    httpMock.expectOne('/api/media/u2/preview').flush(new Blob(['u2'], { type: 'image/jpeg' }));
+
+    currentUser$.next(null);
+    expect(revokeSpy).toHaveBeenCalledWith(blobUrl2);
   });
 });

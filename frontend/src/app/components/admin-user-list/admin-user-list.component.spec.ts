@@ -16,8 +16,10 @@
 import { CommonModule } from '@angular/common';
 import { TestBed, ComponentFixture } from '@angular/core/testing';
 import { ReactiveFormsModule, FormsModule } from '@angular/forms';
+import { Router } from '@angular/router';
 import { of, Subject } from 'rxjs';
 import { AdminUserListComponent } from './admin-user-list.component';
+import { ApiKeyTableComponent } from '../api-key-table/api-key-table.component';
 import { AuthService } from '../../services/auth.service';
 import { DatabaseService } from '../../services/database.service';
 import { ModalService } from '../../services/modal.service';
@@ -29,6 +31,7 @@ describe('AdminUserListComponent — FE-001 regression', () => {
   let component: AdminUserListComponent;
   let authSpy: jasmine.SpyObj<AuthService>;
   let databaseSpy: jasmine.SpyObj<DatabaseService>;
+  let routerSpy: jasmine.SpyObj<Router>;
 
   const musicDb: Database = {
     id: 'db1',
@@ -38,6 +41,14 @@ describe('AdminUserListComponent — FE-001 regression', () => {
     config: { create_preview: true, auto_conversion: '' },
     housekeeping: { interval: '1h', disk_space: '100G', max_age: '0' },
     custom_fields: [],
+  };
+
+  const adminUser: User = {
+    id: 'admin-1',
+    username: 'admin',
+    is_admin: true,
+    account_type: 'local',
+    permissions: [],
   };
 
   const oidcUser: User = {
@@ -91,7 +102,12 @@ describe('AdminUserListComponent — FE-001 regression', () => {
     ],
   };
 
-  const allUsers: Record<string, User> = { u1: oidcUser, u2: localUser, u3: serviceUser };
+  const allUsers: Record<string, User> = {
+    u1: oidcUser,
+    u2: localUser,
+    u3: serviceUser,
+    'admin-1': adminUser,
+  };
 
   /** Text of the username error div (hidden until touched || submitted). */
   const usernameError = (): HTMLElement | undefined =>
@@ -108,8 +124,12 @@ describe('AdminUserListComponent — FE-001 regression', () => {
       'deleteUser',
       'getUserKeys',
       'deleteUserKey',
+      'getCurrentUser',
+      'fetchCurrentUser',
+      'logout',
     ]);
     databaseSpy = jasmine.createSpyObj<DatabaseService>('DatabaseService', ['loadDatabases']);
+    routerSpy = jasmine.createSpyObj<Router>('Router', ['navigate']);
     const modalSpy = jasmine.createSpyObj<ModalService>('ModalService', ['open', 'close']);
     const notificationSpy = jasmine.createSpyObj<NotificationService>('NotificationService', [
       'showSuccess',
@@ -119,19 +139,22 @@ describe('AdminUserListComponent — FE-001 regression', () => {
     authSpy.getUsers.and.returnValue(of([oidcUser]));
     authSpy.getUser.and.callFake((id: string) => of(allUsers[id] ?? oidcUser));
     authSpy.getUserKeys.and.returnValue(of([]));
-    authSpy.updateUser.and.callFake((_id: string, updates: any) =>
+    authSpy.getCurrentUser.and.returnValue(adminUser);
+    authSpy.fetchCurrentUser.and.returnValue(of(adminUser));
+    authSpy.updateUser.and.callFake((_id: string, updates: Partial<User>) =>
       of({ ...oidcUser, ...updates } as User),
     );
     databaseSpy.loadDatabases.and.returnValue(of([musicDb]));
 
     await TestBed.configureTestingModule({
       declarations: [AdminUserListComponent],
-      imports: [CommonModule, ReactiveFormsModule, FormsModule],
+      imports: [CommonModule, ReactiveFormsModule, FormsModule, ApiKeyTableComponent],
       providers: [
         { provide: AuthService, useValue: authSpy },
         { provide: DatabaseService, useValue: databaseSpy },
         { provide: ModalService, useValue: modalSpy },
         { provide: NotificationService, useValue: notificationSpy },
+        { provide: Router, useValue: routerSpy },
       ],
     }).compileComponents();
 
@@ -340,5 +363,143 @@ describe('AdminUserListComponent — FE-001 regression', () => {
     // Same style hook as the service-account "SA" badge (blue accent text).
     expect(oidcBadge!.classList.contains('service-badge')).toBeTrue();
     expect(oidcBadge!.style.background).toBe('');
+  });
+
+  it('exits draft mode after createUser so clicking Save twice creates once then updates', () => {
+    const createdUser: User = {
+      id: 'u-new',
+      username: 'new_user',
+      is_admin: false,
+      account_type: 'local',
+      permissions: [],
+    };
+    allUsers['u-new'] = createdUser;
+    authSpy.getUsers.and.returnValue(of([oidcUser, createdUser]));
+    authSpy.createUser.and.returnValue(of(createdUser));
+    authSpy.updateUser.and.callFake((id: string, updates: Partial<User>) =>
+      of({ ...createdUser, ...updates, id } as User),
+    );
+
+    component.createNewUser();
+    component.detailForm.patchValue({
+      username: 'new_user',
+      password: 'password123',
+    });
+    component.onSaveUser();
+
+    expect(authSpy.createUser).toHaveBeenCalledTimes(1);
+    expect(component.isNewUser).toBeFalse();
+    expect(component.selectedUser?.id).toBe('u-new');
+    expect(component.detailForm.get('password')?.value).toBe('');
+
+    component.detailForm.patchValue({ is_admin: true });
+    component.onSaveUser();
+
+    expect(authSpy.createUser).toHaveBeenCalledTimes(1);
+    expect(authSpy.updateUser).toHaveBeenCalledTimes(1);
+    expect(authSpy.updateUser.calls.mostRecent().args[0]).toBe('u-new');
+  });
+
+  it('disables and guards against deleting the currently logged-in user', () => {
+    const modalSpy = TestBed.inject(ModalService) as jasmine.SpyObj<ModalService>;
+    component.selectUser(adminUser);
+    fixture.detectChanges();
+
+    expect(component.isSelectedCurrentUser()).toBeTrue();
+    const deleteBtn = fixture.nativeElement.querySelector(
+      '.detail-header .btn-danger',
+    ) as HTMLButtonElement;
+    expect(deleteBtn.disabled).toBeTrue();
+    expect(deleteBtn.title).toContain('cannot delete your own account');
+
+    component.openDeleteConfirm();
+    expect(modalSpy.open).not.toHaveBeenCalled();
+    expect(authSpy.deleteUser).not.toHaveBeenCalled();
+  });
+
+  it('refreshes current user and navigates to overview on self-demotion', () => {
+    const notificationSpy = TestBed.inject(
+      NotificationService,
+    ) as jasmine.SpyObj<NotificationService>;
+    authSpy.updateUser.and.callFake((id: string, updates: Partial<User>) =>
+      of({ ...adminUser, ...updates, id } as User),
+    );
+
+    component.selectUser(adminUser);
+    authSpy.getUsers.calls.reset();
+    component.detailForm.patchValue({ is_admin: false });
+    component.onSaveUser();
+
+    expect(authSpy.updateUser).toHaveBeenCalledTimes(1);
+    expect(authSpy.fetchCurrentUser).toHaveBeenCalledTimes(1);
+    expect(routerSpy.navigate).toHaveBeenCalledWith(['/dashboard/overview']);
+    expect(authSpy.getUsers).not.toHaveBeenCalled();
+
+    // Self-password-change triggers sign-out
+    component.detailForm.patchValue({ is_admin: true, password: 'newpassword123' });
+    component.onSaveUser();
+    expect(notificationSpy.showSuccess).toHaveBeenCalledWith(
+      'User updated successfully. Signing out because your password changed.',
+    );
+    expect(authSpy.logout).toHaveBeenCalledWith(false);
+  });
+
+  it('clears stale keys immediately and updates API Keys tab count automatically when switching users', () => {
+    const userOneKeys$ = new Subject<ApiKey[]>();
+    const userTwoKeys$ = new Subject<ApiKey[]>();
+    authSpy.getUserKeys.and.callFake((id: string) =>
+      id === 'u1' ? userOneKeys$.asObservable() : userTwoKeys$.asObservable(),
+    );
+
+    const keySample = (id: string, name: string): ApiKey => ({
+      id,
+      name,
+      key_hint: 'mh_abc',
+      scope_view: true,
+      scope_create: false,
+      scope_edit: false,
+      scope_delete: false,
+      scope_admin: false,
+      created_at: 1700000000000,
+      expires_at: null,
+      last_used_at: null,
+    });
+
+    component.selectUser(oidcUser);
+    fixture.detectChanges();
+
+    const keysTabText = () =>
+      (Array.from(fixture.nativeElement.querySelectorAll('.detail-tab-btn')) as HTMLElement[])
+        .find((el) => (el.textContent ?? '').includes('API Keys'))
+        ?.textContent?.trim();
+
+    expect(keysTabText()).toBe('API Keys (...)');
+
+    userOneKeys$.next([keySample('k1', 'Key 1')]);
+    userOneKeys$.complete();
+    fixture.detectChanges();
+    expect(keysTabText()).toBe('API Keys (1)');
+
+    // Switching to another user immediately clears stale keys and shows loading indicator
+    component.selectUser(localUser);
+    fixture.detectChanges();
+    expect(component.userKeys).toEqual([]);
+    expect(keysTabText()).toBe('API Keys (...)');
+
+    userTwoKeys$.next([keySample('k2', 'Key 2'), keySample('k3', 'Key 3')]);
+    userTwoKeys$.complete();
+    fixture.detectChanges();
+    expect(keysTabText()).toBe('API Keys (2)');
+  });
+
+  it('omits permissions payload when saving an admin user', () => {
+    component.selectUser(localUser);
+    component.detailForm.patchValue({ is_admin: true });
+    component.onSaveUser();
+
+    expect(authSpy.updateUser).toHaveBeenCalledTimes(1);
+    const payload = authSpy.updateUser.calls.mostRecent().args[1];
+    expect(payload.is_admin).toBeTrue();
+    expect('permissions' in payload).toBeFalse();
   });
 });

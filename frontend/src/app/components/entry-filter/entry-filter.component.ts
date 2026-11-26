@@ -10,10 +10,17 @@ import {
   OnInit,
   OnDestroy,
 } from '@angular/core';
-import { FormBuilder, FormGroup, FormArray, Validators, AbstractControl } from '@angular/forms';
+import {
+  FormBuilder,
+  FormGroup,
+  FormArray,
+  Validators,
+  AbstractControl,
+  ValidationErrors,
+} from '@angular/forms';
 import { Subject } from 'rxjs';
 import { takeUntil } from 'rxjs/operators';
-import { SearchFilter, CustomFieldType } from '../../models';
+import { SearchFilter, SearchCondition, CustomFieldType } from '../../models';
 
 export interface FilterChangedEvent {
   filter: SearchFilter | undefined;
@@ -22,7 +29,53 @@ export interface FilterChangedEvent {
 
 export interface AvailableFilter {
   name: string;
-  type: CustomFieldType;
+  type: CustomFieldType | 'STATUS';
+}
+
+function coordinateBoxValidator(control: AbstractControl): ValidationErrors | null {
+  const val = control.value;
+  if (!val || typeof val !== 'object') {
+    return { invalidBoundingBox: true };
+  }
+  const box = val as Record<string, unknown>;
+  const keys = ['min_lat', 'max_lat', 'min_lng', 'max_lng'] as const;
+  const nums: Record<(typeof keys)[number], number> = {
+    min_lat: NaN,
+    max_lat: NaN,
+    min_lng: NaN,
+    max_lng: NaN,
+  };
+
+  for (const key of keys) {
+    const raw = box[key];
+    if (raw === '' || raw === null || raw === undefined) {
+      return { invalidBoundingBox: true };
+    }
+    const num = typeof raw === 'number' ? raw : Number(raw);
+    if (!Number.isFinite(num)) {
+      return { invalidBoundingBox: true };
+    }
+    nums[key] = num;
+  }
+
+  if (
+    nums.min_lat < -90 ||
+    nums.min_lat > 90 ||
+    nums.max_lat < -90 ||
+    nums.max_lat > 90 ||
+    nums.min_lng < -180 ||
+    nums.min_lng > 180 ||
+    nums.max_lng < -180 ||
+    nums.max_lng > 180
+  ) {
+    return { invalidBoundingBox: true };
+  }
+
+  if (nums.min_lat > nums.max_lat) {
+    return { invalidBoundingBox: true };
+  }
+
+  return null;
 }
 
 /**
@@ -67,7 +120,10 @@ export class EntryFilterComponent implements OnInit, OnChanges, OnDestroy {
     private cdr: ChangeDetectorRef,
   ) {
     this.filterForm = this.fb.group({
-      limitPerPage: [200, [Validators.required, Validators.min(1)]],
+      limitPerPage: [
+        200,
+        [Validators.required, Validators.min(1), Validators.max(999), Validators.pattern(/^\d+$/)],
+      ],
       tstart: [''],
       tend: [''],
       customFilters: this.fb.array([]),
@@ -165,13 +221,25 @@ export class EntryFilterComponent implements OnInit, OnChanges, OnDestroy {
         const defaultOp = rowMeta.operators[0] || '=';
         newGroup.get('operator')?.setValue(defaultOp);
 
-        if (fieldType === 'BOOLEAN') {
-          newGroup.get('value')?.setValue('true');
-        } else if (fieldType === 'COORDINATE') {
-          newGroup.get('value')?.setValue({ min_lat: '', max_lat: '', min_lng: '', max_lng: '' });
+        const valueControl = newGroup.get('value');
+        if (fieldType === 'COORDINATE') {
+          valueControl?.setValidators([coordinateBoxValidator]);
+          valueControl?.setValue({ min_lat: '', max_lat: '', min_lng: '', max_lng: '' });
         } else {
-          newGroup.get('value')?.setValue('');
+          if (fieldType === 'INTEGER') {
+            valueControl?.setValidators([Validators.required, Validators.pattern(/^-?\d+$/)]);
+          } else {
+            valueControl?.setValidators([Validators.required]);
+          }
+          if (fieldType === 'BOOLEAN') {
+            valueControl?.setValue('true');
+          } else if (fieldType === 'STATUS') {
+            valueControl?.setValue('ready');
+          } else {
+            valueControl?.setValue('');
+          }
         }
+        valueControl?.updateValueAndValidity();
       });
 
     this.customFilters.push(newGroup);
@@ -206,7 +274,7 @@ export class EntryFilterComponent implements OnInit, OnChanges, OnDestroy {
     });
     this.filterRows = [];
     this.customFilters.clear();
-    this.filterForm.patchValue({ tstart: '', tend: '' });
+    this.filterForm.patchValue({ limitPerPage: 200, tstart: '', tend: '' });
     this.recomputeActiveFilters();
   }
 
@@ -227,7 +295,7 @@ export class EntryFilterComponent implements OnInit, OnChanges, OnDestroy {
 
   private buildFilterEvent(): FilterChangedEvent {
     const formValue = this.filterForm.value;
-    const conditions: SearchFilter[] = [];
+    const conditions: SearchCondition[] = [];
 
     // 1. Time Filters
     if (formValue.tstart) {
@@ -345,6 +413,7 @@ export class EntryFilterComponent implements OnInit, OnChanges, OnDestroy {
       case 'REAL':
         return ['=', '!=', '>', '>=', '<', '<='];
       case 'BOOLEAN':
+      case 'STATUS':
         return ['=', '!='];
       case 'TEXT':
         return ['=', '!=', 'LIKE'];
@@ -366,12 +435,16 @@ export class EntryFilterComponent implements OnInit, OnChanges, OnDestroy {
     event: Event,
   ): void {
     const input = event.target as HTMLInputElement;
-    const current = this.customFilters.at(index)?.get('value')?.value || {};
+    const valueControl = this.customFilters.at(index)?.get('value');
+    const current = valueControl?.value || {};
+    const trimmed = input.value.trim();
+    const parsed = trimmed === '' ? '' : Number(trimmed);
     const updated = {
       ...current,
-      [key]: input.value !== '' ? Number(input.value) : '',
+      [key]: trimmed !== '' && Number.isFinite(parsed) ? parsed : trimmed,
     };
-    this.customFilters.at(index)?.get('value')?.setValue(updated);
+    valueControl?.setValue(updated);
+    valueControl?.markAsTouched();
   }
 
   private getSelectedFieldTypeForGroup(group: AbstractControl | null): string | null {

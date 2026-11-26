@@ -71,7 +71,14 @@ function handle401Error(
     // refresh means the session is dead; an error from the retried request below
     // must reach the caller untouched instead of logging the user out.
     catchError((err) => {
-      authService.logout(false); // Logout locally without hitting API (since tokens are dead)
+      // FE-010: only clear the session locally when the refresh failure indicates
+      // an invalid/dead session; preserve it on transient errors (status 0, 5xx, 429).
+      if (
+        (err instanceof HttpErrorResponse && (err.status === 401 || err.status === 403)) ||
+        (err instanceof Error && err.message === 'No refresh token available')
+      ) {
+        authService.logout(false); // Logout locally without hitting API (since tokens are dead)
+      }
       return throwError(() => err);
     }),
     switchMap((tokenResponse: TokenResponse) => {

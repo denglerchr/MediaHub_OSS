@@ -78,6 +78,7 @@ export class AdminGlobalKeysComponent implements OnInit, OnDestroy {
     this.modalService
       .open(ConfirmationModalComponent.MODAL_ID, modalData)
       .pipe(
+        takeUntil(this.destroy$),
         take(1),
         filter((isConfirmed) => isConfirmed === true),
       )
@@ -98,10 +99,6 @@ export class AdminGlobalKeysComponent implements OnInit, OnDestroy {
       });
   }
 
-  trackByKeyId(index: number, key: ApiKey): string {
-    return key.id;
-  }
-
   public openEditKeyModal(key: ApiKey): void {
     const ownerId = key.user?.id;
     if (!ownerId) {
@@ -111,7 +108,7 @@ export class AdminGlobalKeysComponent implements OnInit, OnDestroy {
 
     this.modalService
       .open(ApiKeyModalComponent.MODAL_ID, { userId: ownerId, apiKey: key })
-      .pipe(take(1))
+      .pipe(takeUntil(this.destroy$), take(1))
       .subscribe((updated) => {
         if (updated) {
           this.loadGlobalKeys();

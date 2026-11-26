@@ -1,5 +1,7 @@
 package repository
 
+import "strings"
+
 // EntryStatus represents the status of a database media entry.
 type EntryStatus uint8
 
@@ -11,6 +13,24 @@ const (
 	EntryStatusDeleting   EntryStatus = 0x03
 	EntryStatusQueued     EntryStatus = 0x04
 )
+
+// ParseEntryStatus parses a status name (trimmed, case-insensitive) into an EntryStatus.
+func ParseEntryStatus(s string) (EntryStatus, bool) {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "ready":
+		return EntryStatusReady, true
+	case "processing":
+		return EntryStatusProcessing, true
+	case "error":
+		return EntryStatusError, true
+	case "deleting":
+		return EntryStatusDeleting, true
+	case "queued":
+		return EntryStatusQueued, true
+	default:
+		return 0, false
+	}
+}
 
 // GetAllEntryStatuses provides a centralized list of all valid statuses.
 func GetAllEntryStatuses() []EntryStatus {

@@ -8,19 +8,23 @@
 </div>
 
 <div
-  *ngIf="toast"
-  [@toastAnimation]
-  class="toast-notification"
-  role="status"
-  aria-live="polite"
-  [ngClass]="{
-    'toast-success': toast.type === 'success',
-    'toast-error': toast.type === 'error',
-    'toast-info': toast.type === 'info',
-  }"
+  class="toast-live-region"
+  [attr.role]="toast?.type === 'error' ? 'alert' : 'status'"
+  [attr.aria-live]="toast?.type === 'error' ? 'assertive' : 'polite'"
 >
-  <span>{{ toast.message }}</span>
-  <button (click)="clearToast()" class="close-btn" aria-label="Dismiss notification">
-    &times;
-  </button>
+  <div
+    *ngIf="toast"
+    [@toastAnimation]
+    class="toast-notification"
+    [ngClass]="{
+      'toast-success': toast.type === 'success',
+      'toast-error': toast.type === 'error',
+      'toast-info': toast.type === 'info',
+    }"
+  >
+    <span>{{ toast.message }}</span>
+    <button (click)="clearToast()" class="close-btn" aria-label="Dismiss notification">
+      &times;
+    </button>
+  </div>
 </div>

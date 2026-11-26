@@ -5,7 +5,7 @@ import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { NO_ERRORS_SCHEMA } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { ActivatedRoute, convertToParamMap } from '@angular/router';
-import { defer, of, Subject, throwError } from 'rxjs';
+import { defer, merge, of, Subject, throwError } from 'rxjs';
 import { EntryListComponent } from './entry-list.component';
 import { DatabaseService } from '../../services/database.service';
 import { EntryService } from '../../services/entry.service';
@@ -20,7 +20,11 @@ describe('EntryListComponent — FE-012/FE-015/FE-021 regressions', () => {
   let searchSpy: jasmine.Spy;
   let selectDatabaseSpy: jasmine.Spy;
   let refreshListSpy: jasmine.Spy;
+  let bulkDeleteSpy: jasmine.Spy;
+  let bulkExportSpy: jasmine.Spy;
   let entryCreatedSubject: Subject<Entry>;
+  let entryUpdatedSubject: Subject<Entry>;
+  let paramMapSubject: Subject<ReturnType<typeof convertToParamMap>>;
   let user: User;
 
   const db = {
@@ -50,14 +54,22 @@ describe('EntryListComponent — FE-012/FE-015/FE-021 regressions', () => {
     searchSpy = jasmine.createSpy('searchEntries').and.returnValue(of([] as Entry[]));
     selectDatabaseSpy = jasmine.createSpy('selectDatabase').and.returnValue(of(db));
     refreshListSpy = jasmine.createSpy('triggerImageListRefresh');
+    bulkDeleteSpy = jasmine.createSpy('bulkDeleteEntries').and.returnValue(of({}));
+    bulkExportSpy = jasmine
+      .createSpy('bulkExportEntries')
+      .and.returnValue(of(new Blob(['zip'], { type: 'application/zip' })));
     entryCreatedSubject = new Subject<Entry>();
+    entryUpdatedSubject = new Subject<Entry>();
+    paramMapSubject = new Subject();
 
     const entryServiceMock = {
       searchEntries: searchSpy,
       refreshRequired$: new Subject<void>(),
       entryCreated$: entryCreatedSubject.asObservable(),
-      entryUpdated$: new Subject<Entry>(),
+      entryUpdated$: entryUpdatedSubject.asObservable(),
       triggerImageListRefresh: refreshListSpy,
+      bulkDeleteEntries: bulkDeleteSpy,
+      bulkExportEntries: bulkExportSpy,
     };
 
     const databaseServiceMock = {
@@ -75,7 +87,12 @@ describe('EntryListComponent — FE-012/FE-015/FE-021 regressions', () => {
       imports: [CommonModule],
       schemas: [NO_ERRORS_SCHEMA], // child components are not under test
       providers: [
-        { provide: ActivatedRoute, useValue: { paramMap: of(convertToParamMap({ id: 'db1' })) } },
+        {
+          provide: ActivatedRoute,
+          useValue: {
+            paramMap: merge(of(convertToParamMap({ id: 'db1' })), paramMapSubject.asObservable()),
+          },
+        },
         { provide: DatabaseService, useValue: databaseServiceMock },
         { provide: EntryService, useValue: entryServiceMock },
         { provide: AuthService, useValue: authServiceMock },
@@ -251,5 +268,118 @@ describe('EntryListComponent — FE-012/FE-015/FE-021 regressions', () => {
     expect(modalSpy.open)
       .withContext('the upload UI must actually open for a can_create-only user')
       .toHaveBeenCalledWith('uploadEntryModal');
+  });
+
+  it('renders the Retry button in the DOM when selectDatabase fails (even though canView is false)', () => {
+    selectDatabaseSpy.and.returnValue(throwError(() => new Error('db fetch failed')));
+
+    component.ngOnInit();
+    fixture.detectChanges();
+
+    expect(component.canView).toBeFalse();
+    expect(component.loadError).toBeTrue();
+    const retryBtn: HTMLButtonElement | null =
+      Array.from(
+        fixture.nativeElement.querySelectorAll('button') as NodeListOf<HTMLButtonElement>,
+      ).find((b) => b.textContent?.includes('Retry')) ?? null;
+    expect(retryBtn)
+      .withContext('Retry button must be visible when selectDatabase fails')
+      .toBeTruthy();
+
+    selectDatabaseSpy.and.returnValue(of(db));
+    searchSpy.and.returnValue(of([makeEntry(10)]));
+    retryBtn!.click();
+    fixture.detectChanges();
+
+    expect(component.loadError).toBeFalse();
+    expect(component.entriesToShow.map((e) => e.id)).toEqual([10]);
+  });
+
+  it('ignores entryUpdated$ events from a different database on entry ID collision', () => {
+    searchSpy.and.returnValue(of([makeEntry(1)]));
+    component.ngOnInit();
+
+    entryUpdatedSubject.next({
+      ...makeEntry(1),
+      database_id: 'other-db',
+      filename: 'hijacked.jpg',
+    });
+
+    expect(component.entriesToShow[0].filename).toBe('file-1.jpg');
+  });
+
+  it('configures status filter with type STATUS', () => {
+    component.ngOnInit();
+
+    const statusFilter = component.availableFilters.find((f) => f.name === 'status');
+    expect(statusFilter).toEqual({ name: 'status', type: 'STATUS' });
+  });
+
+  it('opens fullscreen player synchronously when FullscreenSettingsModal closes with settings', () => {
+    component.ngOnInit();
+    const modalSpy = TestBed.inject(ModalService) as jasmine.SpyObj<ModalService>;
+    modalSpy.open.and.returnValue(
+      of({ delaySeconds: 10, entryLimit: 25, shuffle: false, repeat: true }),
+    );
+
+    component.openFullscreenSettingsModal();
+
+    expect(component.showFullscreenPlayer).toBeTrue();
+    expect(component.fullscreenSettings).toEqual({
+      delaySeconds: 10,
+      entryLimit: 25,
+      shuffle: false,
+      repeat: true,
+    });
+  });
+
+  it('caps entriesToShow to imagesPerPage and sets hasNextPage when entryCreated$ overflows page 1', () => {
+    component.imagesPerPage = 2;
+    searchSpy.and.returnValue(of([makeEntry(2), makeEntry(1)]));
+    component.ngOnInit();
+    component.imagesPerPage = 2;
+
+    entryCreatedSubject.next(makeEntry(3));
+
+    expect(component.entriesToShow.map((e) => e.id)).toEqual([3, 2]);
+    expect(component.hasNextPage).toBeTrue();
+  });
+
+  it('blocks bulk delete when a selected entry is still processing', () => {
+    const processingEntry = { ...makeEntry(1), status: 'processing' };
+    searchSpy.and.returnValue(of([processingEntry]));
+    component.ngOnInit();
+    component.selectedEntryIds = new Set([1]);
+
+    const notifSpy = TestBed.inject(NotificationService) as jasmine.SpyObj<NotificationService>;
+    const modalSpy = TestBed.inject(ModalService) as jasmine.SpyObj<ModalService>;
+
+    component.onBulkDelete();
+
+    expect(notifSpy.showError).toHaveBeenCalledWith('Cannot delete: entry 1 is still processing.');
+    expect(modalSpy.open).not.toHaveBeenCalled();
+  });
+
+  it('does not show a duplicate error toast when bulkExportEntries fails', () => {
+    bulkExportSpy.and.returnValue(throwError(() => new Error('Export failed')));
+    searchSpy.and.returnValue(of([makeEntry(1)]));
+    component.ngOnInit();
+    component.selectedEntryIds = new Set([1]);
+
+    const notifSpy = TestBed.inject(NotificationService) as jasmine.SpyObj<NotificationService>;
+    component.onBulkDownload();
+
+    expect(notifSpy.showError).not.toHaveBeenCalled();
+    expect(component.isBulkProcessing).toBeFalse();
+  });
+
+  it('resets imagesPerPage to 200 when the route database id changes', () => {
+    component.ngOnInit();
+    component.imagesPerPage = 50;
+
+    selectDatabaseSpy.and.returnValue(of({ ...db, id: 'db2', name: 'DB Two' } as Database));
+    paramMapSubject.next(convertToParamMap({ id: 'db2' }));
+
+    expect(component.imagesPerPage).toBe(200);
   });
 });

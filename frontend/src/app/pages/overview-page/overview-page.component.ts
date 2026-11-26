@@ -50,34 +50,54 @@ export class OverviewPageComponent implements OnInit, OnDestroy {
       this.cdr.markForCheck();
     });
 
-    this.databaseService.loadDatabases().subscribe();
+    this.databaseService
+      .loadDatabases()
+      .pipe(takeUntil(this.destroy$))
+      .subscribe({ error: () => {} });
   }
 
   private loadPreviews(): void {
     for (const db of this.databases) {
+      if (!this.authService.hasDatabasePermission(db.id, 'can_view')) {
+        continue;
+      }
+
       const entryCount = db.stats?.entry_count ?? 0;
+      if (entryCount <= 0) {
+        delete this.dbPreviews[db.id];
+        this.previewSearchCounts.delete(db.id);
+        this.failedPreviews.delete(db.id);
+        continue;
+      }
+
       // FE-034: only re-query the latest entry when the count actually changed.
-      if (entryCount <= 0 || this.previewSearchCounts.get(db.id) === entryCount) {
+      if (this.previewSearchCounts.get(db.id) === entryCount) {
         continue;
       }
       this.previewSearchCounts.set(db.id, entryCount);
 
       // Query the latest entry to use as preview
       this.entryService
-        .searchEntries(db.id, {
-          pagination: { limit: 1 },
-          sort: { field: 'timestamp', direction: 'desc' },
-        })
+        .searchEntries(
+          db.id,
+          {
+            pagination: { limit: 1 },
+            sort: { field: 'timestamp', direction: 'desc' },
+          },
+          { silent: true },
+        )
         .pipe(takeUntil(this.destroy$))
         .subscribe({
           next: (entries) => {
             if (entries && entries.length > 0) {
               const latestEntry = entries[0];
               this.dbPreviews[db.id] = this.entryService.getEntryPreviewUrl(db.id, latestEntry.id);
+              this.failedPreviews.delete(db.id);
             }
             this.cdr.markForCheck();
           },
           error: (err) => {
+            this.previewSearchCounts.delete(db.id);
             console.error(`Failed to load latest entry for database ${db.name}`, err);
           },
         });

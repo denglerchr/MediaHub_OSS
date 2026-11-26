@@ -104,6 +104,8 @@ export class EntryDetailModalComponent implements OnInit, OnDestroy {
             currentDb &&
             this.entryForMetadata &&
             entry.id === this.entryForMetadata.id &&
+            (entry.database_id ?? this.currentDatabase?.id) ===
+              (this.entryForMetadata.database_id ?? this.currentDatabase?.id) &&
             this.fileUrl &&
             !this.loadError
           ) {
@@ -118,6 +120,7 @@ export class EntryDetailModalComponent implements OnInit, OnDestroy {
           this.previewUrl = null;
           this.isLoadingFile = true;
           this.loadError = false;
+          this.isDownloading = false;
           // FE-011: fresh entry → fresh media-URL retry budget.
           this.mediaUrlRetries = 0;
           this.currentStreamUrl = null;
@@ -229,6 +232,7 @@ export class EntryDetailModalComponent implements OnInit, OnDestroy {
     this.previewUrl = null;
     this.isLoadingFile = true;
     this.loadError = false;
+    this.isDownloading = false;
     this.entryForMetadata = null;
     this.pendingEntry = null;
     this.entryService.clearSelectedEntry();
@@ -281,31 +285,38 @@ export class EntryDetailModalComponent implements OnInit, OnDestroy {
       return;
     }
 
+    const dbId = this.currentDatabase.id;
+    const entryId = this.entryForMetadata.id;
+
     const modalData: ConfirmationModalData = {
       title: 'Delete Entry',
-      message: `Are you sure you want to delete entry ${this.entryForMetadata.id}? This action cannot be undone.`,
+      message: `Are you sure you want to delete entry ${entryId}? This action cannot be undone.`,
     };
 
     this.modalService
       .open(ConfirmationModalComponent.MODAL_ID, modalData)
       .pipe(
         take(1),
+        takeUntil(this.destroy$),
         filter((confirmed) => confirmed === true),
       )
-      .subscribe(() => {
-        this.isLoadingFile = true;
+      .subscribe({
+        next: () => {
+          this.isLoadingFile = true;
 
-        this.entryService
-          .deleteEntry(this.currentDatabase!.id, this.entryForMetadata!.id)
-          .pipe(takeUntil(this.destroy$))
-          .subscribe({
-            next: () => {
-              this.closeModal();
-            },
-            error: () => {
-              this.isLoadingFile = false;
-            },
-          });
+          this.entryService
+            .deleteEntry(dbId, entryId)
+            .pipe(takeUntil(this.destroy$))
+            .subscribe({
+              next: () => {
+                this.closeModal();
+              },
+              error: () => {
+                this.isLoadingFile = false;
+              },
+            });
+        },
+        error: () => {},
       });
   }
 
@@ -399,15 +410,18 @@ export class EntryDetailModalComponent implements OnInit, OnDestroy {
         }),
         takeUntil(this.destroy$),
       )
-      .subscribe((blob) => {
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = filename;
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-        URL.revokeObjectURL(url);
+      .subscribe({
+        next: (blob) => {
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = filename;
+          document.body.appendChild(a);
+          a.click();
+          document.body.removeChild(a);
+          setTimeout(() => URL.revokeObjectURL(url), 1000);
+        },
+        error: () => {},
       });
   }
 

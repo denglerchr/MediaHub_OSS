@@ -173,7 +173,9 @@ export class SecureImageDirective implements OnChanges, OnDestroy {
 
   private releaseInFlight(): void {
     if (this.inFlightUrl) {
-      this.release(this.inFlightUrl);
+      if (this.inFlightUrl !== this.displayedUrl) {
+        this.release(this.inFlightUrl);
+      }
       this.inFlightUrl = null;
     }
   }

@@ -21,34 +21,7 @@
   flex: 1;
 }
 
-/* FE-040: .badge hoisted to styles.css */
-.badge-user {
-  background-color: rgba(74, 85, 104, 0.3);
-  color: var(--text-secondary);
-  border: 1px solid rgba(74, 85, 104, 0.5);
-}
-
-.badge-sa {
-  background-color: rgba(66, 153, 225, 0.15);
-  color: var(--text-accent);
-  border: 1px solid rgba(66, 153, 225, 0.3);
-}
-
-.hint-code {
-  font-family: SFMono-Regular, Consolas, 'Liberation Mono', Menlo, monospace;
-  background-color: var(--input-bg);
-  padding: 0.15rem 0.4rem;
-  border-radius: 0.25rem;
-  color: var(--text-accent);
-  font-size: 0.85rem;
-  border: 1px solid var(--border-color);
-}
-
-/* Action button icons */
-/* FE-040: .btn-icon/.btn-icon:hover/.btn-icon-danger:hover hoisted to styles.css */
-
-.loading-state,
-.empty-state {
+.loading-state {
   padding: 2rem;
   color: var(--text-muted);
   text-align: center;

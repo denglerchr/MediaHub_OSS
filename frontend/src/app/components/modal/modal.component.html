@@ -1,4 +1,4 @@
-<div *ngIf="isOpen" class="modal-overlay" (click)="closeModal()">
+<div *ngIf="isOpen" class="modal-overlay" [style.zIndex]="overlayZIndex" (click)="closeModal()">
   <!-- FE-044: the dialog roles belong on the dialog itself (was on the backdrop);
        tabindex="-1" makes the dialog focusable for the initial-focus/restore logic. -->
   <div
@@ -6,6 +6,7 @@
     role="dialog"
     aria-modal="true"
     [attr.aria-labelledby]="modalId + '-title'"
+    [style.zIndex]="contentZIndex"
     tabindex="-1"
     #modalContent
     [class.modal-lg]="size === 'lg'"

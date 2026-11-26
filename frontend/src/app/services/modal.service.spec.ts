@@ -99,4 +99,27 @@ describe('ModalService — FE-019 regressions', () => {
     service.close<Settings>('settingsModal', { delaySeconds: 20 });
     expect(received.settings).toEqual({ delaySeconds: 20 });
   });
+
+  it('tracks open modal stacking order via getStackIndex', () => {
+    expect(service.getStackIndex('modalA')).toBe(-1);
+
+    service.open<boolean>('modalA');
+    expect(service.getStackIndex('modalA')).toBe(0);
+
+    service.open<boolean>('modalB');
+    expect(service.getStackIndex('modalA')).toBe(0);
+    expect(service.getStackIndex('modalB')).toBe(1);
+
+    // Re-opening modalA moves it to the top of the stack
+    service.open<boolean>('modalA');
+    expect(service.getStackIndex('modalB')).toBe(0);
+    expect(service.getStackIndex('modalA')).toBe(1);
+
+    service.close('modalA');
+    expect(service.getStackIndex('modalA')).toBe(-1);
+    expect(service.getStackIndex('modalB')).toBe(0);
+
+    service.close('modalB');
+    expect(service.getStackIndex('modalB')).toBe(-1);
+  });
 });

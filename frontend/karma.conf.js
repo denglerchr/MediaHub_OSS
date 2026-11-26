@@ -47,7 +47,6 @@ module.exports = function (config) {
         flags: ['-headless']
       }
     },
-    restartOnFileChange: true,
-    singleRun: true
+    restartOnFileChange: true
   });
 };
