@@ -52,6 +52,9 @@ func (p *Processor) ProcessIncomingEntry(
 	if err != nil {
 		return repo.Entry{}, false, err
 	}
+	if len(req.CustomPreview) > 0 {
+		plan.WantsPreview = false
+	}
 
 	// The HTTP layer spools uploads larger than max_sync_upload_size to disk;
 	// those arrive as *os.File and are processed asynchronously.
@@ -237,7 +240,7 @@ func (p *Processor) processAsynchronously(
 			p.unreserveAsyncSlot()
 		}
 		os.Remove(workerTempPath)
-		p.discardPreliminaryEntry(ctx, db.ID, createdEntry.ID, false)
+		p.discardPreliminaryEntry(ctx, db.ID, createdEntry.ID, createdEntry.PreviewSize > 0)
 		return repo.Entry{}, customerrors.ErrUnavailable
 	}
 
@@ -329,6 +332,7 @@ func (p *Processor) discardPreliminaryEntry(ctx context.Context, dbID repo.ULID,
 	defer cancel()
 	if deleteStorage {
 		_ = p.Storage.Delete(cleanupCtx, dbID, entryID)
+		_ = p.Storage.DeletePreview(cleanupCtx, dbID, entryID)
 	}
 	if _, delErr := p.Repo.DeleteEntry(cleanupCtx, dbID, entryID); delErr != nil {
 		_ = p.Repo.UpdateEntriesStatus(cleanupCtx, dbID, []int64{entryID}, repo.EntryStatusError)
@@ -418,7 +422,9 @@ func (p *Processor) failUploadEntry(ctx context.Context, db repo.Database, entry
 	cleanupCtx, cancel := cleanupContext(ctx)
 	defer cancel()
 	_ = p.Storage.Delete(cleanupCtx, db.ID, entry.ID)
+	_ = p.Storage.DeletePreview(cleanupCtx, db.ID, entry.ID)
 	entry.Size = 0
+	entry.PreviewSize = 0
 	entry.Status = repo.EntryStatusError
 	_, _ = p.Repo.UpdateEntry(cleanupCtx, db.ID, entry)
 }

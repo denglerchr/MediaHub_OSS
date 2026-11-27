@@ -3,6 +3,7 @@ package entryhandler
 import (
 	"errors"
 	"mediahub_oss/internal/httpserver/utils"
+	"mediahub_oss/internal/media"
 	"mediahub_oss/internal/processing"
 	"mediahub_oss/internal/shared/customerrors"
 	"net/http"
@@ -11,23 +12,30 @@ import (
 // @Summary Upload an entry
 // @Description Uploads a new entry to a specified database using multipart/form-data. The metadata part should be a JSON object containing the entry's timestamp, and any custom fields.
 // @Description The 'file' part's 'filename' in the Content-Disposition header will be extracted and saved.
+// @Description An optional 'preview' part containing a valid WebP image (max 128 KiB, max 200x200 px) may be provided to override automatic preview generation.
 // @Description
 // @Description This endpoint uses a hybrid model:
 // @Description - **Small files (<= Configured Limit):** Processed synchronously. Returns `201 Created` with the full entry metadata.
-// @Description - **Large files (> Configured Limit):** Processed asynchronously. Returns `202 Accepted` with a partial response. The client should poll `GET /api/entry/meta` until the `status` field is 'ready'.
+// @Description - **Large files (> Configured Limit):** Processed asynchronously. Returns `202 Accepted` with a partial response. The client should poll `GET /api/database/{database_id}/entry/{id}` until the `status` field is 'ready'.
 // @Tags entry
 // @Accept  mpfd
 // @Produce  json
 // @Param   database_id  path  string  true  "Database ID"
 // @Param   metadata      formData  string  true  "JSON metadata for the entry"
 // @Param   file          formData  file    true  "Entry file"
+// @Param   preview       formData  file    false "Optional custom WebP preview (max 128 KiB, max 200x200 px)"
 // @Success 201 {object} EntryResponse "For small files (synchronous processing)"
 // @Success 202 {object} PartialEntryResponse "For large files (asynchronous processing)"
 // @Failure 400 {object} utils.ErrorResponse "Invalid request"
+// @Failure 401 {object} utils.ErrorResponse "Unauthorized"
+// @Failure 403 {object} utils.ErrorResponse "Forbidden"
 // @Failure 404 {object} utils.ErrorResponse "Database not found"
-// @Failure 415 {object} utils.ErrorResponse "Unsupported entry format"
+// @Failure 413 {object} utils.ErrorResponse "Preview payload too large"
+// @Failure 415 {object} utils.ErrorResponse "Unsupported entry or preview format"
 // @Failure 500 {object} utils.ErrorResponse "Internal server error"
+// @Failure 503 {object} utils.ErrorResponse "Service unavailable"
 // @Security BasicAuth
+// @Security BearerAuth
 // @Router /database/{database_id}/entry [post]
 func (h *EntryHandler) PostEntry(w http.ResponseWriter, r *http.Request) {
 	dbID, ok := parseDatabasePathParam(w, r)
@@ -88,11 +96,27 @@ func (h *EntryHandler) PostEntry(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	var customPreview []byte
+	previewFile, _, previewErr := r.FormFile("preview")
+	if previewErr == nil {
+		previewBytes, _, _, valErr := media.ReadAndValidatePreview(previewFile)
+		_ = previewFile.Close()
+		if valErr != nil {
+			respondPreviewValidationError(w, valErr)
+			return
+		}
+		customPreview = previewBytes
+	} else if !errors.Is(previewErr, http.ErrMissingFile) {
+		utils.RespondWithError(w, http.StatusBadRequest, "Failed to read 'preview' part in multipart form.")
+		return
+	}
+
 	// Call processor
 	procReq := processing.EntryRequest{
-		Timestamp:    entry_request.Timestamp,
-		FileName:     entry_request.FileName,
-		CustomFields: entry_request.CustomFields,
+		Timestamp:     entry_request.Timestamp,
+		FileName:      entry_request.FileName,
+		CustomFields:  entry_request.CustomFields,
+		CustomPreview: customPreview,
 	}
 
 	originalMime := header.Header.Get("Content-Type")

@@ -11,6 +11,7 @@ import (
 	"mediahub_oss/internal/repository/sqlite"
 	"mediahub_oss/internal/shared"
 	"mediahub_oss/internal/shared/customerrors"
+	"mediahub_oss/internal/shared/ulid"
 )
 
 func TestCreateEntry_ZeroTimestamp(t *testing.T) {
@@ -1313,4 +1314,248 @@ func TestSQLite_GetEntries_IDRange(t *testing.T) {
 	if _, err := r.GetEntries(ctx, db.ID, repo.QueryOptions{IDStart: 4, IDEnd: 2}); err == nil {
 		t.Fatalf("expected error for inverted IDStart/IDEnd range, got nil")
 	}
+}
+
+func TestGetEntryPreviewState(t *testing.T) {
+	ctx := context.Background()
+
+	r, err := sqlite.NewRepository(":memory:")
+	if err != nil {
+		t.Fatalf("failed to create repo: %v", err)
+	}
+	defer r.Close()
+
+	if err := r.MigrateUp(ctx); err != nil {
+		t.Fatalf("failed to run migrations: %v", err)
+	}
+
+	db, err := r.CreateDatabase(ctx, repo.Database{
+		Name:        "preview_state_db",
+		ContentType: "image",
+	})
+	if err != nil {
+		t.Fatalf("failed to create database: %v", err)
+	}
+
+	// 1. Missing database -> ErrNotFound
+	missingDBID := ulid.New()
+	if _, err := r.GetEntryPreviewState(ctx, missingDBID, 1); !errors.Is(err, customerrors.ErrNotFound) {
+		t.Fatalf("expected ErrNotFound for missing DB, got: %v", err)
+	}
+
+	// 2. Missing entry -> ErrNotFound
+	if _, err := r.GetEntryPreviewState(ctx, db.ID, 99999); !errors.Is(err, customerrors.ErrNotFound) {
+		t.Fatalf("expected ErrNotFound for missing entry, got: %v", err)
+	}
+
+	// 3. Valid entry state
+	created, err := r.CreateEntry(ctx, db, repo.Entry{
+		FileName:    "photo.jpg",
+		MimeType:    "image/jpeg",
+		Size:        2048,
+		PreviewSize: 512,
+		Status:      repo.EntryStatusReady,
+		MediaFields: map[string]any{"width": 800, "height": 600},
+	})
+	if err != nil {
+		t.Fatalf("CreateEntry failed: %v", err)
+	}
+
+	state, err := r.GetEntryPreviewState(ctx, db.ID, created.ID)
+	if err != nil {
+		t.Fatalf("GetEntryPreviewState failed: %v", err)
+	}
+	if state.Status != repo.EntryStatusReady {
+		t.Errorf("expected Status %v, got %v", repo.EntryStatusReady, state.Status)
+	}
+	if state.PreviewSize != 512 {
+		t.Errorf("expected PreviewSize 512, got %d", state.PreviewSize)
+	}
+	if state.UpdatedAt.IsZero() || state.UpdatedAt.UnixMilli() != created.UpdatedAt.UnixMilli() {
+		t.Errorf("expected UpdatedAt %v, got %v", created.UpdatedAt, state.UpdatedAt)
+	}
+}
+
+func TestUpdateEntryPreviewSize(t *testing.T) {
+	ctx := context.Background()
+
+	r, err := sqlite.NewRepository(":memory:")
+	if err != nil {
+		t.Fatalf("failed to create repo: %v", err)
+	}
+	defer r.Close()
+
+	if err := r.MigrateUp(ctx); err != nil {
+		t.Fatalf("failed to run migrations: %v", err)
+	}
+
+	db, err := r.CreateDatabase(ctx, repo.Database{
+		Name:        "preview_update_db",
+		ContentType: "image",
+	})
+	if err != nil {
+		t.Fatalf("failed to create database: %v", err)
+	}
+
+	// 1. Missing DB -> ErrNotFound
+	missingDBID := ulid.New()
+	if _, _, err := r.UpdateEntryPreviewSize(ctx, missingDBID, 1, 500, repo.PreviewUpdateUpsert); !errors.Is(err, customerrors.ErrNotFound) {
+		t.Fatalf("expected ErrNotFound for missing DB, got: %v", err)
+	}
+
+	// 2. Missing entry -> ErrNotFound
+	if _, _, err := r.UpdateEntryPreviewSize(ctx, db.ID, 99999, 500, repo.PreviewUpdateUpsert); !errors.Is(err, customerrors.ErrNotFound) {
+		t.Fatalf("expected ErrNotFound for missing entry, got: %v", err)
+	}
+
+	// Create main entry with size 1000 and preview_filesize 0
+	entry, err := r.CreateEntry(ctx, db, repo.Entry{
+		FileName:    "img.jpg",
+		MimeType:    "image/jpeg",
+		Size:        1000,
+		PreviewSize: 0,
+		Status:      repo.EntryStatusReady,
+		MediaFields: map[string]any{"width": 100, "height": 100},
+	})
+	if err != nil {
+		t.Fatalf("CreateEntry failed: %v", err)
+	}
+
+	assertDiskSpace := func(want uint64) {
+		t.Helper()
+		stats, err := r.GetDatabaseStats(ctx, db.ID)
+		if err != nil {
+			t.Fatalf("GetDatabaseStats failed: %v", err)
+		}
+		if stats.TotalDiskSpaceBytes != want {
+			t.Fatalf("TotalDiskSpaceBytes = %d, want %d", stats.TotalDiskSpaceBytes, want)
+		}
+	}
+
+	assertDiskSpace(1000)
+
+	// 3. PreviewUpdateCreateOnly: 0 -> 500 succeeds (+500 disk)
+	prevUpdated := entry.UpdatedAt
+	time.Sleep(5 * time.Millisecond)
+
+	state, oldSize, err := r.UpdateEntryPreviewSize(ctx, db.ID, entry.ID, 500, repo.PreviewUpdateCreateOnly)
+	if err != nil {
+		t.Fatalf("CreateOnly 0->500 failed: %v", err)
+	}
+	if oldSize != 0 || state.PreviewSize != 500 || state.Status != repo.EntryStatusReady {
+		t.Fatalf("unexpected state/oldSize after CreateOnly: state=%+v, oldSize=%d", state, oldSize)
+	}
+	if !state.UpdatedAt.After(prevUpdated) {
+		t.Errorf("expected UpdatedAt (%v) to advance past %v", state.UpdatedAt, prevUpdated)
+	}
+	assertDiskSpace(1500)
+
+	// Calling CreateOnly again (500 -> 600) returns ErrConflict without modifying DB or stats
+	if _, _, err := r.UpdateEntryPreviewSize(ctx, db.ID, entry.ID, 600, repo.PreviewUpdateCreateOnly); !errors.Is(err, customerrors.ErrConflict) {
+		t.Fatalf("expected ErrConflict on CreateOnly when preview already exists, got: %v", err)
+	}
+	assertDiskSpace(1500)
+	gotState, err := r.GetEntryPreviewState(ctx, db.ID, entry.ID)
+	if err != nil {
+		t.Fatalf("GetEntryPreviewState failed: %v", err)
+	}
+	if gotState.PreviewSize != 500 || gotState.UpdatedAt.UnixMilli() != state.UpdatedAt.UnixMilli() {
+		t.Fatalf("expected unchanged state after conflict, got: %+v", gotState)
+	}
+
+	// 4. PreviewUpdateUpsert: 500 -> 800 (+300 disk)
+	prevUpdated = state.UpdatedAt
+	time.Sleep(5 * time.Millisecond)
+	state, oldSize, err = r.UpdateEntryPreviewSize(ctx, db.ID, entry.ID, 800, repo.PreviewUpdateUpsert)
+	if err != nil {
+		t.Fatalf("Upsert 500->800 failed: %v", err)
+	}
+	if oldSize != 500 || state.PreviewSize != 800 {
+		t.Fatalf("unexpected state/oldSize after Upsert 500->800: state=%+v, oldSize=%d", state, oldSize)
+	}
+	if !state.UpdatedAt.After(prevUpdated) {
+		t.Errorf("expected UpdatedAt (%v) to advance past %v", state.UpdatedAt, prevUpdated)
+	}
+	assertDiskSpace(1800)
+
+	// PreviewUpdateUpsert: 800 -> 300 (-500 disk)
+	state, oldSize, err = r.UpdateEntryPreviewSize(ctx, db.ID, entry.ID, 300, repo.PreviewUpdateUpsert)
+	if err != nil {
+		t.Fatalf("Upsert 800->300 failed: %v", err)
+	}
+	if oldSize != 800 || state.PreviewSize != 300 {
+		t.Fatalf("unexpected state/oldSize after Upsert 800->300: state=%+v, oldSize=%d", state, oldSize)
+	}
+	assertDiskSpace(1300)
+
+	// 5. PreviewUpdateDeleteOnly: 300 -> 0 (-300 disk)
+	prevUpdated = state.UpdatedAt
+	time.Sleep(5 * time.Millisecond)
+	state, oldSize, err = r.UpdateEntryPreviewSize(ctx, db.ID, entry.ID, 0, repo.PreviewUpdateDeleteOnly)
+	if err != nil {
+		t.Fatalf("DeleteOnly 300->0 failed: %v", err)
+	}
+	if oldSize != 300 || state.PreviewSize != 0 {
+		t.Fatalf("unexpected state/oldSize after DeleteOnly 300->0: state=%+v, oldSize=%d", state, oldSize)
+	}
+	if !state.UpdatedAt.After(prevUpdated) {
+		t.Errorf("expected UpdatedAt (%v) to advance past %v", state.UpdatedAt, prevUpdated)
+	}
+	assertDiskSpace(1000)
+
+	// Calling DeleteOnly again (0 -> 0) returns ErrNotFound
+	if _, _, err := r.UpdateEntryPreviewSize(ctx, db.ID, entry.ID, 0, repo.PreviewUpdateDeleteOnly); !errors.Is(err, customerrors.ErrNotFound) {
+		t.Fatalf("expected ErrNotFound on DeleteOnly when preview_filesize == 0, got: %v", err)
+	}
+	assertDiskSpace(1000)
+
+	// PreviewUpdateUpsert from 0 -> 500 creates (+500 disk)
+	state, oldSize, err = r.UpdateEntryPreviewSize(ctx, db.ID, entry.ID, 500, repo.PreviewUpdateUpsert)
+	if err != nil {
+		t.Fatalf("Upsert 0->500 failed: %v", err)
+	}
+	if oldSize != 0 || state.PreviewSize != 500 {
+		t.Fatalf("unexpected state/oldSize after Upsert 0->500: state=%+v, oldSize=%d", state, oldSize)
+	}
+	assertDiskSpace(1500)
+
+	// 6. Status guards: Processing, Queued, Deleting return ErrConflict across all modes
+	blockedStatuses := []repo.EntryStatus{
+		repo.EntryStatusProcessing,
+		repo.EntryStatusQueued,
+		repo.EntryStatusDeleting,
+	}
+	modes := []struct {
+		name string
+		mode repo.PreviewUpdateMode
+		size uint64
+	}{
+		{"CreateOnly", repo.PreviewUpdateCreateOnly, 200},
+		{"Upsert", repo.PreviewUpdateUpsert, 200},
+		{"DeleteOnly", repo.PreviewUpdateDeleteOnly, 0},
+	}
+
+	for _, st := range blockedStatuses {
+		if err := r.UpdateEntriesStatus(ctx, db.ID, []int64{entry.ID}, st); err != nil {
+			t.Fatalf("UpdateEntriesStatus(%v) failed: %v", st, err)
+		}
+		for _, m := range modes {
+			if _, _, err := r.UpdateEntryPreviewSize(ctx, db.ID, entry.ID, m.size, m.mode); !errors.Is(err, customerrors.ErrConflict) {
+				t.Fatalf("status=%v mode=%s: expected ErrConflict, got %v", st, m.name, err)
+			}
+		}
+	}
+
+	// 7. EntryStatusError is allowed
+	if err := r.UpdateEntriesStatus(ctx, db.ID, []int64{entry.ID}, repo.EntryStatusError); err != nil {
+		t.Fatalf("UpdateEntriesStatus(Error) failed: %v", err)
+	}
+	state, oldSize, err = r.UpdateEntryPreviewSize(ctx, db.ID, entry.ID, 700, repo.PreviewUpdateUpsert)
+	if err != nil {
+		t.Fatalf("UpdateEntryPreviewSize with EntryStatusError failed: %v", err)
+	}
+	if oldSize != 500 || state.PreviewSize != 700 || state.Status != repo.EntryStatusError {
+		t.Fatalf("unexpected result for EntryStatusError: state=%+v, oldSize=%d", state, oldSize)
+	}
+	assertDiskSpace(1700)
 }

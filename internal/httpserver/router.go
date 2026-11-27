@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"mediahub_oss/internal/httpserver/auth"
+	"mediahub_oss/internal/httpserver/swagger"
 	repo "mediahub_oss/internal/repository"
 	"net/http"
 	"strings"
@@ -16,7 +17,7 @@ func SetupRouter(h *Handlers, frontendFS http.FileSystem, am *auth.AuthMiddlewar
 	// --- 1. Public Endpoints ---
 	mux.HandleFunc("GET /health", h.InfoHandler.HealthCheck)
 	mux.HandleFunc("GET /api/info", h.InfoHandler.GetInfo)
-	mux.Handle("GET /swagger/", NewSwaggerHandler())
+	mux.Handle("GET /swagger/", swagger.NewHandler())
 
 	// --- 2. Public Token Endpoints ---
 	mux.HandleFunc("POST /api/token", h.TokenHandler.GetToken)
@@ -113,11 +114,14 @@ func addDatabaseRoutes(mux *http.ServeMux, h *Handlers, am *auth.AuthMiddleware)
 	// 4. Database Write Operations (CanCreate / CanEdit)
 	mux.Handle("POST /api/database/{database_id}/entry", ReqPerm(repo.AccessCreate, h.EntryHandler.PostEntry))
 	mux.Handle("PATCH /api/database/{database_id}/entry/{id}", ReqPerm(repo.AccessEdit, h.EntryHandler.PatchEntry))
+	mux.Handle("POST /api/database/{database_id}/entry/{id}/preview", ReqPerm(repo.AccessCreate, h.EntryHandler.PostEntryPreview))
+	mux.Handle("PUT /api/database/{database_id}/entry/{id}/preview", ReqPerm(repo.AccessEdit, h.EntryHandler.PutEntryPreview))
 
 	// 5. Database Delete Operations (CanDelete)
 	mux.Handle("POST /api/database/{database_id}/housekeeping", ReqPerm(repo.AccessDelete, h.DatabaseHandler.TriggerHousekeeping))
 	mux.Handle("POST /api/database/{database_id}/entries/delete", ReqPerm(repo.AccessDelete, h.EntryHandler.DeleteEntries))
 	mux.Handle("DELETE /api/database/{database_id}/entry/{id}", ReqPerm(repo.AccessDelete, h.EntryHandler.DeleteEntry))
+	mux.Handle("DELETE /api/database/{database_id}/entry/{id}/preview", ReqPerm(repo.AccessDelete, h.EntryHandler.DeleteEntryPreview))
 }
 
 // respondJSON404 writes a minimal JSON 404 error, matching the documented error

@@ -127,6 +127,22 @@ type DeletedEntryMeta struct {
 	PreviewSize uint64
 }
 
+// PreviewUpdateMode controls how UpdateEntryPreviewSize validates pre-existing preview state.
+type PreviewUpdateMode uint8
+
+const (
+	PreviewUpdateUpsert     PreviewUpdateMode = iota // Create or replace regardless of prior preview_filesize
+	PreviewUpdateCreateOnly                          // Succeed only if preview_filesize == 0 (else customerrors.ErrConflict)
+	PreviewUpdateDeleteOnly                          // Succeed only if preview_filesize > 0 (else customerrors.ErrNotFound)
+)
+
+// PreviewState represents the current status and preview metadata of an entry.
+type PreviewState struct {
+	Status      EntryStatus
+	PreviewSize uint64
+	UpdatedAt   time.Time
+}
+
 type AuditLog struct {
 	ID        int64     // created by the database upon writing
 	Timestamp time.Time // timestamp created by the database upon writing

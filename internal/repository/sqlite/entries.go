@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"time"
 
@@ -797,4 +798,144 @@ func (r *SQLiteRepository) CountEntriesByStatus(ctx context.Context, dbID repo.U
 	}
 
 	return count, nil
+}
+
+// GetEntryPreviewState retrieves the current status, preview size, and updated timestamp of an entry.
+func (r *SQLiteRepository) GetEntryPreviewState(ctx context.Context, dbID repo.ULID, id int64) (repo.PreviewState, error) {
+	var exists int
+	err := r.DB.QueryRowContext(ctx, "SELECT 1 FROM databases WHERE id = ?", dbID).Scan(&exists)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return repo.PreviewState{}, customerrors.ErrNotFound
+		}
+		return repo.PreviewState{}, fmt.Errorf("failed to check database existence: %w", err)
+	}
+
+	tableName := fmt.Sprintf(`"entries_%s"`, dbID.String())
+	query, args, err := r.Builder.Select("status", "preview_filesize", "updated_at").
+		From(tableName).
+		Where(squirrel.Eq{"id": id}).
+		ToSql()
+	if err != nil {
+		return repo.PreviewState{}, fmt.Errorf("failed to build preview state query: %w", err)
+	}
+
+	var status repo.EntryStatus
+	var previewSize uint64
+	var updatedMillis int64
+	err = r.DB.QueryRowContext(ctx, query, args...).Scan(&status, &previewSize, &updatedMillis)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) || strings.Contains(strings.ToLower(err.Error()), "no such table") {
+			return repo.PreviewState{}, customerrors.ErrNotFound
+		}
+		return repo.PreviewState{}, fmt.Errorf("failed to query entry preview state: %w", err)
+	}
+
+	return repo.PreviewState{
+		Status:      status,
+		PreviewSize: previewSize,
+		UpdatedAt:   time.UnixMilli(updatedMillis),
+	}, nil
+}
+
+// UpdateEntryPreviewSize atomically validates entry status and preview update mode,
+// updates preview_filesize and updated_at, and adjusts the parent database's total_disk_space_bytes.
+func (r *SQLiteRepository) UpdateEntryPreviewSize(ctx context.Context, dbID repo.ULID, id int64, newPreviewSize uint64, mode repo.PreviewUpdateMode) (repo.PreviewState, uint64, error) {
+	switch mode {
+	case repo.PreviewUpdateUpsert, repo.PreviewUpdateCreateOnly:
+	case repo.PreviewUpdateDeleteOnly:
+		if newPreviewSize != 0 {
+			return repo.PreviewState{}, 0, fmt.Errorf("%w: newPreviewSize must be 0 in delete-only mode", customerrors.ErrValidation)
+		}
+	default:
+		return repo.PreviewState{}, 0, fmt.Errorf("%w: invalid preview update mode", customerrors.ErrValidation)
+	}
+	if newPreviewSize > math.MaxInt64 {
+		return repo.PreviewState{}, 0, fmt.Errorf("%w: preview size exceeds maximum supported int64", customerrors.ErrValidation)
+	}
+
+	tx, err := r.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return repo.PreviewState{}, 0, fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	var exists int
+	if err := tx.QueryRowContext(ctx, "SELECT 1 FROM databases WHERE id = ?", dbID).Scan(&exists); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return repo.PreviewState{}, 0, customerrors.ErrNotFound
+		}
+		return repo.PreviewState{}, 0, fmt.Errorf("failed to check database existence: %w", err)
+	}
+
+	tableName := fmt.Sprintf(`"entries_%s"`, dbID.String())
+	selectQuery, selectArgs, err := r.Builder.Select("status", "preview_filesize").
+		From(tableName).
+		Where(squirrel.Eq{"id": id}).
+		ToSql()
+	if err != nil {
+		return repo.PreviewState{}, 0, fmt.Errorf("failed to build preview select query: %w", err)
+	}
+
+	var status repo.EntryStatus
+	var oldPreviewSize uint64
+	if err := tx.QueryRowContext(ctx, selectQuery, selectArgs...).Scan(&status, &oldPreviewSize); err != nil {
+		if errors.Is(err, sql.ErrNoRows) || strings.Contains(strings.ToLower(err.Error()), "no such table") {
+			return repo.PreviewState{}, 0, customerrors.ErrNotFound
+		}
+		return repo.PreviewState{}, 0, fmt.Errorf("failed to query entry preview state: %w", err)
+	}
+
+	if status == repo.EntryStatusProcessing || status == repo.EntryStatusQueued || status == repo.EntryStatusDeleting {
+		return repo.PreviewState{}, 0, customerrors.ErrConflict
+	}
+
+	switch mode {
+	case repo.PreviewUpdateCreateOnly:
+		if oldPreviewSize > 0 {
+			return repo.PreviewState{}, 0, customerrors.ErrConflict
+		}
+	case repo.PreviewUpdateDeleteOnly:
+		if oldPreviewSize == 0 {
+			return repo.PreviewState{}, 0, customerrors.ErrNotFound
+		}
+	}
+
+	now := time.Now().UnixMilli()
+	updateQuery, updateArgs, err := r.Builder.Update(tableName).
+		Set("preview_filesize", newPreviewSize).
+		Set("updated_at", now).
+		Where(squirrel.Eq{"id": id}).
+		ToSql()
+	if err != nil {
+		return repo.PreviewState{}, 0, fmt.Errorf("failed to build preview update query: %w", err)
+	}
+
+	if _, err := tx.ExecContext(ctx, updateQuery, updateArgs...); err != nil {
+		return repo.PreviewState{}, 0, fmt.Errorf("failed to update entry preview size: %w", err)
+	}
+
+	delta := sqlutil.SignedSizeDelta(newPreviewSize, oldPreviewSize)
+	if delta != 0 {
+		statsQuery, statsArgs, err := r.Builder.Update("databases").
+			Set("total_disk_space_bytes", squirrel.Expr("MAX(0, total_disk_space_bytes + ?)", delta)).
+			Where(squirrel.Eq{"id": dbID}).
+			ToSql()
+		if err != nil {
+			return repo.PreviewState{}, 0, fmt.Errorf("failed to build stats update query: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, statsQuery, statsArgs...); err != nil {
+			return repo.PreviewState{}, 0, fmt.Errorf("failed to update database stats: %w", err)
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return repo.PreviewState{}, 0, fmt.Errorf("failed to commit transaction: %w", err)
+	}
+
+	return repo.PreviewState{
+		Status:      status,
+		PreviewSize: newPreviewSize,
+		UpdatedAt:   time.UnixMilli(now),
+	}, oldPreviewSize, nil
 }

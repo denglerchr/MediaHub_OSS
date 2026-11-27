@@ -72,6 +72,11 @@ type Repository interface {
 	UpdateEntriesStatus(ctx context.Context, dbID ULID, entryIDs []int64, status EntryStatus) error
 	ClaimQueuedEntry(ctx context.Context, dbID ULID, entryID int64) (bool, error)
 	CountEntriesByStatus(ctx context.Context, dbID ULID, status EntryStatus) (int64, error)
+	// GetEntryPreviewState retrieves the current status, preview size, and updated timestamp of an entry.
+	GetEntryPreviewState(ctx context.Context, dbID ULID, id int64) (PreviewState, error)
+	// UpdateEntryPreviewSize atomically validates entry status and preview update mode,
+	// updates preview_filesize and updated_at, and adjusts total_disk_space_bytes.
+	UpdateEntryPreviewSize(ctx context.Context, dbID ULID, id int64, newPreviewSize uint64, mode PreviewUpdateMode) (state PreviewState, oldPreviewSize uint64, err error)
 	DeleteEntry(ctx context.Context, dbID ULID, id int64) (DeletedEntryMeta, error)
 	DeleteEntries(ctx context.Context, dbID ULID, entryIDs []int64) ([]DeletedEntryMeta, error)
 	SearchEntries(ctx context.Context, dbID ULID, req SearchRequest, customFields []CustomFieldDef) ([]Entry, error)

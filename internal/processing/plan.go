@@ -106,7 +106,11 @@ func DetermineConversionPlan(mc media.MediaConverter, db repo.Database, original
 // stored in the database (e.g. a queued entry picked up by a worker). The MIME type
 // was validated at upload time, so no validation error can occur here.
 func DeterminePlanForEntry(mc media.MediaConverter, db repo.Database, entry repo.Entry) ProcessingPlan {
-	return determinePlan(mc, db, entry.MimeType, entry.FileName, "")
+	plan := determinePlan(mc, db, entry.MimeType, entry.FileName, "")
+	if entry.PreviewSize > 0 {
+		plan.WantsPreview = false
+	}
+	return plan
 }
 
 // GetExtensionForMimeType returns the preferred file extension for a given MIME type (e.g., ".opus")

@@ -85,7 +85,7 @@ func (p *Processor) finalizeEntryFile(
 	}
 
 	// 3. Generate preview
-	if plan.WantsPreview && plan.CanGenPreview {
+	if plan.WantsPreview && plan.CanGenPreview && entry.PreviewSize == 0 {
 		previewSize, err := p.generateAndStorePreview(ctx, db, entry.ID, func(ctx context.Context, w io.Writer) error {
 			return p.MediaConverter.CreatePreviewFromFile(ctx, currentPath, w, plan.ResultMimeType)
 		})

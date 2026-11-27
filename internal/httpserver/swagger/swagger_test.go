@@ -1,4 +1,4 @@
-package httpserver_test
+package swagger_test
 
 import (
 	"encoding/json"
@@ -8,11 +8,11 @@ import (
 	"testing"
 
 	_ "mediahub_oss/docs"
-	"mediahub_oss/internal/httpserver"
+	"mediahub_oss/internal/httpserver/swagger"
 )
 
-func TestSwaggerHandler(t *testing.T) {
-	handler := httpserver.NewSwaggerHandler()
+func TestHandler(t *testing.T) {
+	handler := swagger.NewHandler()
 
 	t.Run("redirects /swagger to /swagger/", func(t *testing.T) {
 		req := httptest.NewRequest(http.MethodGet, "/swagger", nil)
@@ -105,5 +105,85 @@ func TestSwaggerHandler(t *testing.T) {
 		if _, hasToken := doc.Paths["/token"]; !hasToken {
 			t.Fatalf("expected /token path in OpenAPI paths")
 		}
+
+		assertPreviewSwaggerPaths(t, rec.Body.Bytes())
 	})
+}
+
+func assertPreviewSwaggerPaths(t *testing.T, rawJSON []byte) {
+	t.Helper()
+
+	if strings.Contains(string(rawJSON), `"type":"file"`) || strings.Contains(string(rawJSON), `"type": "file"`) {
+		t.Fatalf("expected normalized OpenAPI 3.1 doc to contain no legacy type:\"file\" schema")
+	}
+
+	var doc struct {
+		Paths map[string]map[string]struct {
+			RequestBody *struct {
+				Required bool `json:"required"`
+				Content  map[string]struct {
+					Schema map[string]any `json:"schema"`
+				} `json:"content"`
+			} `json:"requestBody"`
+			Responses map[string]struct {
+				Content map[string]struct {
+					Schema map[string]any `json:"schema"`
+				} `json:"content"`
+			} `json:"responses"`
+			Security []map[string][]string `json:"security"`
+		} `json:"paths"`
+		Components struct {
+			Schemas map[string]any `json:"schemas"`
+		} `json:"components"`
+	}
+	if err := json.Unmarshal(rawJSON, &doc); err != nil {
+		t.Fatalf("failed to unmarshal OpenAPI JSON for preview checks: %v", err)
+	}
+
+	if _, ok := doc.Components.Schemas["entryhandler.PreviewUpdateResponse"]; !ok {
+		t.Fatalf("expected entryhandler.PreviewUpdateResponse in components.schemas")
+	}
+
+	previewOps, ok := doc.Paths["/database/{database_id}/entry/{id}/preview"]
+	if !ok {
+		t.Fatalf("expected /database/{database_id}/entry/{id}/preview in paths")
+	}
+
+	for _, method := range []string{"get", "post", "put", "delete"} {
+		op, ok := previewOps[method]
+		if !ok {
+			t.Fatalf("expected method %s on preview path", method)
+		}
+		hasBasic, hasBearer := false, false
+		for _, sec := range op.Security {
+			if _, ok := sec["BasicAuth"]; ok {
+				hasBasic = true
+			}
+			if _, ok := sec["BearerAuth"]; ok {
+				hasBearer = true
+			}
+		}
+		if !hasBasic || !hasBearer {
+			t.Fatalf("expected BasicAuth and BearerAuth security on %s preview op, got %+v", method, op.Security)
+		}
+	}
+
+	getResp := previewOps["get"].Responses["200"]
+	if webp, ok := getResp.Content["image/webp"]; !ok || webp.Schema["type"] != "string" || webp.Schema["format"] != "binary" {
+		t.Fatalf("expected GET preview 200 image/webp string/binary schema, got %+v", getResp.Content)
+	}
+	if js, ok := getResp.Content["application/json"]; !ok || js.Schema["$ref"] != "#/components/schemas/entryhandler.FileJSONResponse" {
+		t.Fatalf("expected GET preview 200 application/json FileJSONResponse ref, got %+v", getResp.Content)
+	}
+
+	for _, method := range []string{"post", "put"} {
+		rb := previewOps[method].RequestBody
+		if rb == nil || !rb.Required || len(rb.Content) != 1 {
+			t.Fatalf("expected required single-content requestBody on %s preview, got %+v", method, rb)
+		}
+		webp, ok := rb.Content["image/webp"]
+		if !ok || webp.Schema["type"] != "string" || webp.Schema["format"] != "binary" {
+			t.Fatalf("expected %s preview requestBody image/webp string/binary, got %+v", method, rb.Content)
+		}
+	}
 }

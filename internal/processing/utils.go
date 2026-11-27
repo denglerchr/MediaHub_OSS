@@ -55,6 +55,21 @@ func (p *Processor) createPreliminaryEntry(
 		return repo.Entry{}, fmt.Errorf("failed to create preliminary database entry: %w", err)
 	}
 
+	if len(req.CustomPreview) > 0 {
+		previewSize, err := p.Storage.WritePreview(ctx, db.ID, createdEntry.ID, bytes.NewReader(req.CustomPreview))
+		if err != nil {
+			p.discardPreliminaryEntry(ctx, db.ID, createdEntry.ID, false)
+			return repo.Entry{}, fmt.Errorf("failed to store custom preview: %w", err)
+		}
+		createdEntry.PreviewSize = uint64(previewSize)
+		updatedEntry, err := p.Repo.UpdateEntry(ctx, db.ID, createdEntry)
+		if err != nil {
+			p.discardPreliminaryEntry(ctx, db.ID, createdEntry.ID, true)
+			return repo.Entry{}, fmt.Errorf("failed to record custom preview size: %w", err)
+		}
+		createdEntry = updatedEntry
+	}
+
 	return createdEntry, nil
 }
 

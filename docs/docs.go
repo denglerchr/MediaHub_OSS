@@ -363,6 +363,23 @@ const docTemplate = `{
                 },
                 "type": "object"
             },
+            "entryhandler.PreviewUpdateResponse": {
+                "properties": {
+                    "database_id": {
+                        "type": "string"
+                    },
+                    "id": {
+                        "type": "integer"
+                    },
+                    "preview_filesize": {
+                        "type": "integer"
+                    },
+                    "updated_at": {
+                        "type": "integer"
+                    }
+                },
+                "type": "object"
+            },
             "infohandler.FeaturesConfig": {
                 "properties": {
                     "audit_logs": {
@@ -1829,7 +1846,7 @@ const docTemplate = `{
         },
         "/database/{database_id}/entry": {
             "post": {
-                "description": "Uploads a new entry to a specified database using multipart/form-data. The metadata part should be a JSON object containing the entry's timestamp, and any custom fields.\nThe 'file' part's 'filename' in the Content-Disposition header will be extracted and saved.\n\nThis endpoint uses a hybrid model:\n- **Small files (\u003c= Configured Limit):** Processed synchronously. Returns ` + "`" + `201 Created` + "`" + ` with the full entry metadata.\n- **Large files (\u003e Configured Limit):** Processed asynchronously. Returns ` + "`" + `202 Accepted` + "`" + ` with a partial response. The client should poll ` + "`" + `GET /api/entry/meta` + "`" + ` until the ` + "`" + `status` + "`" + ` field is 'ready'.",
+                "description": "Uploads a new entry to a specified database using multipart/form-data. The metadata part should be a JSON object containing the entry's timestamp, and any custom fields.\nThe 'file' part's 'filename' in the Content-Disposition header will be extracted and saved.\nAn optional 'preview' part containing a valid WebP image (max 128 KiB, max 200x200 px) may be provided to override automatic preview generation.\n\nThis endpoint uses a hybrid model:\n- **Small files (\u003c= Configured Limit):** Processed synchronously. Returns ` + "`" + `201 Created` + "`" + ` with the full entry metadata.\n- **Large files (\u003e Configured Limit):** Processed asynchronously. Returns ` + "`" + `202 Accepted` + "`" + ` with a partial response. The client should poll ` + "`" + `GET /api/database/{database_id}/entry/{id}` + "`" + ` until the ` + "`" + `status` + "`" + ` field is 'ready'.",
                 "parameters": [
                     {
                         "description": "Database ID",
@@ -1854,6 +1871,11 @@ const docTemplate = `{
                                     "metadata": {
                                         "description": "JSON metadata for the entry",
                                         "type": "string"
+                                    },
+                                    "preview": {
+                                        "description": "Optional custom WebP preview (max 128 KiB, max 200x200 px)",
+                                        "format": "binary",
+                                        "type": "string"
                                     }
                                 },
                                 "required": [
@@ -1864,8 +1886,7 @@ const docTemplate = `{
                             }
                         }
                     },
-                    "description": "JSON metadata for the entry",
-                    "required": true
+                    "description": "JSON metadata for the entry"
                 },
                 "responses": {
                     "201": {
@@ -1898,6 +1919,26 @@ const docTemplate = `{
                         },
                         "description": "Invalid request"
                     },
+                    "401": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/utils.ErrorResponse"
+                                }
+                            }
+                        },
+                        "description": "Unauthorized"
+                    },
+                    "403": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/utils.ErrorResponse"
+                                }
+                            }
+                        },
+                        "description": "Forbidden"
+                    },
                     "404": {
                         "content": {
                             "application/json": {
@@ -1908,6 +1949,16 @@ const docTemplate = `{
                         },
                         "description": "Database not found"
                     },
+                    "413": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/utils.ErrorResponse"
+                                }
+                            }
+                        },
+                        "description": "Preview payload too large"
+                    },
                     "415": {
                         "content": {
                             "application/json": {
@@ -1916,7 +1967,7 @@ const docTemplate = `{
                                 }
                             }
                         },
-                        "description": "Unsupported entry format"
+                        "description": "Unsupported entry or preview format"
                     },
                     "500": {
                         "content": {
@@ -1927,11 +1978,24 @@ const docTemplate = `{
                             }
                         },
                         "description": "Internal server error"
+                    },
+                    "503": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/utils.ErrorResponse"
+                                }
+                            }
+                        },
+                        "description": "Service unavailable"
                     }
                 },
                 "security": [
                     {
                         "BasicAuth": []
+                    },
+                    {
+                        "BearerAuth": []
                     }
                 ],
                 "summary": "Upload an entry",
@@ -2446,8 +2510,115 @@ const docTemplate = `{
             }
         },
         "/database/{database_id}/entry/{id}/preview": {
+            "delete": {
+                "description": "Deletes the preview image of an existing entry and resets its preview_filesize to 0.",
+                "parameters": [
+                    {
+                        "description": "Database ID",
+                        "in": "path",
+                        "name": "database_id",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    {
+                        "description": "Entry ID",
+                        "in": "path",
+                        "name": "id",
+                        "required": true,
+                        "schema": {
+                            "type": "integer"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/utils.MessageResponse"
+                                }
+                            }
+                        },
+                        "description": "Preview deleted"
+                    },
+                    "400": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/utils.ErrorResponse"
+                                }
+                            }
+                        },
+                        "description": "Invalid request"
+                    },
+                    "401": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/utils.ErrorResponse"
+                                }
+                            }
+                        },
+                        "description": "Unauthorized"
+                    },
+                    "403": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/utils.ErrorResponse"
+                                }
+                            }
+                        },
+                        "description": "Forbidden"
+                    },
+                    "404": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/utils.ErrorResponse"
+                                }
+                            }
+                        },
+                        "description": "Database, entry, or preview not found"
+                    },
+                    "409": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/utils.ErrorResponse"
+                                }
+                            }
+                        },
+                        "description": "Entry is processing, queued, or deleting"
+                    },
+                    "500": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/utils.ErrorResponse"
+                                }
+                            }
+                        },
+                        "description": "Internal server error"
+                    }
+                },
+                "security": [
+                    {
+                        "BasicAuth": []
+                    },
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "summary": "Delete an entry preview",
+                "tags": [
+                    "entry"
+                ]
+            },
             "get": {
-                "description": "Retrieves a 200x200 WebP preview of an entry. Supports Content Negotiation via Accept header.",
+                "description": "Retrieves the generated or manually uploaded WebP preview of an entry. Supports Content Negotiation via Accept header.",
                 "parameters": [
                     {
                         "description": "Database ID",
@@ -2540,9 +2711,284 @@ const docTemplate = `{
                 "security": [
                     {
                         "BasicAuth": []
+                    },
+                    {
+                        "BearerAuth": []
                     }
                 ],
                 "summary": "Get an entry preview",
+                "tags": [
+                    "entry"
+                ]
+            },
+            "post": {
+                "description": "Adds a custom WebP preview to an existing entry if it does not already have one. Request body must be raw binary image/webp (max 128 KiB, max 200x200 px, static or animated). Supported for all database content types.",
+                "parameters": [
+                    {
+                        "description": "Database ID",
+                        "in": "path",
+                        "name": "database_id",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    {
+                        "description": "Entry ID",
+                        "in": "path",
+                        "name": "id",
+                        "required": true,
+                        "schema": {
+                            "type": "integer"
+                        }
+                    }
+                ],
+                "requestBody": {
+                    "content": {
+                        "image/webp": {
+                            "schema": {
+                                "type": "string"
+                            }
+                        }
+                    }
+                },
+                "responses": {
+                    "201": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/entryhandler.PreviewUpdateResponse"
+                                }
+                            }
+                        },
+                        "description": "Preview metadata after creation"
+                    },
+                    "400": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/utils.ErrorResponse"
+                                }
+                            }
+                        },
+                        "description": "Invalid request, empty payload, malformed WebP, or invalid dimensions"
+                    },
+                    "401": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/utils.ErrorResponse"
+                                }
+                            }
+                        },
+                        "description": "Unauthorized"
+                    },
+                    "403": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/utils.ErrorResponse"
+                                }
+                            }
+                        },
+                        "description": "Forbidden"
+                    },
+                    "404": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/utils.ErrorResponse"
+                                }
+                            }
+                        },
+                        "description": "Database or entry not found"
+                    },
+                    "409": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/utils.ErrorResponse"
+                                }
+                            }
+                        },
+                        "description": "Entry already has a preview or is processing, queued, or deleting"
+                    },
+                    "413": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/utils.ErrorResponse"
+                                }
+                            }
+                        },
+                        "description": "Preview payload exceeds 128 KiB"
+                    },
+                    "415": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/utils.ErrorResponse"
+                                }
+                            }
+                        },
+                        "description": "Unsupported Content-Type or non-WebP payload"
+                    },
+                    "500": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/utils.ErrorResponse"
+                                }
+                            }
+                        },
+                        "description": "Internal server error"
+                    }
+                },
+                "security": [
+                    {
+                        "BasicAuth": []
+                    },
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "summary": "Create a custom entry preview",
+                "tags": [
+                    "entry"
+                ]
+            },
+            "put": {
+                "description": "Creates or replaces the WebP preview for an existing entry (upsert). Request body must be raw binary image/webp (max 128 KiB, max 200x200 px, static or animated). Supported for all database content types.",
+                "parameters": [
+                    {
+                        "description": "Database ID",
+                        "in": "path",
+                        "name": "database_id",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    {
+                        "description": "Entry ID",
+                        "in": "path",
+                        "name": "id",
+                        "required": true,
+                        "schema": {
+                            "type": "integer"
+                        }
+                    }
+                ],
+                "requestBody": {
+                    "content": {
+                        "image/webp": {
+                            "schema": {
+                                "type": "string"
+                            }
+                        }
+                    }
+                },
+                "responses": {
+                    "200": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/entryhandler.PreviewUpdateResponse"
+                                }
+                            }
+                        },
+                        "description": "Preview metadata after update"
+                    },
+                    "400": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/utils.ErrorResponse"
+                                }
+                            }
+                        },
+                        "description": "Invalid request, empty payload, malformed WebP, or invalid dimensions"
+                    },
+                    "401": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/utils.ErrorResponse"
+                                }
+                            }
+                        },
+                        "description": "Unauthorized"
+                    },
+                    "403": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/utils.ErrorResponse"
+                                }
+                            }
+                        },
+                        "description": "Forbidden"
+                    },
+                    "404": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/utils.ErrorResponse"
+                                }
+                            }
+                        },
+                        "description": "Database or entry not found"
+                    },
+                    "409": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/utils.ErrorResponse"
+                                }
+                            }
+                        },
+                        "description": "Entry is processing, queued, or deleting"
+                    },
+                    "413": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/utils.ErrorResponse"
+                                }
+                            }
+                        },
+                        "description": "Preview payload exceeds 128 KiB"
+                    },
+                    "415": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/utils.ErrorResponse"
+                                }
+                            }
+                        },
+                        "description": "Unsupported Content-Type or non-WebP payload"
+                    },
+                    "500": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/utils.ErrorResponse"
+                                }
+                            }
+                        },
+                        "description": "Internal server error"
+                    }
+                },
+                "security": [
+                    {
+                        "BasicAuth": []
+                    },
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "summary": "Create or replace a custom entry preview",
                 "tags": [
                     "entry"
                 ]

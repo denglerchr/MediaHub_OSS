@@ -28,9 +28,10 @@ import (
 
 // EntryRequest carries the user-supplied metadata of an incoming entry upload.
 type EntryRequest struct {
-	Timestamp    int64
-	FileName     string
-	CustomFields map[string]any
+	Timestamp     int64
+	FileName      string
+	CustomFields  map[string]any
+	CustomPreview []byte
 }
 
 // Processor coordinates media conversions, enforces the configured concurrency

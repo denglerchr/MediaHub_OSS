@@ -7,7 +7,13 @@ import (
 	"mediahub_oss/internal/processing"
 	"mediahub_oss/internal/repository"
 	"mediahub_oss/internal/storage"
+	"sync"
 )
+
+type previewEntryLock struct {
+	mu   sync.Mutex
+	refs int
+}
 
 type EntryHandler struct {
 	Logger                 *slog.Logger
@@ -20,6 +26,8 @@ type EntryHandler struct {
 	Imports                *ImportManager
 
 	maxImportUploadBytes int64
+	previewMu            sync.Mutex
+	previewLocks         map[string]*previewEntryLock
 }
 
 // metadata that can be added when sending a new entry
@@ -96,6 +104,14 @@ type PartialEntryResponse struct {
 	UpdatedAt    int64          `json:"updated_at"`
 	MimeType     string         `json:"mime_type"`
 	CustomFields map[string]any `json:"custom_fields"`
+}
+
+// PreviewUpdateResponse defines the lightweight metadata returned after manually adding or replacing an entry preview.
+type PreviewUpdateResponse struct {
+	DatabaseID  string `json:"database_id"`
+	EntryID     int64  `json:"id"`
+	PreviewSize uint64 `json:"preview_filesize"`
+	UpdatedAt   int64  `json:"updated_at"`
 }
 
 // FileJSONResponse is used when clients request a file via Accept: application/json.
