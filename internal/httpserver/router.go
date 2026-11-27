@@ -7,8 +7,6 @@ import (
 	repo "mediahub_oss/internal/repository"
 	"net/http"
 	"strings"
-
-	httpSwagger "github.com/swaggo/http-swagger"
 )
 
 // SetupRouter configures the main router using the Go Standard Library.
@@ -18,7 +16,7 @@ func SetupRouter(h *Handlers, frontendFS http.FileSystem, am *auth.AuthMiddlewar
 	// --- 1. Public Endpoints ---
 	mux.HandleFunc("GET /health", h.InfoHandler.HealthCheck)
 	mux.HandleFunc("GET /api/info", h.InfoHandler.GetInfo)
-	mux.Handle("GET /swagger/", httpSwagger.WrapHandler)
+	mux.Handle("GET /swagger/", NewSwaggerHandler())
 
 	// --- 2. Public Token Endpoints ---
 	mux.HandleFunc("POST /api/token", h.TokenHandler.GetToken)

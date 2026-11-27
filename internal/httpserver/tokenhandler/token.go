@@ -52,7 +52,7 @@ type TokenRequest struct {
 // @Failure 401 {object} utils.ErrorResponse "Invalid credentials or missing authentication"
 // @Failure 500 {object} utils.ErrorResponse "Internal server error"
 // @Security BasicAuth
-// @Router /api/token [post]
+// @Router /token [post]
 func (h *TokenHandler) GetToken(w http.ResponseWriter, r *http.Request) {
 	username, password, hasBasicAuth := r.BasicAuth()
 	if !hasBasicAuth {
@@ -96,7 +96,7 @@ func (h *TokenHandler) GetToken(w http.ResponseWriter, r *http.Request) {
 // @Success 200 {object} TokenResponse "Returns new access and refresh tokens"
 // @Failure 400 {object} utils.ErrorResponse "Invalid request body"
 // @Failure 401 {object} utils.ErrorResponse "Invalid or expired refresh token"
-// @Router /api/token/refresh [post]
+// @Router /token/refresh [post]
 func (h *TokenHandler) RefreshToken(w http.ResponseWriter, r *http.Request) {
 	var req TokenRequest
 	if status, msg := utils.DecodeJSONBody(w, r, &req); status != 0 {
@@ -148,7 +148,7 @@ func (h *TokenHandler) RefreshToken(w http.ResponseWriter, r *http.Request) {
 // @Failure 400 {object} utils.ErrorResponse "Invalid request body"
 // @Failure 401 {object} utils.ErrorResponse "Unauthorized"
 // @Security BearerAuth
-// @Router /api/logout [post]
+// @Router /logout [post]
 func (h *TokenHandler) Logout(w http.ResponseWriter, r *http.Request) {
 
 	user := utils.GetUserFromContext(r.Context())

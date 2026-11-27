@@ -19,14 +19,14 @@ var frontendFS embed.FS
 // @contact.name Christian Dengler
 // @contact.url https://www.swcd.lu
 // @contact.email denglerchr@gmail.com
-// @BasePath /api
-// @schemes http https
-// @securityDefinitions.basic BasicAuth
-// @securityDefinitions.apikey BearerAuth
-// @in header
-// @name Authorization
-// @description Type "Bearer" followed by a space and a JWT token.
+// @servers.url /api
 // @import encoding/json
+
+// @securityDefinitions.basic BasicAuth
+
+// @securityDefinitions.bearerauth BearerAuth
+// @bearerFormat JWT / API Key
+// @description Enter your JWT access token or API key ("srv_..."). Swagger UI automatically sends it with the "Bearer " prefix.
 
 func main() {
 

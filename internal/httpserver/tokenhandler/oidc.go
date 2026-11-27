@@ -643,7 +643,7 @@ func (p *HTTPOIDCProvider) enrichClaimsFromUserinfo(ctx context.Context, accessT
 // @Failure 400 {object} utils.ErrorResponse "Invalid request body or OIDC disabled"
 // @Failure 401 {object} utils.ErrorResponse "Failed to validate OIDC credentials"
 // @Failure 500 {object} utils.ErrorResponse "Internal server error"
-// @Router /api/token/oidc [post]
+// @Router /token/oidc [post]
 func (h *TokenHandler) GetTokenOIDC(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 

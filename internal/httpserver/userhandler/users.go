@@ -530,7 +530,7 @@ func (h *UserHandler) UpdateUser(w http.ResponseWriter, r *http.Request) {
 // @Produce      json
 // @Security     BasicAuth
 // @Security     BearerAuth
-// @Param        id  query    int true "User ID"
+// @Param        user_ulid path string true "User ULID"
 // @Success      200 {object} utils.MessageResponse "User successfully deleted"
 // @Failure      400 {object} utils.ErrorResponse "Missing or invalid ID format"
 // @Failure      401 {object} utils.ErrorResponse "Authentication failed"
@@ -538,7 +538,7 @@ func (h *UserHandler) UpdateUser(w http.ResponseWriter, r *http.Request) {
 // @Failure      404 {object} utils.ErrorResponse "User not found"
 // @Failure      409 {object} utils.ErrorResponse "Cannot delete the last remaining admin user"
 // @Failure      500 {object} utils.ErrorResponse "Internal server error"
-// @Router       /user [delete]
+// @Router       /user/{user_ulid} [delete]
 func (h *UserHandler) DeleteUser(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
