@@ -1,0 +1,55 @@
+/* frontend/src/app/pages/login-page/login-page.component.css */
+:host {
+  display: block;
+  min-height: 100vh;
+  min-height: 100dvh; /* Modern browser viewport fix */
+}
+
+/* --- SSO & Dividers (Extracted from HTML inline styles) --- */
+.sso-btn {
+  width: 100%;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  gap: 0.625rem;
+  line-height: 1.5;
+}
+
+.sso-icon {
+  width: 1.25rem;
+  height: 1.25rem;
+  flex-shrink: 0;
+  display: inline-block;
+  vertical-align: middle;
+}
+
+.divider {
+  display: flex;
+  align-items: center;
+  text-align: center;
+  margin: 1.5rem 0;
+}
+
+.divider-line {
+  flex-grow: 1;
+  border: none;
+  border-top: 1px solid var(--border-color);
+}
+
+.divider-text {
+  padding: 0 10px;
+  color: var(--text-muted);
+  font-size: 0.85rem;
+}
+
+.disabled-login-msg {
+  text-align: center;
+  color: var(--text-muted);
+  padding: 1rem 0;
+}
+
+/* --- Form Elements --- */
+.login-button {
+  width: 100%;
+  margin-top: 1rem;
+}

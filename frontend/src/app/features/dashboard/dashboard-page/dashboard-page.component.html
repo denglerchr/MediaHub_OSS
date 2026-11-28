@@ -1,0 +1,27 @@
+<div
+  class="dashboard-layout"
+  [ngClass]="{
+    'sidebar-collapsed': isSidebarCollapsed,
+    'no-sidebar': !showSidebar,
+  }"
+>
+  <aside class="dashboard-sidebar" *ngIf="showSidebar">
+    <!-- 
+      Pass the collapsed state down to the sidebar component.
+      Listen for the toggle event coming back up.
+    -->
+    <app-sidebar [isCollapsed]="isSidebarCollapsed" (toggleSidebar)="toggleSidebar()">
+    </app-sidebar>
+  </aside>
+
+  <main class="dashboard-content">
+    <router-outlet></router-outlet>
+  </main>
+</div>
+
+<app-create-database-modal></app-create-database-modal>
+<app-upload-entry-modal></app-upload-entry-modal>
+<app-entry-detail-modal></app-entry-detail-modal>
+<app-edit-entry-modal></app-edit-entry-modal>
+<app-api-key-modal></app-api-key-modal>
+<app-fullscreen-settings-modal></app-fullscreen-settings-modal>

@@ -1,0 +1,74 @@
+/* frontend/src/app/components/entry-list-view/entry-list-view.component.css */
+
+.id-link {
+  color: var(--text-accent);
+  font-weight: 500;
+  cursor: pointer;
+}
+.id-link:hover {
+  text-decoration: underline;
+  color: var(--text-accent-hover);
+}
+
+/* --- Selection Column --- */
+.select-col {
+  width: 40px;
+}
+.select-cell {
+  text-align: center;
+  vertical-align: middle;
+  /* Prevent accidental selection of the checkbox cell content */
+  user-select: none;
+}
+
+/* Row selected state */
+.selected-row {
+  background-color: rgba(66, 153, 225, 0.1);
+}
+.selected-row:hover {
+  background-color: rgba(66, 153, 225, 0.2);
+}
+
+/* ADDED: Prevent text selection highlighting on rows to avoid flickering artifacts during Shift+Click */
+.table tbody tr {
+  user-select: none;
+}
+
+.preview-col {
+  width: 70px; /* Fixed width for preview column */
+}
+.preview-cell {
+  padding: 0.5rem 0.75rem !important; /* Override default padding */
+  vertical-align: middle;
+}
+
+.status-text {
+  font-weight: 600;
+}
+.status-ready {
+  color: var(--text-secondary);
+}
+.status-processing {
+  color: var(--text-accent);
+}
+.status-queued {
+  color: var(--text-warning);
+}
+.status-error {
+  color: var(--text-danger);
+}
+
+.actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 1rem;
+  font-size: 0.875rem;
+  font-weight: 500;
+  width: 100%;
+}
+
+.btn-link:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+  text-decoration: none;
+}

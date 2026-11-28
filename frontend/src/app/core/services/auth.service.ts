@@ -1,0 +1,661 @@
+// frontend/src/app/services/auth.service.ts
+
+import { Injectable, Optional } from '@angular/core';
+import { HttpClient, HttpHeaders, HttpErrorResponse, HttpContext } from '@angular/common/http';
+import { BehaviorSubject, EMPTY, Observable, of, throwError } from 'rxjs';
+import {
+  catchError,
+  filter,
+  finalize,
+  map,
+  scan,
+  shareReplay,
+  switchMap,
+  take,
+  tap,
+} from 'rxjs/operators';
+import { User, TokenResponse } from '../models';
+import { ParamMap, Router } from '@angular/router';
+import { AppInfoService } from './app-info.service';
+import {
+  generateRandomState,
+  generateRandomNonce,
+  generateCodeVerifier,
+  generateCodeChallenge,
+} from '../../shared/utils/pkce.utils';
+import { SKIP_AUTH_REFRESH } from '../interceptors/http-context.tokens';
+import { hasDatabasePermission, PermissionFlag } from '../../shared/utils/permissions';
+
+export type OidcCallbackResult =
+  { status: 'success' } | { status: 'error'; errorParam?: 'sso_failed' | 'sso_state_invalid' };
+
+/**
+ * Manages user authentication using JWT (JSON Web Tokens).
+ * Handles Login (Token Fetch), Logout (Token Revocation), and Token Refresh.
+ */
+@Injectable({
+  providedIn: 'root',
+})
+export class AuthService {
+  private readonly apiUrl = '/api';
+  private readonly ACCESS_TOKEN_KEY = 'access_token';
+  private readonly REFRESH_TOKEN_KEY = 'refresh_token';
+
+  // FE-008: the access token lives in memory only (never persisted), the refresh
+  // token lives in sessionStorage (per-tab, wiped when the tab closes).
+  private accessToken: string | null = null;
+
+  // FE-009: single-flight refresh shared by every 401 handler in this tab.
+  private refreshInFlight$: Observable<TokenResponse> | null = null;
+  private sessionGeneration = 0;
+  private logoutInProgress = false;
+  private revokingLogoutRequest = false;
+
+  private currentUserSubject = new BehaviorSubject<User | null>(null);
+  public currentUser$ = this.currentUserSubject.asObservable();
+
+  /**
+   * Emits whenever the session is cleared (currentUser$ is null) or switches
+   * from one authenticated user ID to another.
+   */
+  public readonly sessionCleared$: Observable<void> = this.currentUser$.pipe(
+    scan(
+      (acc: { lastUserId: string | null; cleared: boolean }, user: User | null) => {
+        const nextUserId = user?.id ?? null;
+        const cleared = user === null || (acc.lastUserId !== null && nextUserId !== acc.lastUserId);
+        return { lastUserId: nextUserId, cleared };
+      },
+      { lastUserId: null, cleared: false },
+    ),
+    filter((state) => state.cleared),
+    map(() => undefined),
+  );
+
+  constructor(
+    private http: HttpClient,
+    private router: Router,
+    @Optional() private appInfoService?: AppInfoService,
+  ) {
+    this.migrateLegacyStoredTokens();
+  }
+
+  /**
+   * FE-008: tokens used to be kept in localStorage. Move a legacy refresh token into
+   * sessionStorage so existing sessions survive the upgrade, and scrub the old keys so
+   * the token no longer sits in persistent storage shared across tabs and restarts.
+   */
+  private migrateLegacyStoredTokens(): void {
+    try {
+      const legacyRefreshToken = localStorage.getItem(this.REFRESH_TOKEN_KEY);
+      if (legacyRefreshToken && !sessionStorage.getItem(this.REFRESH_TOKEN_KEY)) {
+        sessionStorage.setItem(this.REFRESH_TOKEN_KEY, legacyRefreshToken);
+      }
+      localStorage.removeItem(this.ACCESS_TOKEN_KEY);
+      localStorage.removeItem(this.REFRESH_TOKEN_KEY);
+    } catch {
+      // Storage can be unavailable (private mode); nothing to migrate then.
+    }
+  }
+
+  /**
+   * Logs the user in by exchanging credentials for JWT tokens,
+   * then fetching the user's profile.
+   */
+  basicAuthLogin(username: string, password: string): Observable<User> {
+    const gen = ++this.sessionGeneration;
+    // 1. Prepare Basic Auth header for the token endpoint (Unicode-safe base64 encoding)
+    const bytes = new TextEncoder().encode(`${username}:${password}`);
+    const binString = Array.from(bytes, (b) => String.fromCharCode(b)).join('');
+    const basicAuth = 'Basic ' + btoa(binString);
+    const headers = new HttpHeaders({ Authorization: basicAuth });
+
+    // 2. Call POST /api/token to get the tokens
+    return this.http.post<TokenResponse>(`${this.apiUrl}/token`, {}, { headers }).pipe(
+      tap((tokens) => {
+        if (gen === this.sessionGeneration) {
+          this.storeTokens(tokens);
+        }
+      }),
+      // 3. Once we have tokens, fetch the user profile (Interceptor will inject Bearer token)
+      switchMap(() => this.fetchCurrentUser()),
+      map((user) => {
+        if (!user) throw new Error('Failed to fetch user details after login');
+        return user;
+      }),
+      catchError((err: HttpErrorResponse) => {
+        // FE-018: clean up the partial session *without navigating* — a failed local
+        // login must not drop the ?local=1 escape hatch from the URL.
+        if (gen === this.sessionGeneration) {
+          this.clearTokens();
+          this.currentUserSubject.next(null);
+        }
+        return throwError(() => err);
+      }),
+    );
+  }
+
+  /**
+   * Logs the user in via OIDC code exchange (POST /api/token/oidc).
+   */
+  oidcLogin(
+    code: string,
+    redirectUri?: string,
+    codeVerifier?: string,
+    nonce?: string,
+  ): Observable<User> {
+    const gen = ++this.sessionGeneration;
+    const payload: {
+      code: string;
+      redirect_uri?: string;
+      code_verifier?: string;
+      nonce?: string;
+    } = {
+      code,
+      redirect_uri: redirectUri || `${window.location.origin}/auth/callback`,
+    };
+    if (codeVerifier) {
+      payload.code_verifier = codeVerifier;
+    }
+    if (nonce) {
+      payload.nonce = nonce;
+    }
+
+    return this.http.post<TokenResponse>(`${this.apiUrl}/token/oidc`, payload).pipe(
+      tap((tokens) => {
+        if (gen === this.sessionGeneration) {
+          this.storeTokens(tokens);
+        }
+      }),
+      switchMap(() => this.fetchCurrentUser()),
+      map((user) => {
+        if (!user) throw new Error('Failed to fetch user details after OIDC login');
+        return user;
+      }),
+      catchError((err: HttpErrorResponse) => {
+        if (gen === this.sessionGeneration) {
+          this.clearTokens();
+          this.currentUserSubject.next(null);
+        }
+        return throwError(() => err);
+      }),
+    );
+  }
+
+  /**
+   * Generates PKCE challenge, nonce, and CSRF state, stores them in sessionStorage,
+   * and navigates to the OIDC authorization endpoint.
+   */
+  async redirectToOidc(oidcConfig: {
+    oidc_issuer_url?: string;
+    oidc_client_id?: string;
+    oidc_redirect_url?: string;
+    oidc_auth_endpoint?: string;
+  }): Promise<void> {
+    if (!oidcConfig.oidc_issuer_url || !oidcConfig.oidc_client_id) {
+      throw new Error('OIDC configuration is missing issuer URL or client ID');
+    }
+
+    const authEndpoint =
+      oidcConfig.oidc_auth_endpoint ||
+      `${oidcConfig.oidc_issuer_url.replace(/\/+$/, '')}/protocol/openid-connect/auth`;
+
+    let url: URL;
+    try {
+      url = new URL(authEndpoint);
+    } catch {
+      throw new Error('Invalid OIDC authorization endpoint URL');
+    }
+    if (url.protocol !== 'https:' && url.protocol !== 'http:') {
+      throw new Error('Invalid OIDC authorization endpoint URL');
+    }
+
+    if (!window.crypto?.subtle) {
+      throw new Error(
+        'Web Crypto API is unavailable on this insecure origin. HTTPS or localhost is required for SSO.',
+      );
+    }
+
+    const state = generateRandomState();
+    const codeVerifier = generateCodeVerifier();
+    const nonce = generateRandomNonce();
+    const codeChallenge = await generateCodeChallenge(codeVerifier);
+
+    this.setSessionStorageItem('oidc_state', state);
+    this.setSessionStorageItem('oidc_code_verifier', codeVerifier);
+    this.setSessionStorageItem('oidc_nonce', nonce);
+
+    const redirectUri = oidcConfig.oidc_redirect_url || `${window.location.origin}/auth/callback`;
+
+    url.searchParams.set('client_id', oidcConfig.oidc_client_id);
+    url.searchParams.set('redirect_uri', redirectUri);
+    url.searchParams.set('response_type', 'code');
+    url.searchParams.set('scope', 'openid profile email');
+    url.searchParams.set('state', state);
+    url.searchParams.set('nonce', nonce);
+    url.searchParams.set('code_challenge', codeChallenge);
+    url.searchParams.set('code_challenge_method', 'S256');
+
+    this.navigateExternal(url.toString());
+  }
+
+  private navigateExternal(url: string): void {
+    window.location.href = url;
+  }
+
+  /**
+   * Validates the OIDC callback query parameters against PKCE/CSRF state stored in
+   * sessionStorage, resolves the redirect URI from AppInfoService, and completes
+   * the token exchange.
+   */
+  public completeOidcCallback(queryParams: ParamMap): Observable<OidcCallbackResult> {
+    const error = queryParams.get('error');
+    const errorDescription = queryParams.get('error_description');
+    const code = queryParams.get('code');
+    const state = queryParams.get('state');
+
+    if (error) {
+      this.clearOidcSessionState();
+      console.error('OIDC provider returned error:', error, errorDescription);
+      console.warn(
+        `[MediaHub SSO] Tip for administrators: Ensure "${window.location.origin}/auth/callback" is registered as a Valid Redirect URI in your Identity Provider (e.g. Keycloak).`,
+      );
+      return of({ status: 'error', errorParam: 'sso_failed' });
+    }
+
+    if (!code) {
+      return of({ status: 'error' });
+    }
+
+    // Validate CSRF state
+    const savedState = this.getSessionStorageItem('oidc_state');
+    this.removeSessionStorageItem('oidc_state');
+    if (!state || !savedState || state !== savedState) {
+      this.clearOidcSessionState();
+      console.error('OIDC state verification failed: potential CSRF attack or expired state');
+      return of({ status: 'error', errorParam: 'sso_state_invalid' });
+    }
+
+    // Retrieve PKCE code verifier and OIDC nonce
+    const codeVerifier = this.getSessionStorageItem('oidc_code_verifier');
+    this.removeSessionStorageItem('oidc_code_verifier');
+    const nonce = this.getSessionStorageItem('oidc_nonce');
+    this.removeSessionStorageItem('oidc_nonce');
+
+    if (!codeVerifier) {
+      console.error('OIDC PKCE code verifier missing from session storage');
+      return of({ status: 'error', errorParam: 'sso_state_invalid' });
+    }
+
+    const appInfo$ = this.appInfoService ? this.appInfoService.loadInfo().pipe(take(1)) : of(null);
+
+    return appInfo$.pipe(
+      switchMap((info) => {
+        const redirectUri =
+          info?.oidc?.oidc_redirect_url || `${window.location.origin}/auth/callback`;
+
+        return this.oidcLogin(code, redirectUri, codeVerifier, nonce || undefined).pipe(
+          map((): OidcCallbackResult => ({ status: 'success' })),
+          catchError((err) => {
+            console.error('OIDC token exchange failed:', err);
+            console.warn(
+              `[MediaHub SSO] Tip for administrators: Ensure "${redirectUri}" matches the configured Redirect URI in your Identity Provider (e.g. Keycloak) and the token endpoint is reachable.`,
+            );
+            return of<OidcCallbackResult>({ status: 'error', errorParam: 'sso_failed' });
+          }),
+        );
+      }),
+      catchError((err) => {
+        console.error('Failed to load app info during auth callback:', err);
+        return of<OidcCallbackResult>({ status: 'error', errorParam: 'sso_failed' });
+      }),
+    );
+  }
+
+  private clearOidcSessionState(): void {
+    this.removeSessionStorageItem('oidc_state');
+    this.removeSessionStorageItem('oidc_code_verifier');
+    this.removeSessionStorageItem('oidc_nonce');
+  }
+
+  /**
+   * Logs the user out.
+   * Attempts to revoke the refresh token on the server, then clears local state.
+   * @param notifyServer Whether to call the API to revoke the token (default: true)
+   */
+  logout(notifyServer: boolean = true): void {
+    if (this.logoutInProgress) {
+      return;
+    }
+
+    if (notifyServer && this.getRefreshToken()) {
+      this.logoutInProgress = true;
+      // FE-007: POST /api/logout sits behind AuthMiddleware (router.go:33), so an
+      // expired/absent access token 401s the request *before* the Logout handler
+      // ever deletes the refresh token. Establish a valid access token first
+      // (silent refresh — the common case after idle), then revoke with the
+      // refresh token stored *after* that refresh: rotation (FE-009) means the
+      // body must never be captured before the refresh settles.
+      this.prepareAccessTokenForLogout()
+        .pipe(
+          switchMap(() => {
+            this.revokingLogoutRequest = true;
+            const refreshToken = this.getRefreshToken();
+            if (!refreshToken) {
+              // The silent refresh already proved the session dead (401) and cleared
+              // the tokens — there is nothing left to revoke.
+              return of(null);
+            }
+            // Mark the request so the interceptor never refreshes + retries it (which
+            // would send a stale token in the body and leave the freshly issued one
+            // valid server-side).
+            return this.http.post(
+              `${this.apiUrl}/logout`,
+              { refresh_token: refreshToken },
+              { context: new HttpContext().set(SKIP_AUTH_REFRESH, true) },
+            );
+          }),
+          catchError((err) => {
+            console.warn('Logout failed on server (token might be expired)', err);
+            return of(null);
+          }),
+          // Local cleanup must run no matter how the server-side revocation went.
+          finalize(() => this.clearSessionAndRedirect()),
+        )
+        .subscribe();
+    } else {
+      this.clearSessionAndRedirect();
+    }
+  }
+
+  /**
+   * FE-007/N4: establishes a valid access token before the revocation request and
+   * lets any in-flight refresh (FE-009 single-flight) settle first so the logout
+   * body carries the post-rotation refresh token. Never errors — the local cleanup
+   * in `logout()` runs regardless of the outcome.
+   */
+  private prepareAccessTokenForLogout(): Observable<void> {
+    const inFlight = this.refreshInFlight$;
+    const settled: Observable<void> = inFlight
+      ? inFlight.pipe(
+          map(() => undefined),
+          catchError(() => of(undefined)),
+        )
+      : of(undefined);
+    return settled.pipe(switchMap(() => this.ensureAccessToken(true)));
+  }
+
+  private clearSessionAndRedirect(): void {
+    this.sessionGeneration++;
+    this.logoutInProgress = false;
+    this.revokingLogoutRequest = false;
+    this.refreshInFlight$ = null;
+    this.clearTokens();
+    this.currentUserSubject.next(null);
+    // FE-018: keep the ?local=1 escape hatch alive when bouncing to the login page.
+    const currentParams = this.router.routerState.snapshot.root.queryParams || {};
+    const queryParams =
+      currentParams['local'] !== undefined ? { local: currentParams['local'] } : {};
+    this.router.navigate(['/login'], { queryParams });
+  }
+
+  /**
+   * Refreshes the access token using the refresh token.
+   * This is typically called by the JwtInterceptor.
+   *
+   * FE-009: concurrent callers share one in-flight refresh (single-flight), and a
+   * 401 is retried once with the currently stored token before the session is
+   * declared dead — rotation elsewhere (e.g. a duplicated tab) invalidates the token
+   * we attempted with while a fresh one may already be stored.
+   */
+  refreshToken(allowDuringLogout: boolean = false): Observable<TokenResponse> {
+    if (this.logoutInProgress && !allowDuringLogout) {
+      return throwError(() => new Error('Logout in progress'));
+    }
+
+    if (this.refreshInFlight$) {
+      return this.refreshInFlight$;
+    }
+
+    const tokenAtAttempt = this.getRefreshToken();
+    if (!tokenAtAttempt) {
+      return throwError(() => new Error('No refresh token available'));
+    }
+
+    const inFlight$ = this.requestTokenRefresh(tokenAtAttempt).pipe(
+      catchError((err: HttpErrorResponse) => {
+        const latestToken = this.getRefreshToken();
+        if (
+          err instanceof HttpErrorResponse &&
+          err.status === 401 &&
+          latestToken &&
+          latestToken !== tokenAtAttempt
+        ) {
+          return this.requestTokenRefresh(latestToken);
+        }
+        return throwError(() => err);
+      }),
+      finalize(() => {
+        if (this.refreshInFlight$ === inFlight$) {
+          this.refreshInFlight$ = null;
+        }
+      }),
+      shareReplay(1),
+    );
+
+    this.refreshInFlight$ = inFlight$;
+    return inFlight$;
+  }
+
+  private requestTokenRefresh(refreshToken: string): Observable<TokenResponse> {
+    const gen = this.sessionGeneration;
+    return this.http
+      .post<TokenResponse>(`${this.apiUrl}/token/refresh`, {
+        refresh_token: refreshToken,
+      })
+      .pipe(
+        tap((tokens) => {
+          if (gen === this.sessionGeneration && !this.revokingLogoutRequest) {
+            this.storeTokens(tokens);
+          }
+        }),
+      );
+  }
+
+  /**
+   * Fetches the current user's data using the stored access token.
+   */
+  public fetchCurrentUser(): Observable<User | null> {
+    const gen = this.sessionGeneration;
+    return this.ensureAccessToken().pipe(
+      switchMap(() => {
+        if (!this.getAccessToken() || gen !== this.sessionGeneration || this.logoutInProgress) {
+          return of(null);
+        }
+
+        return this.http.get<User>(`${this.apiUrl}/me`).pipe(
+          map((user) => {
+            if (gen === this.sessionGeneration && !this.logoutInProgress) {
+              this.currentUserSubject.next(user);
+              return user;
+            }
+            return null;
+          }),
+          catchError((err: HttpErrorResponse) => {
+            // FE-010: only an actual 401 invalidates the session. Transient failures
+            // (status 0, 5xx) must keep the session alive and just report "no user".
+            if (err?.status === 401 && gen === this.sessionGeneration && !this.logoutInProgress) {
+              this.clearSessionAndRedirect();
+            }
+            return of(null);
+          }),
+        );
+      }),
+    );
+  }
+
+  /**
+   * FE-008: the access token is kept in memory only, so a reload leaves us without one
+   * while the refresh token survives in sessionStorage. Silently refresh before
+   * concluding the session is gone. A transient refresh failure keeps the refresh
+   * token; only a 401 drops it.
+   */
+  private ensureAccessToken(allowDuringLogout: boolean = false): Observable<void> {
+    if ((this.getAccessToken() && !this.isAccessTokenExpired()) || !this.getRefreshToken()) {
+      return of(undefined);
+    }
+    return this.forceAccessTokenRefresh(allowDuringLogout);
+  }
+
+  /**
+   * FE-011: unconditional silent access-token refresh. Media elements fail with
+   * 401 Range responses that never reach the interceptor, so a media-URL
+   * regeneration after such a failure must not trust the stored token — nothing
+   * has refreshed it in the meantime. Never errors: a failed refresh keeps the
+   * current token in place (only a 401 drops the session) so the caller can still
+   * regenerate and compare its URL.
+   */
+  public forceAccessTokenRefresh(allowDuringLogout: boolean = false): Observable<void> {
+    const gen = this.sessionGeneration;
+    return this.refreshToken(allowDuringLogout).pipe(
+      map(() => undefined),
+      catchError((err: HttpErrorResponse) => {
+        if (err?.status === 401 && gen === this.sessionGeneration) {
+          this.clearTokens();
+          this.currentUserSubject.next(null);
+        }
+        return of(undefined);
+      }),
+    );
+  }
+
+  /**
+   * FE-007: the access token is a JWT with an `exp` claim (tokenhandler/utils.go).
+   * A token that is present but expired is useless for authenticated requests
+   * (AuthMiddleware rejects it), so `ensureAccessToken()` treats it like a missing
+   * one and silently refreshes. Tokens that are not JWTs or carry no readable
+   * `exp` are assumed valid (fail-open, same as before this check existed).
+   */
+  private isAccessTokenExpired(): boolean {
+    const token = this.accessToken;
+    if (!token) {
+      return true;
+    }
+    const parts = token.split('.');
+    if (parts.length !== 3) {
+      return false;
+    }
+    try {
+      const payload = JSON.parse(atob(parts[1].replace(/-/g, '+').replace(/_/g, '/')));
+      if (typeof payload.exp !== 'number') {
+        return false;
+      }
+      // Small skew so the token is refreshed before the server starts rejecting it.
+      return payload.exp * 1000 <= Date.now() + 5000;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Ensures that the current user profile is loaded.
+   * If already present in memory, returns it immediately.
+   * Otherwise attempts to restore the session (silent refresh on reload) and fetch /me.
+   */
+  public ensureCurrentUser(): Observable<User | null> {
+    const user = this.getCurrentUser();
+    if (user) {
+      return of(user);
+    }
+    return this.fetchCurrentUser();
+  }
+
+  // --- Token Management Helpers ---
+
+  private storeTokens(tokens: TokenResponse): void {
+    // FE-008: access token in memory only, refresh token in per-tab sessionStorage.
+    this.accessToken = tokens.access_token;
+    this.setSessionStorageItem(this.REFRESH_TOKEN_KEY, tokens.refresh_token);
+  }
+
+  private clearTokens(): void {
+    this.accessToken = null;
+    this.removeSessionStorageItem(this.REFRESH_TOKEN_KEY);
+  }
+
+  public getAccessToken(): string | null {
+    return this.accessToken;
+  }
+
+  public getRefreshToken(): string | null {
+    return this.getSessionStorageItem(this.REFRESH_TOKEN_KEY);
+  }
+
+  private getSessionStorageItem(key: string): string | null {
+    try {
+      return sessionStorage.getItem(key);
+    } catch {
+      return null;
+    }
+  }
+
+  private setSessionStorageItem(key: string, value: string): void {
+    try {
+      sessionStorage.setItem(key, value);
+    } catch {
+      // Storage can be unavailable (private mode / quota exceeded).
+    }
+  }
+
+  private removeSessionStorageItem(key: string): void {
+    try {
+      sessionStorage.removeItem(key);
+    } catch {
+      // Storage can be unavailable.
+    }
+  }
+
+  public getCurrentUser(): User | null {
+    return this.currentUserSubject.value;
+  }
+
+  // --- User Management Methods ---
+
+  /**
+   * Checks if the current user has a specific permission for a given database.
+   * Global admins automatically return true for all checks.
+   * @param databaseId The ULID of the database to check access for.
+   * @param permission The specific permission to check (e.g., 'can_view', 'can_create').
+   */
+  public hasDatabasePermission(databaseId: string, permission: PermissionFlag): boolean {
+    return hasDatabasePermission(this.getCurrentUser(), databaseId, permission);
+  }
+
+  changeOwnPassword(oldPassword: string, newPassword: string): Observable<unknown> {
+    const payload = {
+      old_password: oldPassword,
+      new_password: newPassword,
+    };
+    const gen = this.sessionGeneration;
+    // FE-046: deliberately *not* routed through catchApiError — the caller maps the
+    // outcome to password-specific messages (401 → "Incorrect current password.").
+    return this.ensureAccessToken().pipe(
+      switchMap(() => {
+        if (gen !== this.sessionGeneration || this.logoutInProgress) {
+          return EMPTY;
+        }
+        if (!this.getAccessToken()) {
+          if (!this.getRefreshToken()) {
+            this.clearSessionAndRedirect();
+            return EMPTY;
+          }
+          return throwError(
+            () => new HttpErrorResponse({ status: 0, statusText: 'Unable to refresh session' }),
+          );
+        }
+        return this.http.patch(`${this.apiUrl}/me`, payload, {
+          context: new HttpContext().set(SKIP_AUTH_REFRESH, true),
+        });
+      }),
+    );
+  }
+}

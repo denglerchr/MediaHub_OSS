@@ -1,0 +1,288 @@
+/* frontend/src/app/components/sidebar/sidebar.component.css */
+
+/* 1. Reset & Constraints */
+:host {
+  display: block;
+  height: 100%;
+  max-height: 100vh;
+  max-height: 100dvh;
+  overflow: hidden;
+}
+
+.sidebar-container,
+.sidebar-container * {
+  box-sizing: border-box;
+}
+
+.sidebar-container {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  width: 100%;
+  background-color: var(--sidebar-bg);
+  color: var(--text-secondary);
+
+  padding: 1.5rem;
+  padding-bottom: calc(1.5rem + env(safe-area-inset-bottom));
+
+  transition:
+    padding 0.3s ease-in-out,
+    width 0.3s ease-in-out;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+/* Note: Custom scrollbars removed - inherited from global styles.css */
+
+/* 2. Header */
+.sidebar-header {
+  flex-shrink: 0;
+  padding-bottom: 1rem;
+  margin-bottom: 1rem;
+  border-bottom: 1px solid var(--border-color);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.logo-area {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  overflow: hidden;
+}
+
+.logo-container {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.logo-icon {
+  width: 2.5rem;
+  height: 2.5rem;
+  flex-shrink: 0;
+}
+
+.logo-text {
+  /* Keep specific sidebar size, but inherit color/margin from global h1 */
+  font-size: 1.25rem;
+  font-weight: 700;
+  margin-bottom: 0;
+  white-space: nowrap;
+}
+
+.app-version {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  padding-left: 0.25rem;
+  white-space: nowrap;
+}
+
+/* 3. Middle Section (Admin Navigation) */
+.databases-section {
+  flex-grow: 1;
+  flex-shrink: 0;
+}
+
+/* 4. Footer (Bottom) */
+.sidebar-footer {
+  flex-shrink: 0;
+  margin-top: auto;
+  padding-top: 1rem;
+  border-top: 1px solid var(--border-color);
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.user-info {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.5rem;
+  border-radius: 0.375rem;
+  background-color: var(--item-bg);
+  white-space: nowrap;
+}
+
+.user-info.cursor-pointer {
+  cursor: pointer;
+  transition: background-color 0.2s ease;
+}
+
+.user-info.cursor-pointer:hover {
+  background-color: var(--item-bg-hover);
+}
+
+.user-avatar {
+  width: 2.25rem;
+  height: 2.25rem;
+  border-radius: 50%;
+  background-color: var(--button-primary-bg);
+  color: var(--text-primary);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 600;
+  font-size: 0.9rem;
+  flex-shrink: 0;
+}
+
+.user-details {
+  font-size: 0.875rem;
+  line-height: 1.2;
+  overflow: hidden;
+}
+
+.username {
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.user-role {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
+
+.nav-links {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.nav-link {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.5rem 0.75rem;
+  border-radius: 0.375rem;
+  font-size: 0.875rem;
+  font-weight: 500;
+  color: var(--text-secondary);
+  text-decoration: none;
+  transition: all 0.2s ease;
+  white-space: nowrap;
+}
+.nav-link:hover {
+  background-color: var(--item-bg-hover);
+  color: var(--text-primary);
+}
+
+.nav-link-icon {
+  width: 2rem;
+  height: 2rem;
+  flex-shrink: 0;
+}
+
+.theme-toggle-button,
+.logout-button,
+.sidebar-toggle-btn {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  padding: 0.6rem 1rem;
+  border: none;
+  border-radius: 0.375rem;
+  font-size: 0.875rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  white-space: nowrap;
+}
+
+.theme-toggle-button {
+  color: var(--text-primary);
+  background-color: var(--item-bg);
+  border: 1px solid var(--border-color) !important;
+}
+.theme-toggle-button:hover {
+  background-color: var(--item-bg-hover);
+}
+.theme-toggle-button .theme-toggle-icon {
+  width: 1.25rem;
+  height: 1.25rem;
+  flex-shrink: 0;
+}
+
+.logout-button {
+  color: var(--text-primary);
+  background-color: var(--button-secondary-bg);
+}
+.logout-button:hover {
+  background-color: var(--button-danger-bg);
+}
+.logout-button .logout-icon {
+  width: 1.25rem;
+  height: 1.25rem;
+  flex-shrink: 0;
+}
+
+.sidebar-toggle-btn {
+  color: var(--text-muted);
+  background-color: transparent;
+  border: 1px dashed var(--border-color);
+}
+.sidebar-toggle-btn:hover {
+  color: var(--text-primary);
+  background-color: var(--item-bg);
+  border-style: solid;
+}
+
+/* Accessibility: Focus Rings for interactive sidebar elements */
+.nav-link:focus-visible,
+.user-info:focus-visible,
+.logout-button:focus-visible,
+.sidebar-toggle-btn:focus-visible {
+  outline: 2px solid var(--input-focus-border);
+  outline-offset: -2px; /* Inset slightly so it doesn't clip off the sidebar */
+}
+
+/* 5. Collapsed State */
+.sidebar-container.collapsed {
+  padding: 1.5rem 0.75rem;
+  align-items: center;
+}
+
+.sidebar-container.collapsed .sidebar-header {
+  justify-content: center;
+  padding-bottom: 0.8rem;
+}
+
+.sidebar-container.collapsed .nav-link-icon,
+.sidebar-container.collapsed .logout-icon {
+  margin: 0;
+}
+
+.sidebar-container.collapsed .sidebar-footer {
+  border-top: none;
+  padding-top: 0;
+  align-items: center;
+}
+
+.sidebar-container.collapsed .user-info,
+.sidebar-container.collapsed .nav-link,
+.sidebar-container.collapsed .theme-toggle-button,
+.sidebar-container.collapsed .logout-button,
+.sidebar-container.collapsed .sidebar-toggle-btn {
+  width: 2.75rem;
+  height: 2.75rem;
+  padding: 0;
+  justify-content: center;
+}
+
+@media (max-width: 600px) {
+  .sidebar-container.collapsed {
+    padding-left: 0.5rem;
+    padding-right: 0.5rem;
+  }
+  .sidebar-container.collapsed .user-info,
+  .sidebar-container.collapsed .nav-link,
+  .sidebar-container.collapsed .theme-toggle-button,
+  .sidebar-container.collapsed .logout-button,
+  .sidebar-container.collapsed .sidebar-toggle-btn {
+    width: 2.5rem;
+    height: 2.5rem;
+  }
+}

@@ -1,0 +1,40 @@
+<app-modal [modalId]="'editEntryModal'" [modalTitle]="'Edit Entry Metadata'">
+  <div *ngIf="currentEntry && editForm && currentDatabase">
+    <form [formGroup]="editForm" (ngSubmit)="onSubmit()">
+      <div class="form-grid">
+        <div class="form-group">
+          <label for="edit-timestamp" class="form-label">Timestamp</label>
+          <input
+            id="edit-timestamp"
+            type="datetime-local"
+            formControlName="timestamp"
+            class="form-control"
+            step="1"
+          />
+        </div>
+
+        <div class="form-group">
+          <label for="edit-filename" class="form-label">Filename</label>
+          <input id="edit-filename" type="text" formControlName="filename" class="form-control" />
+        </div>
+      </div>
+
+      <app-custom-fields-form
+        [fields]="currentDatabase.custom_fields"
+        [formGroup]="customFieldsGroup"
+        idPrefix="edit-cf-"
+      ></app-custom-fields-form>
+
+      <div class="modal-actions">
+        <button type="button" class="btn btn-secondary" (click)="closeModal()">Cancel</button>
+        <button type="submit" class="btn btn-primary" [disabled]="editForm.invalid || isLoading">
+          {{ isLoading ? 'Saving...' : 'Save Changes' }}
+        </button>
+      </div>
+    </form>
+  </div>
+
+  <div *ngIf="!currentEntry || !editForm || !currentDatabase">
+    <p>Loading entry metadata...</p>
+  </div>
+</app-modal>

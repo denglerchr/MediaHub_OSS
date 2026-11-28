@@ -1,0 +1,189 @@
+<div
+  class="settings-container page-container"
+  *ngIf="!isLoading && currentDb as db; else loadingOrError"
+>
+  <app-page-header [title]="db.name + ' Settings'" [titleTooltip]="db.name"></app-page-header>
+
+  <div class="scroll-content">
+    <div class="settings-card">
+      <h3>Statistics</h3>
+      <div class="stats-grid" *ngIf="db.stats">
+        <div class="stat-item">
+          <span class="stat-label">Entry Count</span>
+          <span class="stat-value">{{ db.stats.entry_count | number }}</span>
+        </div>
+        <div class="stat-item">
+          <span class="stat-label">Total Disk Space</span>
+          <span class="stat-value">{{ db.stats.total_disk_space_bytes | formatBytes }}</span>
+        </div>
+      </div>
+      <p *ngIf="!db.stats" class="text-muted">Stats are currently unavailable.</p>
+    </div>
+
+    <form [formGroup]="settingsForm" (ngSubmit)="onSaveSettings()">
+      <div class="settings-card">
+        <h3>General Settings</h3>
+        <div class="form-group">
+          <label for="dbName" class="form-label">Database Name</label>
+          <input
+            type="text"
+            id="dbName"
+            class="form-control"
+            formControlName="name"
+            [readOnly]="!canAdmin"
+          />
+          <small class="text-muted"
+            >The display name of your database. Changing this will not break any existing file links
+            or uploads.</small
+          >
+          <div
+            *ngIf="settingsForm.get('name')?.invalid && settingsForm.get('name')?.touched"
+            class="form-error"
+            style="color: var(--text-danger); font-size: 0.85rem; margin-top: 0.25rem"
+          >
+            <span *ngIf="settingsForm.get('name')?.hasError('required')"
+              >Database name is required.</span
+            >
+            <span *ngIf="settingsForm.get('name')?.hasError('maxlength')"
+              >Database name cannot exceed 64 characters.</span
+            >
+            <span *ngIf="settingsForm.get('name')?.hasError('pattern')"
+              >Database name must start with a letter or underscore and contain only letters,
+              digits, or underscores.</span
+            >
+          </div>
+        </div>
+
+        <div class="form-group" style="margin-top: 1.5rem">
+          <label for="nMaxQueued" class="form-label">Max Queued Conversions</label>
+          <input
+            type="number"
+            id="nMaxQueued"
+            class="form-control"
+            formControlName="n_max_queued"
+            [readOnly]="!canAdmin"
+            min="0"
+          />
+          <small class="text-muted"
+            >Maximum number of entries that can be queued for processing at once. Set to 0 to
+            disable queuing.</small
+          >
+          <div
+            *ngIf="
+              settingsForm.get('n_max_queued')?.invalid && settingsForm.get('n_max_queued')?.touched
+            "
+            class="form-error"
+            style="color: var(--text-danger); font-size: 0.85rem; margin-top: 0.25rem"
+          >
+            <span *ngIf="settingsForm.get('n_max_queued')?.hasError('required')"
+              >Max queued conversions is required.</span
+            >
+            <span *ngIf="settingsForm.get('n_max_queued')?.hasError('min')"
+              >Max queued conversions cannot be negative.</span
+            >
+            <span *ngIf="settingsForm.get('n_max_queued')?.hasError('pattern')"
+              >Max queued conversions must be a whole number.</span
+            >
+          </div>
+        </div>
+      </div>
+
+      <div class="settings-card">
+        <h3>Configuration</h3>
+
+        <div class="form-group">
+          <label class="form-label">Content Type</label>
+          <input type="text" class="form-control" [value]="db.content_type | titlecase" readonly />
+        </div>
+
+        <app-database-media-config
+          [formGroup]="settingsForm"
+          [contentType]="db.content_type"
+          layout="stacked"
+          headingStyle="sub-heading"
+          headingSuffix="Settings"
+        ></app-database-media-config>
+
+        <h4 class="sub-heading">Housekeeping Rules</h4>
+        <app-housekeeping-fields
+          [formGroup]="housekeepingGroup"
+          [readOnly]="!canAdmin"
+          [showUnitSelect]="canAdmin"
+          [parseWarning]="housekeepingParseWarning"
+        ></app-housekeeping-fields>
+
+        <div class="form-actions">
+          <button
+            *ngIf="canAdmin"
+            type="submit"
+            class="btn btn-primary"
+            [disabled]="
+              settingsForm.invalid ||
+              settingsForm.pristine ||
+              isSavingSettings ||
+              hasUnparseableHousekeeping
+            "
+          >
+            {{ isSavingSettings ? 'Saving...' : 'Save Changes' }}
+          </button>
+          <button
+            *ngIf="canDelete"
+            type="button"
+            class="btn btn-secondary"
+            (click)="onTriggerHousekeeping()"
+            [disabled]="isRunningHousekeeping"
+          >
+            {{ isRunningHousekeeping ? 'Running...' : 'Run Housekeeping Now' }}
+          </button>
+        </div>
+      </div>
+    </form>
+
+    <app-database-custom-fields-editor
+      [database]="db"
+      [canAdmin]="canAdmin"
+    ></app-database-custom-fields-editor>
+
+    <div class="settings-card" *ngIf="canCreate">
+      <h3>Data Management</h3>
+      <p class="text-muted" style="margin-bottom: 1.5rem">
+        Import new entries from a ZIP archive or export your existing database structure and media.
+      </p>
+
+      <div style="display: flex; gap: 12px">
+        <!--An export button will come here some day...-->
+
+        <button
+          type="button"
+          class="btn btn-primary"
+          [routerLink]="['/dashboard/db', db.id, 'import']"
+        >
+          Import Archive
+        </button>
+      </div>
+    </div>
+
+    <div class="settings-card danger-zone" *ngIf="isGlobalAdmin">
+      <h3>Danger Zone</h3>
+      <div class="danger-content">
+        <p>
+          Deleting a database is permanent and cannot be undone. This will remove all entries and
+          metadata associated with it.
+        </p>
+        <button class="btn btn-danger" (click)="onDeleteDatabase()" [disabled]="isDeletingDatabase">
+          {{ isDeletingDatabase ? 'Deleting...' : 'Delete this Database' }}
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<ng-template #loadingOrError>
+  <div class="state-message">
+    <p>
+      {{
+        isLoading ? 'Loading database settings...' : 'Database not found or could not be loaded.'
+      }}
+    </p>
+  </div>
+</ng-template>

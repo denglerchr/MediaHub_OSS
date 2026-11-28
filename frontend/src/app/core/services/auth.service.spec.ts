@@ -1,0 +1,817 @@
+// frontend/src/app/services/auth.service.spec.ts
+// Regression specs for FE-007 (logout revokes the currently stored refresh token),
+// FE-008 (tokens out of localStorage), FE-009 (multi-tab refresh race),
+// FE-010 (transient errors must not destroy the session) and FE-018 (?local=1).
+// The second describe block covers the Phase E FE-007/N2/N4 corrections: the
+// revocation request is now preceded by a silent refresh (so an expired access
+// token no longer skips server-side revocation) and waits for in-flight refreshes.
+import { TestBed } from '@angular/core/testing';
+import {
+  HttpClientTestingModule,
+  HttpTestingController,
+  provideHttpClientTesting,
+} from '@angular/common/http/testing';
+import {
+  HttpClient,
+  HttpErrorResponse,
+  provideHttpClient,
+  withInterceptors,
+} from '@angular/common/http';
+import { Router, convertToParamMap } from '@angular/router';
+import { of, throwError } from 'rxjs';
+import { AuthService, OidcCallbackResult } from './auth.service';
+import { AppInfoService } from './app-info.service';
+import { jwtInterceptorFn } from '../interceptors/jwt.interceptor';
+import { SKIP_AUTH_REFRESH } from '../interceptors/http-context.tokens';
+import { User, TokenResponse } from '../models';
+
+describe('AuthService — FE-007/FE-008/FE-009/FE-010/FE-018 regressions', () => {
+  let service: AuthService;
+  let httpMock: HttpTestingController;
+  let routerSpy: jasmine.SpyObj<Router>;
+
+  const user = {
+    id: 'u1',
+    username: 'alice',
+    is_admin: false,
+    permissions: [],
+    account_type: 'local',
+  } as unknown as User;
+
+  beforeEach(() => {
+    // Karma runs every spec in one page — start from a clean storage so the
+    // FE-008 migration in the constructor cannot pick up leftovers.
+    localStorage.clear();
+    sessionStorage.clear();
+
+    routerSpy = jasmine.createSpyObj<Router>('Router', ['navigate'], {
+      routerState: { snapshot: { root: { queryParams: {} } } } as any,
+    });
+
+    TestBed.configureTestingModule({
+      imports: [HttpClientTestingModule],
+      providers: [AuthService, { provide: Router, useValue: routerSpy }],
+    });
+    service = TestBed.inject(AuthService);
+    httpMock = TestBed.inject(HttpTestingController);
+  });
+
+  afterEach(() => {
+    localStorage.clear();
+    sessionStorage.clear();
+    httpMock.verify();
+  });
+
+  function login(): void {
+    service.basicAuthLogin('alice', 'pw').subscribe({ error: () => {} });
+    httpMock
+      .expectOne('/api/token')
+      .flush({ access_token: 'A1', refresh_token: 'R1' } as TokenResponse);
+    httpMock.expectOne('/api/me').flush(user);
+  }
+
+  // --- FE-008 ---
+
+  it('FE-008: tokens are kept out of localStorage (access in memory, refresh in sessionStorage)', () => {
+    login();
+
+    expect(service.getAccessToken()).toBe('A1');
+    expect(service.getRefreshToken()).toBe('R1');
+    expect(localStorage.getItem('access_token')).toBeNull();
+    expect(localStorage.getItem('refresh_token')).toBeNull();
+    expect(sessionStorage.getItem('refresh_token')).toBe('R1');
+  });
+
+  it('FE-008: a legacy localStorage refresh token is migrated to sessionStorage and scrubbed', () => {
+    localStorage.setItem('access_token', 'legacy-access');
+    localStorage.setItem('refresh_token', 'legacy-refresh');
+
+    const fresh = new AuthService(TestBed.inject(HttpClient), routerSpy);
+
+    expect(fresh.getRefreshToken()).toBe('legacy-refresh');
+    expect(fresh.getAccessToken()).toBeNull(); // access token is no longer persisted
+    expect(localStorage.getItem('access_token')).toBeNull();
+    expect(localStorage.getItem('refresh_token')).toBeNull();
+    expect(sessionStorage.getItem('refresh_token')).toBe('legacy-refresh');
+  });
+
+  it('FE-008: after a reload the session is silently restored from the sessionStorage refresh token', () => {
+    sessionStorage.setItem('refresh_token', 'R1');
+    // The in-memory access token is gone after a reload — that must not log us out.
+
+    const received: { user: User | null } = { user: null };
+    service.ensureCurrentUser().subscribe((u) => (received.user = u));
+
+    httpMock
+      .expectOne('/api/token/refresh')
+      .flush({ access_token: 'A2', refresh_token: 'R2' } as TokenResponse);
+    httpMock.expectOne('/api/me').flush(user);
+
+    expect(received.user).toEqual(user);
+    expect(service.getAccessToken()).toBe('A2');
+    expect(service.getRefreshToken()).toBe('R2');
+  });
+
+  // --- FE-007 ---
+
+  it('FE-007: logout revokes the *currently stored* (rotated) refresh token and is flagged SKIP_AUTH_REFRESH', () => {
+    login();
+
+    // A mid-session refresh rotates the pair (as the interceptor does on 401).
+    service.refreshToken().subscribe();
+    httpMock
+      .expectOne('/api/token/refresh')
+      .flush({ access_token: 'A2', refresh_token: 'R2' } as TokenResponse);
+
+    service.logout();
+    const logoutReq = httpMock.expectOne('/api/logout');
+
+    // The body must carry the token stored at send time (R2), not the stale R1 —
+    // otherwise the backend deletes an already-deleted row and R2 lives on.
+    expect(logoutReq.request.body.refresh_token).toBe('R2');
+    expect(logoutReq.request.context.get(SKIP_AUTH_REFRESH)).toBeTrue();
+
+    logoutReq.flush({ message: 'Logged out successfully.' });
+    expect(service.getRefreshToken()).toBeNull();
+    expect(service.getAccessToken()).toBeNull();
+  });
+
+  it('FE-007: logout without a stored refresh token just clears the session locally', () => {
+    service.logout();
+    httpMock.expectNone('/api/logout');
+    expect(routerSpy.navigate).toHaveBeenCalledWith(['/login'], { queryParams: {} });
+  });
+
+  // --- FE-009 ---
+
+  it('FE-009: concurrent refresh calls share a single refresh request (single-flight)', () => {
+    sessionStorage.setItem('refresh_token', 'R1');
+
+    service.refreshToken().subscribe();
+    service.refreshToken().subscribe();
+
+    httpMock
+      .expectOne('/api/token/refresh')
+      .flush({ access_token: 'A2', refresh_token: 'R2' } as TokenResponse);
+    httpMock.expectNone('/api/token/refresh');
+    expect(service.getRefreshToken()).toBe('R2');
+  });
+
+  it('FE-009: a 401 refresh retries once with the currently stored token before failing', () => {
+    sessionStorage.setItem('refresh_token', 'R1');
+
+    const received: { tokens: TokenResponse | null } = { tokens: null };
+    let failed = false;
+    service.refreshToken().subscribe({
+      next: (t) => (received.tokens = t),
+      error: () => (failed = true),
+    });
+
+    const first = httpMock.expectOne('/api/token/refresh');
+    expect(first.request.body.refresh_token).toBe('R1');
+    // Meanwhile another actor (e.g. a duplicated tab) stored a rotated token.
+    sessionStorage.setItem('refresh_token', 'R2');
+    first.flush(null, { status: 401, statusText: 'Unauthorized' });
+
+    const retry = httpMock.expectOne('/api/token/refresh');
+    expect(retry.request.body.refresh_token).toBe('R2');
+    retry.flush({ access_token: 'A3', refresh_token: 'R3' } as TokenResponse);
+
+    expect(failed).toBeFalse();
+    expect(received.tokens?.access_token).toBe('A3');
+  });
+
+  it('FE-009: a 401 refresh with an unchanged stored token does NOT retry (session is dead)', () => {
+    sessionStorage.setItem('refresh_token', 'R1');
+
+    let failed = false;
+    service.refreshToken().subscribe({ error: () => (failed = true) });
+
+    httpMock
+      .expectOne('/api/token/refresh')
+      .flush(null, { status: 401, statusText: 'Unauthorized' });
+    httpMock.expectNone('/api/token/refresh');
+    expect(failed).toBeTrue();
+  });
+
+  // --- FE-010 ---
+
+  it('FE-010: a transient 500 on /api/me keeps the session alive', () => {
+    login();
+
+    const received: { user: User | null } = { user };
+    service.fetchCurrentUser().subscribe((u) => (received.user = u));
+    httpMock.expectOne('/api/me').flush(null, { status: 500, statusText: 'Server Error' });
+
+    expect(received.user).toBeNull();
+    expect(service.getRefreshToken()).toBe('R1'); // session untouched
+    expect(routerSpy.navigate).not.toHaveBeenCalled();
+  });
+
+  it('FE-010: a network failure (status 0) on /api/me keeps the session alive', () => {
+    login();
+
+    service.fetchCurrentUser().subscribe();
+    httpMock.expectOne('/api/me').flush(null, { status: 0, statusText: 'Unknown Error' });
+
+    expect(service.getRefreshToken()).toBe('R1');
+    expect(routerSpy.navigate).not.toHaveBeenCalled();
+  });
+
+  it('FE-010: a genuine 401 on /api/me clears the session and redirects', () => {
+    login();
+
+    service.fetchCurrentUser().subscribe();
+    httpMock.expectOne('/api/me').flush(null, { status: 401, statusText: 'Unauthorized' });
+
+    expect(service.getRefreshToken()).toBeNull();
+    expect(routerSpy.navigate).toHaveBeenCalledWith(['/login'], { queryParams: {} });
+  });
+
+  // --- FE-018 ---
+
+  it('FE-018: a failed local login clears tokens without navigating (the ?local=1 escape hatch survives)', () => {
+    let failed = false;
+    service.basicAuthLogin('alice', 'wrong').subscribe({ error: () => (failed = true) });
+    httpMock.expectOne('/api/token').flush(null, { status: 401, statusText: 'Unauthorized' });
+
+    expect(failed).toBeTrue();
+    expect(service.getAccessToken()).toBeNull();
+    expect(service.getRefreshToken()).toBeNull();
+    expect(routerSpy.navigate).not.toHaveBeenCalled();
+  });
+
+  it('FE-018: when the session dies on /login?local=1, the redirect keeps the ?local=1 param', () => {
+    (routerSpy.routerState.snapshot.root as any).queryParams = { local: '1' };
+
+    service.logout(false);
+
+    expect(routerSpy.navigate).toHaveBeenCalledWith(['/login'], { queryParams: { local: '1' } });
+  });
+
+  it('safe storage: migrateLegacyStoredTokens and sessionStorage helpers do not throw when storage fails', () => {
+    spyOn(Storage.prototype, 'getItem').and.throwError('Storage disabled');
+    spyOn(Storage.prototype, 'setItem').and.throwError('Storage disabled');
+    spyOn(Storage.prototype, 'removeItem').and.throwError('Storage disabled');
+
+    expect(() => new AuthService(TestBed.inject(HttpClient), routerSpy)).not.toThrow();
+
+    expect(service.getRefreshToken()).toBeNull();
+    expect(() => service.logout(false)).not.toThrow();
+  });
+
+  it('session generation: logout(false) prevents an in-flight refresh or /api/me from resurrecting the session', () => {
+    sessionStorage.setItem('refresh_token', 'R1');
+
+    service.refreshToken().subscribe({ error: () => {} });
+    const refreshReq = httpMock.expectOne('/api/token/refresh');
+
+    service.logout(false);
+    expect(service.getRefreshToken()).toBeNull();
+
+    // Late refresh response from before logout(false) must be ignored.
+    refreshReq.flush({ access_token: 'A-stale', refresh_token: 'R-stale' } as TokenResponse);
+    expect(service.getAccessToken()).toBeNull();
+    expect(service.getRefreshToken()).toBeNull();
+
+    // Same for an in-flight /api/me response arriving after logout(false).
+    sessionStorage.setItem('refresh_token', 'R2');
+    service.refreshToken().subscribe();
+    httpMock
+      .expectOne('/api/token/refresh')
+      .flush({ access_token: 'A2', refresh_token: 'R2' } as TokenResponse);
+
+    let receivedUser: User | null = null;
+    service.fetchCurrentUser().subscribe((u) => (receivedUser = u));
+    const meReq = httpMock.expectOne('/api/me');
+
+    service.logout(false);
+    meReq.flush(user);
+
+    expect(receivedUser).toBeNull();
+    expect(service.getCurrentUser()).toBeNull();
+  });
+
+  it('OIDC: redirectToOidc validates endpoint URL and protocol', async () => {
+    await expectAsync(
+      service.redirectToOidc({
+        oidc_issuer_url: 'javascript:alert(1)',
+        oidc_client_id: 'mediahub',
+      }),
+    ).toBeRejectedWithError('Invalid OIDC authorization endpoint URL');
+
+    await expectAsync(
+      service.redirectToOidc({
+        oidc_issuer_url: 'https://idp.example.com/realms/main',
+        oidc_client_id: 'mediahub',
+        oidc_auth_endpoint: 'not a url',
+      }),
+    ).toBeRejectedWithError('Invalid OIDC authorization endpoint URL');
+  });
+
+  it('OIDC: redirectToOidc throws when Web Crypto API is unavailable', async () => {
+    const originalCrypto = window.crypto;
+    try {
+      spyOnProperty(window, 'crypto', 'get').and.returnValue({
+        getRandomValues: originalCrypto.getRandomValues.bind(originalCrypto),
+      } as unknown as Crypto);
+
+      await expectAsync(
+        service.redirectToOidc({
+          oidc_issuer_url: 'https://idp.example.com/realms/main',
+          oidc_client_id: 'mediahub',
+        }),
+      ).toBeRejectedWithError(/Web Crypto API is unavailable/);
+      expect(sessionStorage.getItem('oidc_state')).toBeNull();
+    } catch {
+      // If window.crypto is non-configurable in the test browser, skip cleanly.
+    }
+  });
+
+  it('OIDC: redirectToOidc persists state, code_verifier, and nonce and builds authorization URL', async () => {
+    const navSpy = spyOn(
+      service as unknown as { navigateExternal: (url: string) => void },
+      'navigateExternal',
+    );
+
+    await service.redirectToOidc({
+      oidc_issuer_url: 'https://idp.example.com/realms/main/',
+      oidc_client_id: 'mediahub-web',
+      oidc_redirect_url: 'https://app.example.com/auth/callback',
+    });
+
+    const state = sessionStorage.getItem('oidc_state');
+    const verifier = sessionStorage.getItem('oidc_code_verifier');
+    const nonce = sessionStorage.getItem('oidc_nonce');
+
+    expect(state).toBeTruthy();
+    expect(verifier).toBeTruthy();
+    expect(nonce).toBeTruthy();
+    expect(navSpy).toHaveBeenCalledTimes(1);
+
+    const targetUrl = new URL(navSpy.calls.mostRecent().args[0] as string);
+    expect(targetUrl.origin + targetUrl.pathname).toBe(
+      'https://idp.example.com/realms/main/protocol/openid-connect/auth',
+    );
+    expect(targetUrl.searchParams.get('client_id')).toBe('mediahub-web');
+    expect(targetUrl.searchParams.get('redirect_uri')).toBe(
+      'https://app.example.com/auth/callback',
+    );
+    expect(targetUrl.searchParams.get('response_type')).toBe('code');
+    expect(targetUrl.searchParams.get('scope')).toBe('openid profile email');
+    expect(targetUrl.searchParams.get('state')).toBe(state);
+    expect(targetUrl.searchParams.get('nonce')).toBe(nonce);
+    expect(targetUrl.searchParams.get('code_challenge_method')).toBe('S256');
+    expect(targetUrl.searchParams.get('code_challenge')).toBeTruthy();
+  });
+
+  it('OIDC: oidcLogin includes nonce in the token exchange payload when provided', () => {
+    let loggedInUser: User | undefined;
+    service
+      .oidcLogin('auth-code', 'https://app.example.com/auth/callback', 'verifier-1', 'nonce-1')
+      .subscribe((u) => (loggedInUser = u));
+
+    const oidcReq = httpMock.expectOne('/api/token/oidc');
+    expect(oidcReq.request.body).toEqual({
+      code: 'auth-code',
+      redirect_uri: 'https://app.example.com/auth/callback',
+      code_verifier: 'verifier-1',
+      nonce: 'nonce-1',
+    });
+    oidcReq.flush({ access_token: 'A1', refresh_token: 'R1' } as TokenResponse);
+    httpMock.expectOne('/api/me').flush(user);
+
+    expect(loggedInUser).toEqual(user);
+  });
+
+  it('changeOwnPassword ensures a fresh access token before sending PATCH /api/me', () => {
+    sessionStorage.setItem('refresh_token', 'R1');
+
+    let done = false;
+    service.changeOwnPassword('old-pw', 'new-pw').subscribe(() => (done = true));
+
+    httpMock
+      .expectOne('/api/token/refresh')
+      .flush({ access_token: 'A2', refresh_token: 'R2' } as TokenResponse);
+    const patchReq = httpMock.expectOne('/api/me');
+    expect(patchReq.request.method).toBe('PATCH');
+    expect(patchReq.request.context.get(SKIP_AUTH_REFRESH)).toBeTrue();
+    expect(patchReq.request.body).toEqual({ old_password: 'old-pw', new_password: 'new-pw' });
+    patchReq.flush({ message: 'updated' });
+
+    expect(done).toBeTrue();
+    expect(service.getAccessToken()).toBe('A2');
+  });
+
+  it('H9 (a): changeOwnPassword redirects to /login, completes without error, and skips PATCH /api/me when refresh returns 401', () => {
+    sessionStorage.setItem('refresh_token', 'R1');
+
+    let nextCount = 0;
+    let errored = false;
+    let completed = false;
+    service.changeOwnPassword('old-pw', 'new-pw').subscribe({
+      next: () => nextCount++,
+      error: () => (errored = true),
+      complete: () => (completed = true),
+    });
+
+    httpMock
+      .expectOne('/api/token/refresh')
+      .flush(null, { status: 401, statusText: 'Unauthorized' });
+    httpMock.expectNone('/api/me');
+
+    expect(nextCount).toBe(0);
+    expect(errored).toBeFalse();
+    expect(completed).toBeTrue();
+    expect(service.getRefreshToken()).toBeNull();
+    expect(routerSpy.navigate).toHaveBeenCalledWith(['/login'], { queryParams: {} });
+  });
+
+  it('H9 (b): changeOwnPassword preserves session, does not redirect, skips PATCH /api/me, and emits non-401 error when refresh returns 500', () => {
+    sessionStorage.setItem('refresh_token', 'R1');
+
+    let receivedError: unknown = null;
+    service.changeOwnPassword('old-pw', 'new-pw').subscribe({
+      error: (err) => (receivedError = err),
+    });
+
+    httpMock
+      .expectOne('/api/token/refresh')
+      .flush(null, { status: 500, statusText: 'Server Error' });
+    httpMock.expectNone('/api/me');
+
+    expect(routerSpy.navigate).not.toHaveBeenCalled();
+    expect(service.getRefreshToken()).toBe('R1');
+    expect(receivedError instanceof HttpErrorResponse).toBeTrue();
+    expect((receivedError as HttpErrorResponse).status).not.toBe(401);
+  });
+
+  describe('sessionCleared$', () => {
+    it('emits on initial null, user switch, and logout, but not on login or same-user re-emission', () => {
+      let clearedCount = 0;
+      const sub = service.sessionCleared$.subscribe(() => clearedCount++);
+
+      // Initial BehaviorSubject(null) emission triggers once.
+      expect(clearedCount).toBe(1);
+
+      // Logging in as u1 does not trigger sessionCleared$.
+      login();
+      expect(clearedCount).toBe(1);
+
+      // Re-emitting the same user id (u1) does not trigger sessionCleared$.
+      service.fetchCurrentUser().subscribe();
+      httpMock.expectOne('/api/me').flush({ ...user });
+      expect(clearedCount).toBe(1);
+
+      // Switching directly to u2 triggers sessionCleared$.
+      const user2 = { ...user, id: 'u2', username: 'bob' } as unknown as User;
+      service.fetchCurrentUser().subscribe();
+      httpMock.expectOne('/api/me').flush(user2);
+      expect(clearedCount).toBe(2);
+
+      // Logging out (null) triggers sessionCleared$.
+      service.logout(false);
+      expect(clearedCount).toBe(3);
+
+      sub.unsubscribe();
+    });
+  });
+
+  describe('completeOidcCallback', () => {
+    it('clears OIDC sessionStorage keys and returns sso_failed when provider returns error', () => {
+      sessionStorage.setItem('oidc_state', 's1');
+      sessionStorage.setItem('oidc_code_verifier', 'v1');
+      sessionStorage.setItem('oidc_nonce', 'n1');
+      spyOn(console, 'error');
+      spyOn(console, 'warn');
+
+      let result: OidcCallbackResult | undefined;
+      service
+        .completeOidcCallback(
+          convertToParamMap({ error: 'access_denied', error_description: 'User cancelled' }),
+        )
+        .subscribe((r) => (result = r));
+
+      expect(result).toEqual({ status: 'error', errorParam: 'sso_failed' });
+      expect(sessionStorage.getItem('oidc_state')).toBeNull();
+      expect(sessionStorage.getItem('oidc_code_verifier')).toBeNull();
+      expect(sessionStorage.getItem('oidc_nonce')).toBeNull();
+    });
+
+    it('returns error without errorParam when code is missing', () => {
+      let result: OidcCallbackResult | undefined;
+      service.completeOidcCallback(convertToParamMap({})).subscribe((r) => (result = r));
+
+      expect(result).toEqual({ status: 'error' });
+    });
+
+    it('returns sso_state_invalid and clears OIDC keys on CSRF state mismatch', () => {
+      sessionStorage.setItem('oidc_state', 'expected-state');
+      sessionStorage.setItem('oidc_code_verifier', 'v1');
+      sessionStorage.setItem('oidc_nonce', 'n1');
+      spyOn(console, 'error');
+
+      let result: OidcCallbackResult | undefined;
+      service
+        .completeOidcCallback(convertToParamMap({ code: 'c1', state: 'wrong-state' }))
+        .subscribe((r) => (result = r));
+
+      expect(result).toEqual({ status: 'error', errorParam: 'sso_state_invalid' });
+      expect(sessionStorage.getItem('oidc_state')).toBeNull();
+      expect(sessionStorage.getItem('oidc_code_verifier')).toBeNull();
+      expect(sessionStorage.getItem('oidc_nonce')).toBeNull();
+    });
+
+    it('returns sso_state_invalid when oidc_code_verifier is missing from sessionStorage', () => {
+      sessionStorage.setItem('oidc_state', 's1');
+      sessionStorage.setItem('oidc_nonce', 'n1');
+      spyOn(console, 'error');
+
+      let result: OidcCallbackResult | undefined;
+      service
+        .completeOidcCallback(convertToParamMap({ code: 'c1', state: 's1' }))
+        .subscribe((r) => (result = r));
+
+      expect(result).toEqual({ status: 'error', errorParam: 'sso_state_invalid' });
+      expect(sessionStorage.getItem('oidc_state')).toBeNull();
+      expect(sessionStorage.getItem('oidc_nonce')).toBeNull();
+    });
+
+    it('completes happy path using redirect_uri from AppInfoService and logs in user', () => {
+      const appInfoSpy = jasmine.createSpyObj<AppInfoService>('AppInfoService', ['loadInfo']);
+      appInfoSpy.loadInfo.and.returnValue(
+        of({ oidc: { oidc_redirect_url: 'https://app.example.com/auth/callback' } } as any),
+      );
+      const oidcService = new AuthService(TestBed.inject(HttpClient), routerSpy, appInfoSpy);
+
+      sessionStorage.setItem('oidc_state', 's1');
+      sessionStorage.setItem('oidc_code_verifier', 'verifier-1');
+      sessionStorage.setItem('oidc_nonce', 'nonce-1');
+
+      let result: OidcCallbackResult | undefined;
+      oidcService
+        .completeOidcCallback(convertToParamMap({ code: 'auth-code', state: 's1' }))
+        .subscribe((r) => (result = r));
+
+      const oidcReq = httpMock.expectOne('/api/token/oidc');
+      expect(oidcReq.request.body).toEqual({
+        code: 'auth-code',
+        redirect_uri: 'https://app.example.com/auth/callback',
+        code_verifier: 'verifier-1',
+        nonce: 'nonce-1',
+      });
+      oidcReq.flush({ access_token: 'A1', refresh_token: 'R1' } as TokenResponse);
+      httpMock.expectOne('/api/me').flush(user);
+
+      expect(result).toEqual({ status: 'success' });
+      expect(oidcService.getCurrentUser()).toEqual(user);
+      expect(sessionStorage.getItem('oidc_state')).toBeNull();
+      expect(sessionStorage.getItem('oidc_code_verifier')).toBeNull();
+      expect(sessionStorage.getItem('oidc_nonce')).toBeNull();
+    });
+
+    it('falls back to window.location.origin/auth/callback when AppInfoService is absent', () => {
+      const standaloneService = new AuthService(TestBed.inject(HttpClient), routerSpy);
+      sessionStorage.setItem('oidc_state', 's1');
+      sessionStorage.setItem('oidc_code_verifier', 'verifier-1');
+
+      let result: OidcCallbackResult | undefined;
+      standaloneService
+        .completeOidcCallback(convertToParamMap({ code: 'auth-code', state: 's1' }))
+        .subscribe((r) => (result = r));
+
+      const oidcReq = httpMock.expectOne('/api/token/oidc');
+      expect(oidcReq.request.body).toEqual({
+        code: 'auth-code',
+        redirect_uri: `${window.location.origin}/auth/callback`,
+        code_verifier: 'verifier-1',
+      });
+      oidcReq.flush({ access_token: 'A1', refresh_token: 'R1' } as TokenResponse);
+      httpMock.expectOne('/api/me').flush(user);
+
+      expect(result).toEqual({ status: 'success' });
+    });
+
+    it('returns sso_failed when token exchange fails', () => {
+      const appInfoSpy = jasmine.createSpyObj<AppInfoService>('AppInfoService', ['loadInfo']);
+      appInfoSpy.loadInfo.and.returnValue(of(null));
+      const oidcService = new AuthService(TestBed.inject(HttpClient), routerSpy, appInfoSpy);
+
+      sessionStorage.setItem('oidc_state', 's1');
+      sessionStorage.setItem('oidc_code_verifier', 'verifier-1');
+      spyOn(console, 'error');
+      spyOn(console, 'warn');
+
+      let result: OidcCallbackResult | undefined;
+      oidcService
+        .completeOidcCallback(convertToParamMap({ code: 'bad-code', state: 's1' }))
+        .subscribe((r) => (result = r));
+
+      httpMock
+        .expectOne('/api/token/oidc')
+        .flush(null, { status: 401, statusText: 'Unauthorized' });
+
+      expect(result).toEqual({ status: 'error', errorParam: 'sso_failed' });
+      expect(oidcService.getAccessToken()).toBeNull();
+    });
+
+    it('returns sso_failed when AppInfoService.loadInfo errors', () => {
+      const appInfoSpy = jasmine.createSpyObj<AppInfoService>('AppInfoService', ['loadInfo']);
+      appInfoSpy.loadInfo.and.returnValue(throwError(() => new Error('network down')));
+      const oidcService = new AuthService(TestBed.inject(HttpClient), routerSpy, appInfoSpy);
+
+      sessionStorage.setItem('oidc_state', 's1');
+      sessionStorage.setItem('oidc_code_verifier', 'verifier-1');
+      spyOn(console, 'error');
+
+      let result: OidcCallbackResult | undefined;
+      oidcService
+        .completeOidcCallback(convertToParamMap({ code: 'auth-code', state: 's1' }))
+        .subscribe((r) => (result = r));
+
+      httpMock.expectNone('/api/token/oidc');
+      expect(result).toEqual({ status: 'error', errorParam: 'sso_failed' });
+    });
+  });
+});
+
+// --- Phase E: FE-007/N2/N4 corrections — refresh BEFORE logout -----------------
+// These specs register the real `jwtInterceptorFn` (via provideHttpClient — the
+// class-based HTTP_INTERCEPTORS registration is deprecated on Angular 20) so the
+// logout request carries the Bearer header exactly like in the app. The interceptor
+// itself is unchanged: a 401 on the logout request is still NOT refreshed/retried
+// (jwt.interceptor.spec.ts).
+describe('AuthService — FE-007/N2/N4 refresh-before-logout corrections', () => {
+  let service: AuthService;
+  let httpMock: HttpTestingController;
+  let routerSpy: jasmine.SpyObj<Router>;
+
+  const user = {
+    id: 'u1',
+    username: 'alice',
+    is_admin: false,
+    permissions: [],
+    account_type: 'local',
+  } as unknown as User;
+
+  beforeEach(() => {
+    localStorage.clear();
+    sessionStorage.clear();
+
+    routerSpy = jasmine.createSpyObj<Router>('Router', ['navigate'], {
+      routerState: { snapshot: { root: { queryParams: {} } } } as any,
+    });
+
+    TestBed.configureTestingModule({
+      providers: [
+        provideHttpClient(withInterceptors([jwtInterceptorFn])),
+        provideHttpClientTesting(),
+        AuthService,
+        { provide: Router, useValue: routerSpy },
+      ],
+    });
+    service = TestBed.inject(AuthService);
+    httpMock = TestBed.inject(HttpTestingController);
+  });
+
+  afterEach(() => {
+    localStorage.clear();
+    sessionStorage.clear();
+    httpMock.verify();
+  });
+
+  it('FE-007 (a/b/c): logout after idle silently refreshes first, then revokes the ROTATED token with a Bearer header', () => {
+    // >5 min idle / reload: the refresh token survived in sessionStorage while the
+    // in-memory access token is gone. POST /api/logout sits behind AuthMiddleware,
+    // so without a fresh access token the revocation would 401 before the handler.
+    sessionStorage.setItem('refresh_token', 'R2');
+
+    service.logout();
+
+    // (a) the silent refresh fires first — before any logout request exists
+    const refreshReq = httpMock.expectOne('/api/token/refresh');
+    expect(refreshReq.request.body.refresh_token).toBe('R2');
+    httpMock.expectNone('/api/logout');
+    refreshReq.flush({ access_token: 'A3', refresh_token: 'R3' } as TokenResponse);
+
+    // (b) the body carries the ROTATED token and a valid Bearer header
+    const logoutReq = httpMock.expectOne('/api/logout');
+    expect(logoutReq.request.body.refresh_token).toBe('R3');
+    expect(logoutReq.request.headers.get('Authorization')).toBe('Bearer A3');
+
+    // (c) the logout request itself is still flagged SKIP_AUTH_REFRESH
+    expect(logoutReq.request.context.get(SKIP_AUTH_REFRESH)).toBeTrue();
+
+    logoutReq.flush({ message: 'Logged out successfully.' });
+    expect(service.getRefreshToken()).toBeNull();
+    expect(service.getAccessToken()).toBeNull();
+    expect(routerSpy.navigate).toHaveBeenCalledWith(['/login'], { queryParams: {} });
+  });
+
+  it('FE-007: an EXPIRED (but still present) access token is refreshed before the revocation POST', () => {
+    // A tab that stayed open past the access-token TTL: the JWT is in memory but dead.
+    const expiredJwt = `hdr.${btoa(JSON.stringify({ exp: 1000 }))}.sig`;
+
+    // Establish a session, then let the access token expire in place (idle > TTL).
+    service.basicAuthLogin('alice', 'pw').subscribe({ error: () => {} });
+    httpMock
+      .expectOne('/api/token')
+      .flush({ access_token: 'A1', refresh_token: 'R1' } as TokenResponse);
+    httpMock.expectOne('/api/me').flush(user);
+    service.refreshToken().subscribe();
+    httpMock
+      .expectOne('/api/token/refresh')
+      .flush({ access_token: expiredJwt, refresh_token: 'R2' } as TokenResponse);
+    expect(service.getAccessToken()).toBe(expiredJwt);
+
+    service.logout();
+
+    // The dead access token must not skip the revocation: silent refresh first...
+    const refreshReq = httpMock.expectOne('/api/token/refresh');
+    expect(refreshReq.request.body.refresh_token).toBe('R2');
+    refreshReq.flush({ access_token: 'A3', refresh_token: 'R3' } as TokenResponse);
+
+    // ...then the revocation with the rotated token and a valid Bearer.
+    const logoutReq = httpMock.expectOne('/api/logout');
+    expect(logoutReq.request.body.refresh_token).toBe('R3');
+    expect(logoutReq.request.headers.get('Authorization')).toBe('Bearer A3');
+    logoutReq.flush({ message: 'Logged out successfully.' });
+    expect(service.getRefreshToken()).toBeNull();
+  });
+
+  it('FE-007 (d): a failing silent refresh still clears the local session (cleanup always runs)', () => {
+    sessionStorage.setItem('refresh_token', 'R2');
+
+    service.logout();
+
+    // Transient refresh failure: the refresh token survives in storage, so the
+    // best-effort revocation still goes out with the un-rotated token.
+    httpMock
+      .expectOne('/api/token/refresh')
+      .flush(null, { status: 500, statusText: 'Server Error' });
+    const logoutReq = httpMock.expectOne('/api/logout');
+    expect(logoutReq.request.body.refresh_token).toBe('R2');
+    logoutReq.flush(null, { status: 401, statusText: 'Unauthorized' });
+
+    expect(service.getRefreshToken()).toBeNull();
+    expect(service.getAccessToken()).toBeNull();
+    expect(routerSpy.navigate).toHaveBeenCalledWith(['/login'], { queryParams: {} });
+  });
+
+  it('FE-007 (d): a 401 on the silent refresh means the token is already dead — session cleared without a logout POST', () => {
+    sessionStorage.setItem('refresh_token', 'R2');
+
+    service.logout();
+
+    httpMock
+      .expectOne('/api/token/refresh')
+      .flush(null, { status: 401, statusText: 'Unauthorized' });
+    httpMock.expectNone('/api/logout');
+    expect(service.getRefreshToken()).toBeNull();
+    expect(routerSpy.navigate).toHaveBeenCalledWith(['/login'], { queryParams: {} });
+  });
+
+  it('N4 (e): logout racing an in-flight refresh revokes the POST-rotation token', () => {
+    sessionStorage.setItem('refresh_token', 'R1');
+
+    // A 401 somewhere else is mid-refresh (rotation will replace R1 with R3).
+    service.refreshToken().subscribe();
+    service.logout();
+
+    // The logout body must be built only after the rotation settles.
+    httpMock.expectNone('/api/logout');
+    httpMock
+      .expectOne('/api/token/refresh')
+      .flush({ access_token: 'A3', refresh_token: 'R3' } as TokenResponse);
+
+    const logoutReq = httpMock.expectOne('/api/logout');
+    expect(logoutReq.request.body.refresh_token).toBe('R3');
+    expect(logoutReq.request.headers.get('Authorization')).toBe('Bearer A3');
+    logoutReq.flush({ message: 'Logged out successfully.' });
+    expect(service.getRefreshToken()).toBeNull();
+    expect(service.getAccessToken()).toBeNull();
+  });
+
+  it('logout idempotency: duplicate logout() calls and external refreshToken() during logout are blocked', () => {
+    sessionStorage.setItem('refresh_token', 'R1');
+
+    service.logout();
+    // Second click while logout is already in flight must be a no-op.
+    service.logout();
+
+    // External 401 refresh caller must fail with 'Logout in progress' instead of rotating behind logout's back.
+    let refreshError: Error | null = null;
+    service.refreshToken().subscribe({ error: (err: Error) => (refreshError = err) });
+    expect((refreshError as Error | null)?.message).toBe('Logout in progress');
+
+    // Only one silent refresh and one /api/logout should be issued.
+    httpMock
+      .expectOne('/api/token/refresh')
+      .flush({ access_token: 'A2', refresh_token: 'R2' } as TokenResponse);
+    const logoutReq = httpMock.expectOne('/api/logout');
+    expect(logoutReq.request.body.refresh_token).toBe('R2');
+    logoutReq.flush({ message: 'Logged out successfully.' });
+
+    expect(routerSpy.navigate).toHaveBeenCalledTimes(1);
+  });
+});

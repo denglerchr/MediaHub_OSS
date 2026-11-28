@@ -1,0 +1,143 @@
+<div class="table-wrapper">
+  <table class="table">
+    <thead>
+      <tr>
+        <th class="select-col"></th>
+
+        <th
+          *ngFor="let col of tableColumns; trackBy: trackByColumn"
+          [class.actions-col]="col === 'actions'"
+          [class.preview-col]="col === 'Preview'"
+        >
+          {{ col }}
+        </th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr
+        *ngFor="let entry of entries; trackBy: trackById"
+        [class.selected-row]="isSelected(entry)"
+      >
+        <td class="select-cell">
+          <input
+            type="checkbox"
+            [checked]="isSelected(entry)"
+            (click)="onCheckboxClick(entry, $event)"
+            class="form-checkbox"
+          />
+        </td>
+
+        <td
+          *ngFor="let col of tableColumns; trackBy: trackByColumn"
+          [class.actions-cell]="col === 'actions'"
+          [class.preview-cell]="col === 'Preview'"
+        >
+          <ng-container [ngSwitch]="col">
+            <ng-container *ngSwitchCase="'Preview'">
+              <app-entry-thumbnail
+                [entry]="entry"
+                [previewUrl]="getPreviewUrl(entry)"
+                variant="list"
+                [failed]="failedImageIds.has(entry.id)"
+                (imageError)="onImageError(entry.id)"
+                (thumbnailClick)="onEntryClick(entry)"
+              ></app-entry-thumbnail>
+            </ng-container>
+
+            <ng-container *ngSwitchCase="'actions'">
+              <div class="actions" *ngIf="canEdit || canDelete">
+                <button
+                  *ngIf="canEdit"
+                  (click)="onEditClick(entry)"
+                  class="btn-link"
+                  title="Edit Metadata"
+                  [disabled]="!canEditEntry(entry)"
+                >
+                  Edit
+                </button>
+                <button
+                  *ngIf="canDelete"
+                  (click)="onDeleteClick(entry)"
+                  class="btn-link btn-link-danger"
+                  title="Delete Entry"
+                  [disabled]="!canDeleteEntry(entry)"
+                >
+                  Delete
+                </button>
+              </div>
+            </ng-container>
+
+            <ng-container *ngSwitchCase="'id'">
+              <span (click)="onEntryClick(entry)" class="id-link" title="View Details">
+                {{ entry.id }}
+              </span>
+            </ng-container>
+
+            <ng-container *ngSwitchCase="'timestamp'">
+              {{ entry.timestamp | date: 'yyyy.MM.dd HH:mm' }}
+            </ng-container>
+
+            <ng-container *ngSwitchCase="'filename'">
+              {{ entry.filename || 'N/A' }}
+            </ng-container>
+
+            <ng-container *ngSwitchCase="'mime_type'">
+              {{ entry.mime_type || (isEntryQueued(entry) ? 'Queued...' : 'Processing...') }}
+            </ng-container>
+
+            <ng-container *ngSwitchCase="'filesize'">
+              {{ entry.filesize | formatBytes }}
+            </ng-container>
+
+            <ng-container *ngSwitchCase="'status'">
+              <span class="status-text" [ngClass]="'status-' + entry.status">
+                {{ entry.status | titlecase }}
+              </span>
+            </ng-container>
+
+            <ng-container *ngSwitchCase="'width'">
+              {{ entry.media_fields?.width }}
+            </ng-container>
+
+            <ng-container *ngSwitchCase="'height'">
+              {{ entry.media_fields?.height }}
+            </ng-container>
+
+            <ng-container *ngSwitchCase="'channels'">
+              {{ entry.media_fields?.channels }}
+            </ng-container>
+
+            <ng-container *ngSwitchCase="'duration'">
+              <ng-container *ngIf="entry.media_fields?.duration !== undefined">
+                {{ entry.media_fields?.duration | number: '1.1-2' }}s
+              </ng-container>
+            </ng-container>
+
+            <ng-container *ngSwitchDefault>
+              <ng-container
+                *ngIf="
+                  entry.custom_fields &&
+                  entry.custom_fields[col] !== undefined &&
+                  entry.custom_fields[col] !== null
+                "
+              >
+                <ng-container
+                  *ngIf="isCoordinate(entry.custom_fields[col]); else defaultCustomValue"
+                >
+                  <app-coordinate-link
+                    [value]="entry.custom_fields[col]"
+                    variant="table"
+                    [stopPropagation]="true"
+                  ></app-coordinate-link>
+                </ng-container>
+                <ng-template #defaultCustomValue>
+                  {{ entry.custom_fields[col] }}
+                </ng-template>
+              </ng-container>
+            </ng-container>
+          </ng-container>
+        </td>
+      </tr>
+    </tbody>
+  </table>
+</div>

@@ -1,0 +1,14 @@
+<div class="auth-container">
+  <div class="auth-box" [class.centered]="centered">
+    <div class="auth-header">
+      <img src="assets/logo.svg" alt="App Logo" class="logo-icon" />
+      <h1 class="logo-text">MediaHub</h1>
+      <p class="author-credits">
+        <a href="https://www.swcd.lu" target="_blank" rel="noopener noreferrer">by SWCD</a>
+      </p>
+      <p class="auth-subtitle" *ngIf="subtitle">{{ subtitle }}</p>
+    </div>
+
+    <ng-content></ng-content>
+  </div>
+</div>

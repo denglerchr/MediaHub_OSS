@@ -1,0 +1,214 @@
+:host {
+  display: block;
+  height: 100%;
+}
+
+.user-management-container {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+/* --- Headers & States --- */
+.loading-state,
+.empty-state,
+.empty-state-detail {
+  padding: 1.5rem;
+  color: var(--text-muted);
+}
+
+.empty-state-detail {
+  display: flex;
+  height: 100%;
+  align-items: center;
+  justify-content: center;
+  font-size: 1.125rem;
+}
+
+/* --- Split Pane Layout --- */
+.split-pane-container {
+  display: flex;
+  flex: 1;
+  overflow: hidden;
+  border-radius: 0.5rem;
+  border: 1px solid var(--border-color);
+  background-color: var(--content-bg);
+}
+
+.sidebar-pane {
+  width: 33.333%;
+  border-right: 1px solid var(--border-color);
+  background-color: var(--sidebar-bg);
+  overflow-y: auto;
+}
+
+.detail-pane {
+  width: 66.666%;
+  padding: 1.5rem;
+  overflow-y: auto;
+  background-color: var(--content-bg);
+}
+
+/* --- Sidebar List Styling --- */
+.user-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+.user-list-item {
+  padding: 1rem;
+  cursor: pointer;
+  border-bottom: 1px solid var(--border-color);
+  transition: background-color 0.2s ease;
+}
+
+.user-list-item:hover {
+  background-color: var(--item-bg-hover);
+}
+
+.user-list-item.selected {
+  background-color: var(--item-bg);
+  /* A clear left border to indicate selection */
+  border-left: 3px solid var(--text-accent);
+}
+
+.draft-item {
+  background-color: var(--item-bg);
+  border-left: 3px solid var(--text-accent);
+}
+
+.username-text {
+  font-weight: 500;
+  color: var(--text-primary);
+  margin-bottom: 0.35rem;
+}
+
+.user-meta {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem; /* Horizontal spacing between ID and Admin tag */
+}
+
+.user-id {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+}
+
+/* The requested bold green Admin tag */
+.admin-badge {
+  font-size: 0.75rem;
+  font-weight: 700;
+  color: #48bb78; /* A clean, dark-mode friendly green */
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+/* --- Detail Pane Layout --- */
+.detail-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  width: 100%;
+}
+
+.detail-header-row {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  padding-bottom: 1rem;
+  margin-bottom: 1.5rem;
+  border-bottom: 1px solid var(--border-color);
+}
+
+/* --- Tab Control Styling --- */
+.list-tabs-container {
+  display: flex;
+  border-bottom: 1px solid var(--border-color);
+  background-color: var(--header-bg);
+}
+
+.tab-btn {
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  font-family: inherit;
+  font-size: 0.875rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.tab-btn:hover {
+  color: var(--text-primary);
+  background-color: rgba(255, 255, 255, 0.02);
+}
+
+.tab-btn.active {
+  color: var(--text-accent);
+  background-color: rgba(66, 153, 225, 0.05);
+}
+
+.list-tab-btn {
+  flex: 1;
+  padding: 0.85rem 0.5rem;
+  border-bottom: 2px solid transparent;
+}
+
+.list-tab-btn.active {
+  border-bottom-color: var(--text-accent);
+}
+
+.detail-tabs-container {
+  display: flex;
+  gap: 0.5rem;
+  border-bottom: 1px solid var(--border-color);
+  padding-bottom: 1px;
+}
+
+.detail-tab-btn {
+  padding: 0.65rem 1.25rem;
+  border-radius: 0.375rem 0.375rem 0 0;
+  border: 1px solid transparent;
+  margin-bottom: -1px;
+}
+
+.detail-tab-btn.active {
+  border-color: var(--border-color) var(--border-color) var(--content-bg);
+  background-color: var(--content-bg);
+}
+
+/* --- Service Account Badging --- */
+.service-badge {
+  font-size: 0.75rem;
+  font-weight: 700;
+  color: var(--text-accent);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+/* --- Delegated API Keys Pane Styles --- */
+.delegated-keys-section {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.section-header-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  width: 100%;
+}
+
+.section-header-row h4 {
+  margin: 0;
+  font-size: 1.1rem;
+  color: var(--text-primary);
+}
+
+/* Action button icons */
+/* FE-040: .btn-icon/.btn-icon:hover/.btn-icon-danger:hover hoisted to styles.css */

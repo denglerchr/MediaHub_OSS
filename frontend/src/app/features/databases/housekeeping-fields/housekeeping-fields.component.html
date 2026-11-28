@@ -1,0 +1,145 @@
+<div [formGroup]="formGroup">
+  <div class="form-grid-three">
+    <div class="form-group">
+      <label class="form-label" for="hk-interval-value">Run Interval</label>
+      <div style="display: flex; gap: 0.5rem">
+        <input
+          id="hk-interval-value"
+          type="number"
+          formControlName="interval_value"
+          class="form-control"
+          min="0"
+          [readOnly]="readOnly"
+        />
+        <select
+          formControlName="interval_unit"
+          class="form-control"
+          style="width: 100px"
+          *ngIf="showUnitSelect"
+          aria-label="Run Interval Unit"
+        >
+          <option
+            *ngFor="let opt of durationUnitOptions; trackBy: trackByValue"
+            [value]="opt.value"
+          >
+            {{ opt.label }}
+          </option>
+        </select>
+      </div>
+      <small class="text-muted">Set to 0 to disable automated runs.</small>
+      <div
+        *ngIf="formGroup.get('interval_value')?.invalid && formGroup.get('interval_value')?.touched"
+        class="form-error"
+      >
+        <span *ngIf="formGroup.get('interval_value')?.hasError('required')"
+          >Run interval is required.</span
+        >
+        <span *ngIf="formGroup.get('interval_value')?.hasError('min')"
+          >Run interval cannot be negative.</span
+        >
+        <span *ngIf="formGroup.get('interval_value')?.hasError('pattern')"
+          >Run interval must be a whole number.</span
+        >
+      </div>
+    </div>
+
+    <div class="form-group">
+      <label class="form-label form-label-helper" for="hk-disk-space-value">
+        <span>Max Disk Space</span>
+        <span
+          *ngIf="showHelperIcons"
+          class="helper-icon"
+          title="Set to 0 to disable disk space check."
+          >?</span
+        >
+      </label>
+      <div style="display: flex; gap: 0.5rem">
+        <input
+          id="hk-disk-space-value"
+          type="number"
+          formControlName="disk_space_value"
+          class="form-control"
+          min="0"
+          [readOnly]="readOnly"
+        />
+        <select
+          formControlName="disk_space_unit"
+          class="form-control"
+          style="width: 100px"
+          *ngIf="showUnitSelect"
+          aria-label="Max Disk Space Unit"
+        >
+          <option *ngFor="let opt of sizeUnitOptions; trackBy: trackByValue" [value]="opt.value">
+            {{ opt.label }}
+          </option>
+        </select>
+      </div>
+      <small class="text-muted">Set to 0 to disable size limit.</small>
+      <div
+        *ngIf="
+          formGroup.get('disk_space_value')?.invalid && formGroup.get('disk_space_value')?.touched
+        "
+        class="form-error"
+      >
+        <span *ngIf="formGroup.get('disk_space_value')?.hasError('required')"
+          >Max disk space is required.</span
+        >
+        <span *ngIf="formGroup.get('disk_space_value')?.hasError('min')"
+          >Max disk space cannot be negative.</span
+        >
+        <span *ngIf="formGroup.get('disk_space_value')?.hasError('pattern')"
+          >Max disk space must be a whole number.</span
+        >
+      </div>
+    </div>
+
+    <div class="form-group">
+      <label class="form-label form-label-helper" for="hk-max-age-value">
+        <span>Max Entry Age</span>
+        <span *ngIf="showHelperIcons" class="helper-icon" title="Set to 0 to disable age check."
+          >?</span
+        >
+      </label>
+      <div style="display: flex; gap: 0.5rem">
+        <input
+          id="hk-max-age-value"
+          type="number"
+          formControlName="max_age_value"
+          class="form-control"
+          min="0"
+          [readOnly]="readOnly"
+        />
+        <select
+          formControlName="max_age_unit"
+          class="form-control"
+          style="width: 100px"
+          *ngIf="showUnitSelect"
+          aria-label="Max Entry Age Unit"
+        >
+          <option
+            *ngFor="let opt of durationUnitOptions; trackBy: trackByValue"
+            [value]="opt.value"
+          >
+            {{ opt.label }}
+          </option>
+        </select>
+      </div>
+      <small class="text-muted">Set to 0 to disable age limit.</small>
+      <div
+        *ngIf="formGroup.get('max_age_value')?.invalid && formGroup.get('max_age_value')?.touched"
+        class="form-error"
+      >
+        <span *ngIf="formGroup.get('max_age_value')?.hasError('required')"
+          >Max entry age is required.</span
+        >
+        <span *ngIf="formGroup.get('max_age_value')?.hasError('min')"
+          >Max entry age cannot be negative.</span
+        >
+        <span *ngIf="formGroup.get('max_age_value')?.hasError('pattern')"
+          >Max entry age must be a whole number.</span
+        >
+      </div>
+    </div>
+  </div>
+  <div *ngIf="parseWarning" class="form-error">{{ parseWarning }}</div>
+</div>

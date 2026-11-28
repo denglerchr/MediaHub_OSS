@@ -1,0 +1,98 @@
+/* frontend/src/app/components/notification-host/notification-host.component.css */
+
+/* --- Global Error Banner --- */
+
+.global-error-banner {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  background-color: var(--button-danger-bg);
+  color: var(--text-primary);
+  /* Use a safe high z-index, falling back to 600 if the variable isn't defined */
+  z-index: var(--z-toast, 600);
+  padding: 1rem;
+  box-shadow: 0 2px 5px rgba(0, 0, 0, 0.2);
+}
+
+.global-error-content {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  max-width: 1200px;
+  margin: 0 auto;
+}
+
+.close-btn {
+  background: none;
+  border: none;
+  color: var(--text-primary);
+  font-size: 1.5rem;
+  font-weight: bold;
+  cursor: pointer;
+  padding: 0 0.5rem;
+  border-radius: 0.25rem;
+  transition: opacity 0.2s;
+}
+
+.close-btn:hover {
+  opacity: 0.8;
+}
+
+/* Accessible focus ring */
+.close-btn:focus-visible {
+  outline: 2px solid var(--text-primary);
+  outline-offset: 2px;
+}
+
+/* --- Toast Notification --- */
+
+@keyframes toastSlideIn {
+  from {
+    transform: translate(-50%, 100%);
+    opacity: 0;
+  }
+  to {
+    transform: translate(-50%, 0);
+    opacity: 1;
+  }
+}
+
+.toast-notification {
+  position: fixed;
+  bottom: 2rem;
+  left: 50%;
+  transform: translateX(-50%);
+  animation: toastSlideIn 300ms ease-out;
+  min-width: 300px;
+  max-width: 600px;
+  color: var(--text-primary);
+  border-radius: 0.375rem; /* Matched to global border-radius */
+  padding: 1rem 1.5rem;
+  z-index: calc(var(--z-toast, 600) + 1); /* Ensure toast sits just above the banner */
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.toast-success {
+  background-color: #2f855a; /* WCAG AA contrast with #ffffff */
+  color: #ffffff;
+}
+
+.toast-success .close-btn {
+  color: #ffffff;
+}
+
+.toast-error {
+  background-color: var(--button-danger-bg);
+}
+
+.toast-info {
+  background-color: var(--button-primary-bg);
+}
+
+.toast-notification .close-btn {
+  margin-left: 1.5rem;
+}

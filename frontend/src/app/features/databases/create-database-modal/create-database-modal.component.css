@@ -1,0 +1,70 @@
+/* frontend/src/app/components/create-database-modal/create-database-modal.component.css */
+
+.form-section {
+  margin-bottom: 2rem;
+}
+
+.form-section h4 {
+  margin-bottom: 1rem;
+  border-bottom: 1px solid var(--border-color);
+  padding-bottom: 0.5rem;
+}
+
+.section-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+/* UPDATED: Use new global form grid styles */
+.form-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 1.5rem;
+}
+
+/*
+REMOVED all local .form-group, .form-group label, .form-group input,
+.validation-error, and .btn styles.
+They are now inherited from src/styles.css
+*/
+
+.custom-field-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr auto auto;
+  gap: 1rem;
+  margin-bottom: 0.75rem;
+  align-items: center;
+}
+
+.custom-field-row .form-error {
+  grid-column: 1 / -1;
+}
+
+/*
+REMOVED .btn-link, it's now global
+*/
+
+.btn-remove {
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-size: 1.2rem;
+  color: var(--text-muted); /* UPDATED */
+  opacity: 0.8;
+  transition: all 0.2s;
+}
+.btn-remove:hover {
+  opacity: 1;
+  color: var(--text-danger);
+}
+
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 1rem;
+  margin-top: 2rem;
+  padding-top: 1.5rem;
+  /* UPDATED: Use CSS variable */
+  border-top: 1px solid var(--border-color);
+}

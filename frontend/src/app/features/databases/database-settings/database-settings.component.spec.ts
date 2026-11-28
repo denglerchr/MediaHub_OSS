@@ -1,0 +1,390 @@
+// Regression spec for FE-002 (AI/Reports/20261006_frontend_review.md):
+// "Housekeeping settings silently reset to 0 on save (data loss)".
+//
+// The backend does not echo the saved strings back: on every GET it re-emits the parsed
+// values through internal/shared/strgen.go (DurationToString / BytesToString). So the value
+// the user saved as "25h" comes back as "1d 1h", "1536M" as "1.5G" and "90m" as "1h 30min".
+// The old /^(\d+)([a-zA-Z]*)$/ parser could not read any of those and fell back to {value: 0},
+// so the next save of *any* setting on the page wrote "0" back and disabled the rule.
+//
+// Second spec (Phase B, review §7 item 1): the "never coerce a non-empty server string
+// to 0" safety net itself. enable()/disable() in updatePermissions() re-emits
+// valueChanges on every child and used to wipe the unparseable-value state right after
+// loading (the warning vanished and the save silently zeroed the row). Since the backend
+// zeroes unparseable strings anyway (internal/httpserver/databasehandler/utils.go
+// HousekeepingPayload.toModel), the honest behaviour is to warn and block the save until
+// the admin re-enters the row.
+
+import { TestBed, ComponentFixture } from '@angular/core/testing';
+import { ActivatedRoute, convertToParamMap, ParamMap, provideRouter } from '@angular/router';
+import { BehaviorSubject, Observable, of, Subject, throwError } from 'rxjs';
+import { DatabaseSettingsComponent } from './database-settings.component';
+import { AuthService } from '../../../core/services/auth.service';
+import { DatabaseService, DatabaseUpdatePayload } from '../../../core/services/database.service';
+import { ModalService } from '../../../core/services/modal.service';
+import { NotificationService } from '../../../core/services/notification.service';
+import { ContentType, Database, User } from '../../../core/models';
+
+/** Spec-local parser: sums "number + unit" tokens, mirroring the backend emitters' output. */
+function parseDurationToSeconds(str: string): number {
+  const factors: Record<string, number> = { s: 1, min: 60, m: 60, h: 3600, d: 86400 };
+  let total = 0;
+  for (const match of str.matchAll(/(\d+(?:\.\d+)?)\s*([a-zA-Z]+)/g)) {
+    total += parseFloat(match[1]) * factors[match[2].toLowerCase()];
+  }
+  return total;
+}
+
+/** Spec-local parser for BytesToString output ("1.5G", "1536M", "512K", ...). */
+function parseSizeToBytes(str: string): number {
+  const factors: Record<string, number> = {
+    b: 1,
+    k: 1024,
+    m: 1024 ** 2,
+    g: 1024 ** 3,
+    t: 1024 ** 4,
+  };
+  let total = 0;
+  for (const match of str.matchAll(/(\d+(?:\.\d+)?)\s*([a-zA-Z]+)/g)) {
+    total += parseFloat(match[1]) * factors[match[2].toLowerCase()];
+  }
+  return total;
+}
+
+describe('DatabaseSettingsComponent — FE-002 regression', () => {
+  let fixture: ComponentFixture<DatabaseSettingsComponent>;
+  let component: DatabaseSettingsComponent;
+  let dbSubject: BehaviorSubject<Database | null>;
+  let paramMapSubject: BehaviorSubject<ParamMap>;
+  let databaseSpy: jasmine.SpyObj<DatabaseService>;
+  let updateDatabaseSpy: jasmine.Spy;
+  let notificationSpy: jasmine.SpyObj<NotificationService>;
+
+  // What internal/shared/strgen.go emits for the saved values "25h" / "1536M" / "90m":
+  const serverHousekeeping = {
+    interval: '1d 1h', // DurationToString(25h)
+    disk_space: '1.5G', // BytesToString(1536M)
+    max_age: '1h 30min', // DurationToString(90m)
+  };
+
+  const musicDb: Database = {
+    id: 'db1',
+    name: 'Music',
+    content_type: ContentType.Audio,
+    n_max_queued: 0,
+    config: { create_preview: true, auto_conversion: '' },
+    housekeeping: serverHousekeeping,
+    custom_fields: [],
+  };
+
+  const adminUser: User = {
+    id: 'u1',
+    username: 'admin',
+    is_admin: true,
+    account_type: 'local',
+    permissions: [],
+  };
+
+  beforeEach(async () => {
+    dbSubject = new BehaviorSubject<Database | null>(null);
+    paramMapSubject = new BehaviorSubject<ParamMap>(convertToParamMap({ id: 'db1' }));
+
+    databaseSpy = jasmine.createSpyObj<DatabaseService>('DatabaseService', [
+      'selectDatabase',
+      'updateDatabase',
+      'triggerHousekeeping',
+      'deleteDatabase',
+      'addCustomField',
+      'updateCustomField',
+      'deleteCustomField',
+    ]);
+    databaseSpy.selectedDatabase$ = dbSubject.asObservable();
+    databaseSpy.selectDatabase.and.callFake(() => {
+      dbSubject.next(musicDb);
+      return of(musicDb);
+    });
+    updateDatabaseSpy = databaseSpy.updateDatabase.and.returnValue(of(musicDb));
+
+    const authSpy = jasmine.createSpyObj<AuthService>('AuthService', ['getCurrentUser'], {
+      currentUser$: of(adminUser),
+    });
+    authSpy.getCurrentUser.and.returnValue(adminUser);
+
+    const modalSpy = jasmine.createSpyObj<ModalService>('ModalService', [
+      'open',
+      'close',
+      'confirm',
+    ]);
+    notificationSpy = jasmine.createSpyObj<NotificationService>('NotificationService', [
+      'showSuccess',
+      'showError',
+    ]);
+
+    await TestBed.configureTestingModule({
+      imports: [DatabaseSettingsComponent],
+      providers: [
+        provideRouter([]),
+        { provide: DatabaseService, useValue: databaseSpy },
+        { provide: AuthService, useValue: authSpy },
+        { provide: ModalService, useValue: modalSpy },
+        { provide: NotificationService, useValue: notificationSpy },
+        { provide: ActivatedRoute, useValue: { paramMap: paramMapSubject.asObservable() } },
+      ],
+    }).compileComponents();
+
+    fixture = TestBed.createComponent(DatabaseSettingsComponent);
+    component = fixture.componentInstance;
+    // Renders the template and runs ngOnInit once (the mocked load is synchronous).
+    fixture.detectChanges();
+  });
+
+  it('FE-002: housekeeping round-trip 25h/1536M/90m must not become 0 on the next save', () => {
+    // The form is populated from the backend-emitted strings ("1d 1h" / "1.5G" / "1h 30min").
+    // Save without touching anything else on the page (the reported failure sequence).
+    component.onSaveSettings();
+
+    expect(updateDatabaseSpy).toHaveBeenCalledTimes(1);
+    const payload = updateDatabaseSpy.calls.mostRecent().args[1] as DatabaseUpdatePayload;
+    const hk = payload.housekeeping as { interval: string; disk_space: string; max_age: string };
+
+    expect(hk.interval).not.toBe('0');
+    expect(hk.disk_space).not.toBe('0');
+    expect(hk.max_age).not.toBe('0');
+
+    expect(parseDurationToSeconds(hk.interval))
+      .withContext('interval: "25h" must survive the round-trip')
+      .toBe(25 * 3600);
+    expect(parseSizeToBytes(hk.disk_space))
+      .withContext('disk_space: "1536M" must survive the round-trip')
+      .toBe(1536 * 1024 * 1024);
+    expect(parseDurationToSeconds(hk.max_age))
+      .withContext('max_age: "90m" must survive the round-trip')
+      .toBe(90 * 60);
+  });
+
+  it('FE-002: an unparseable server value must warn after load and block saving (the backend would silently zero it)', () => {
+    // "1d 1h xyz" is not something strgen emits, but any non-empty value the parser
+    // cannot read must never be silently coerced to "0" (the FE-002 data loss).
+    const brokenDb: Database = {
+      ...musicDb,
+      housekeeping: { interval: '1d 1h xyz', disk_space: '1.5G', max_age: '0' },
+    };
+    dbSubject.next(brokenDb); // the load under test
+    fixture.detectChanges();
+
+    expect(component.housekeepingParseWarning)
+      .withContext(
+        'the parse warning must survive the load (enable()/disable() re-emitting valueChanges used to wipe it)',
+      )
+      .not.toBeNull();
+    expect(component.housekeepingParseWarning).toContain('"1d 1h xyz"');
+    expect(component.hasUnparseableHousekeeping)
+      .withContext('the Save button binding must disable saving while a row is unreadable')
+      .toBeTrue();
+
+    const banner = (
+      Array.from(fixture.nativeElement.querySelectorAll('.form-error')) as HTMLElement[]
+    ).find((el) => (el.textContent ?? '').includes('Could not read'));
+    expect(banner).withContext('the warning banner must be rendered after the load').toBeTruthy();
+
+    // Honest behaviour: saving is blocked outright instead of writing the raw string
+    // back — the backend would silently zero it (databasehandler/utils.go toModel).
+    component.onSaveSettings();
+    expect(updateDatabaseSpy)
+      .withContext(
+        'saving must be blocked while a housekeeping row holds an unreadable server value',
+      )
+      .not.toHaveBeenCalled();
+    expect(notificationSpy.showError)
+      .withContext('the admin must be told why saving is blocked')
+      .toHaveBeenCalled();
+
+    // Once the admin re-enters the row (a real user edit), its raw value is gone and
+    // saving proceeds with a value the backend can parse.
+    const hkGroup = component.settingsForm.get('housekeeping');
+    hkGroup?.get('interval_value')?.setValue(25);
+    hkGroup?.get('interval_unit')?.setValue('h');
+    expect(component.housekeepingParseWarning)
+      .withContext('a retyped row must clear its raw value')
+      .toBeNull();
+
+    component.onSaveSettings();
+    expect(updateDatabaseSpy).toHaveBeenCalledTimes(1);
+    const payload = updateDatabaseSpy.calls.mostRecent().args[1] as DatabaseUpdatePayload;
+    const hk = payload.housekeeping as { interval: string; disk_space: string; max_age: string };
+    expect(hk.interval).toBe('25h');
+    expect(hk.disk_space).toBe('1536M');
+    expect(hk.max_age).toBe('0');
+  });
+
+  it('validates database name length and pattern and resets isLoading when selectDatabase errors', () => {
+    const nameCtrl = component.settingsForm.get('name');
+    nameCtrl?.setValue('Invalid Name');
+    nameCtrl?.markAsTouched();
+    fixture.detectChanges();
+
+    expect(nameCtrl?.hasError('pattern')).toBeTrue();
+
+    nameCtrl?.setValue('a'.repeat(65));
+    fixture.detectChanges();
+    expect(nameCtrl?.hasError('maxlength')).toBeTrue();
+
+    const databaseSpy = TestBed.inject(DatabaseService) as jasmine.SpyObj<DatabaseService>;
+    databaseSpy.selectDatabase.and.returnValue(throwError(() => new Error('load failed')));
+    component.ngOnInit();
+    expect(component.isLoading).toBeFalse();
+  });
+
+  it('preserves dirty settingsForm edits when custom field CRUD re-emits selectedDatabase$', () => {
+    component.settingsForm.get('name')?.setValue('RenamedMusic');
+    component.settingsForm.get('name')?.markAsDirty();
+    component.settingsForm.markAsDirty();
+
+    const updatedDb: Database = {
+      ...musicDb,
+      custom_fields: [{ id: 1, name: 'genre', type: 'TEXT', is_indexed: true }],
+    };
+    dbSubject.next(updatedDb);
+    fixture.detectChanges();
+
+    expect(component.currentDb?.custom_fields.length).toBe(1);
+    expect(component.settingsForm.get('name')?.value).toBe('RenamedMusic');
+    expect(component.settingsForm.dirty).toBeTrue();
+  });
+
+  it('handles errors cleanly when updateDatabase fails without leaving loading flags stuck', () => {
+    const databaseSpy = TestBed.inject(DatabaseService) as jasmine.SpyObj<DatabaseService>;
+    databaseSpy.updateDatabase.and.returnValue(throwError(() => new Error('save failed')));
+
+    component.settingsForm.get('name')?.setValue('MusicRenamed');
+    component.settingsForm.markAsDirty();
+    component.onSaveSettings();
+    expect(component.isSavingSettings).toBeFalse();
+    expect(component.settingsForm.dirty).toBeTrue();
+  });
+
+  it('enforces whole-integer validation on n_max_queued and housekeeping values and omits preview config for file DBs', () => {
+    component.settingsForm.get('n_max_queued')?.setValue(1.5);
+    expect(component.settingsForm.get('n_max_queued')?.hasError('pattern')).toBeTrue();
+
+    component.settingsForm.get('housekeeping.interval_value')?.setValue(2.5);
+    expect(
+      component.settingsForm.get('housekeeping.interval_value')?.hasError('pattern'),
+    ).toBeTrue();
+
+    const fileDb: Database = {
+      ...musicDb,
+      content_type: ContentType.File,
+    };
+    dbSubject.next(fileDb);
+    fixture.detectChanges();
+
+    updateDatabaseSpy.calls.reset();
+    component.onSaveSettings();
+    expect(updateDatabaseSpy).toHaveBeenCalledTimes(1);
+    const payload = updateDatabaseSpy.calls.mostRecent().args[1] as DatabaseUpdatePayload;
+    expect(payload.config).toEqual({});
+  });
+
+  it('C2: destroying DatabaseSettingsComponent while selectDatabase is in flight unsubscribes it', () => {
+    let selectUnsubscribed = false;
+    databaseSpy.selectDatabase.and.returnValue(
+      new Observable<Database>(() => {
+        return () => {
+          selectUnsubscribed = true;
+        };
+      }),
+    );
+
+    paramMapSubject.next(convertToParamMap({ id: 'db2' }));
+    expect(selectUnsubscribed).toBeFalse();
+
+    fixture.destroy();
+    expect(selectUnsubscribed).toBeTrue();
+  });
+
+  it('H6: switching from DB A to DB B while updateDatabase(A) is in flight prevents stale PUT A from overwriting or unlocking DB B', () => {
+    const dbB: Database = {
+      id: 'db2',
+      name: 'Photos',
+      content_type: ContentType.Image,
+      n_max_queued: 5,
+      config: { create_preview: false, auto_conversion: '' },
+      housekeeping: { interval: '2h', disk_space: '50G', max_age: '7d' },
+      custom_fields: [],
+    };
+    const updatedDbA: Database = { ...musicDb, name: 'StaleMusicRename' };
+    const updatedDbB: Database = { ...dbB, name: 'PhotosSaved' };
+
+    const updateA$ = new Subject<Database>();
+    const updateB$ = new Subject<Database>();
+    databaseSpy.updateDatabase.and.callFake((id: string) =>
+      id === 'db1' ? updateA$.asObservable() : updateB$.asObservable(),
+    );
+    databaseSpy.selectDatabase.and.callFake((id: string) => {
+      const target = id === 'db2' ? dbB : musicDb;
+      dbSubject.next(target);
+      return of(target);
+    });
+
+    // Start saving DB A (in flight)
+    component.settingsForm.get('name')?.setValue('MusicPending');
+    component.onSaveSettings();
+    expect(component.isSavingSettings).toBeTrue();
+
+    // Switch route to DB B before PUT A completes
+    paramMapSubject.next(convertToParamMap({ id: 'db2' }));
+    fixture.detectChanges();
+
+    expect(component.currentDb?.id).toBe('db2');
+    expect(component.settingsForm.get('name')?.value).toBe('Photos');
+    expect(component.isSavingSettings).toBeFalse();
+
+    // Start saving DB B (also in flight)
+    component.settingsForm.get('name')?.setValue('PhotosPending');
+    component.onSaveSettings();
+    expect(component.isSavingSettings).toBeTrue();
+
+    // Stale PUT A finishes now: must NOT overwrite DB B or clear isSavingSettings
+    updateA$.next(updatedDbA);
+    updateA$.complete();
+    fixture.detectChanges();
+
+    expect(component.currentDb?.id).toBe('db2');
+    expect(component.currentDb?.name).toBe('Photos');
+    expect(component.settingsForm.get('name')?.value).toBe('PhotosPending');
+    expect(component.isSavingSettings).toBeTrue();
+
+    // Now PUT B finishes normally
+    updateB$.next(updatedDbB);
+    updateB$.complete();
+    fixture.detectChanges();
+
+    expect(component.currentDb?.name).toBe('PhotosSaved');
+    expect(component.settingsForm.get('name')?.value).toBe('PhotosSaved');
+    expect(component.isSavingSettings).toBeFalse();
+  });
+
+  it('ignores mismatched selectedDatabase$ emissions and shows error state when not loading', () => {
+    databaseSpy.selectDatabase.and.returnValue(throwError(() => new Error('not found')));
+    paramMapSubject.next(convertToParamMap({ id: 'db2' }));
+    // Emit rolled-back DB A while route expects db2
+    dbSubject.next(musicDb);
+    fixture.detectChanges();
+
+    expect(component.currentDb).toBeNull();
+    expect(component.isLoading).toBeFalse();
+    expect(fixture.nativeElement.textContent).toContain(
+      'Database not found or could not be loaded.',
+    );
+  });
+
+  it('renders app-database-custom-fields-editor outside the settings form element', () => {
+    const formEl = fixture.nativeElement.querySelector('form') as HTMLFormElement;
+    const editorEl = fixture.nativeElement.querySelector('app-database-custom-fields-editor');
+
+    expect(formEl).toBeTruthy();
+    expect(editorEl).toBeTruthy();
+    expect(formEl.contains(editorEl)).toBeFalse();
+  });
+});

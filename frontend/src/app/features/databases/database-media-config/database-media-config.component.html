@@ -1,0 +1,32 @@
+<ng-container *ngIf="supportsPreview; else fileConfig">
+  <h4 [class.sub-heading]="headingStyle === 'sub-heading'">{{ typeTitle }} {{ headingSuffix }}</h4>
+  <div [class.form-grid]="layout === 'grid'" [formGroup]="formGroup">
+    <div class="form-group">
+      <label [for]="'auto_conversion_' + contentType" class="form-label">Auto-Conversion</label>
+      <select
+        [id]="'auto_conversion_' + contentType"
+        formControlName="auto_conversion"
+        class="form-control"
+      >
+        <option *ngFor="let opt of conversionOptions; trackBy: trackByValue" [value]="opt.value">
+          {{ opt.label }}
+        </option>
+      </select>
+      <small class="text-muted">{{ conversionHint }}</small>
+    </div>
+
+    <div class="form-group">
+      <label [for]="'create_previews_' + contentType" class="form-label">Generate Previews</label>
+      <app-toggle-switch
+        [inputId]="'create_previews_' + contentType"
+        formControlName="create_preview"
+      ></app-toggle-switch>
+      <small class="text-muted">Generates WebP thumbnails on upload.</small>
+    </div>
+  </div>
+</ng-container>
+
+<ng-template #fileConfig>
+  <h4 [class.sub-heading]="headingStyle === 'sub-heading'">File {{ headingSuffix }}</h4>
+  <p class="text-muted">No specific configuration is available for 'Generic File' databases.</p>
+</ng-template>

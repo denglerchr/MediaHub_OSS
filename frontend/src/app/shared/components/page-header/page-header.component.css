@@ -1,0 +1,22 @@
+:host {
+  display: block;
+  flex-shrink: 0;
+}
+
+.page-header-left {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  min-width: 0;
+}
+
+.page-header-title-wrap {
+  min-width: 0;
+}
+
+.sticky-header-transparent {
+  border-bottom: none;
+  margin-bottom: 0.5rem;
+  background: transparent;
+  padding-bottom: 0;
+}

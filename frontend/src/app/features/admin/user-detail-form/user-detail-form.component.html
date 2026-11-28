@@ -1,0 +1,206 @@
+<form [formGroup]="formGroup" (ngSubmit)="save.emit()">
+  <div class="form-row">
+    <div class="form-group">
+      <label class="form-label">Username <span class="required-asterisk">*</span></label>
+      <input
+        type="text"
+        formControlName="username"
+        class="form-control"
+        placeholder="Enter username"
+      />
+      <div
+        *ngIf="
+          formGroup.get('username')?.invalid && (formGroup.get('username')?.touched || submitted)
+        "
+        class="form-error"
+      >
+        Username is required and must be at most 64 characters.
+      </div>
+      <div
+        *ngIf="formGroup.get('username')?.disabled"
+        class="description-text"
+        style="color: var(--text-secondary)"
+      >
+        {{
+          formGroup.get('account_type')?.value === 'oidc'
+            ? 'Managed via Single Sign-On Identity Provider'
+            : 'Service account names are fixed at creation.'
+        }}
+      </div>
+    </div>
+
+    <!-- Password field is hidden/bypassed for Service Accounts and OIDC accounts -->
+    <div class="form-group" *ngIf="formGroup.get('account_type')?.value === 'local'">
+      <label class="form-label">
+        Password <span *ngIf="isNewUser" class="required-asterisk">*</span>
+      </label>
+      <input
+        type="password"
+        formControlName="password"
+        class="form-control"
+        [placeholder]="isNewUser ? 'Enter secure password' : 'Leave blank to keep current'"
+      />
+      <!-- FE-053: say *which* rule failed ("Min. 8 characters." used to show even for a missing password) -->
+      <div
+        *ngIf="formGroup.get('password')?.touched && formGroup.get('password')?.invalid"
+        class="form-error"
+      >
+        <span *ngIf="formGroup.get('password')?.errors?.['required']">Password is required.</span>
+        <span *ngIf="formGroup.get('password')?.errors?.['minlength']">Min. 8 characters.</span>
+      </div>
+    </div>
+    <div class="form-group" *ngIf="formGroup.get('account_type')?.value === 'oidc'">
+      <label class="form-label">Password</label>
+      <div class="description-text" style="padding-top: 0.5rem; color: var(--text-secondary)">
+        Managed via Single Sign-On Identity Provider
+      </div>
+    </div>
+  </div>
+
+  <div class="form-group admin-toggle-wrapper">
+    <label class="checkbox-group">
+      <input type="checkbox" formControlName="is_admin" class="form-checkbox" />
+      <span class="form-label" style="font-weight: 600; color: #f6ad55">Global Administrator</span>
+    </label>
+  </div>
+
+  <div class="permissions-section">
+    <h4>Database Permissions</h4>
+
+    <div *ngIf="formGroup.get('is_admin')?.value" class="admin-notice">
+      Administrators automatically have full access to all databases.
+    </div>
+
+    <div class="table-wrapper" [ngClass]="{ 'table-disabled': formGroup.get('is_admin')?.value }">
+      <table class="table">
+        <thead>
+          <tr>
+            <th>Database</th>
+            <th style="text-align: center">
+              <div style="margin-bottom: 0.25rem">View</div>
+              <button
+                type="button"
+                (click)="toggleColumn.emit('can_view')"
+                class="btn-link"
+                style="font-size: 0.7rem"
+              >
+                Toggle All
+              </button>
+            </th>
+            <th style="text-align: center">
+              <div style="margin-bottom: 0.25rem">Create</div>
+              <button
+                type="button"
+                (click)="toggleColumn.emit('can_create')"
+                class="btn-link"
+                style="font-size: 0.7rem"
+              >
+                Toggle All
+              </button>
+            </th>
+            <th style="text-align: center">
+              <div style="margin-bottom: 0.25rem">Edit</div>
+              <button
+                type="button"
+                (click)="toggleColumn.emit('can_edit')"
+                class="btn-link"
+                style="font-size: 0.7rem"
+              >
+                Toggle All
+              </button>
+            </th>
+            <th style="text-align: center">
+              <div style="margin-bottom: 0.25rem">Delete</div>
+              <button
+                type="button"
+                (click)="toggleColumn.emit('can_delete')"
+                class="btn-link"
+                style="font-size: 0.7rem"
+              >
+                Toggle All
+              </button>
+            </th>
+            <th style="text-align: center">
+              <div style="margin-bottom: 0.25rem">Admin</div>
+              <button
+                type="button"
+                (click)="toggleColumn.emit('can_admin')"
+                class="btn-link"
+                style="font-size: 0.7rem"
+              >
+                Toggle All
+              </button>
+            </th>
+          </tr>
+        </thead>
+
+        <tbody formArrayName="permissions">
+          <tr
+            *ngFor="let p of permissions.controls; let i = index; trackBy: trackByDbId"
+            [formGroupName]="i"
+          >
+            <td style="font-weight: 500; color: var(--text-primary)">
+              {{ p.get('database_name')?.value }}
+            </td>
+            <td style="text-align: center">
+              <input
+                type="checkbox"
+                formControlName="can_view"
+                class="form-checkbox"
+                style="margin: 0 auto"
+              />
+            </td>
+            <td style="text-align: center">
+              <input
+                type="checkbox"
+                formControlName="can_create"
+                class="form-checkbox"
+                style="margin: 0 auto"
+              />
+            </td>
+            <td style="text-align: center">
+              <input
+                type="checkbox"
+                formControlName="can_edit"
+                class="form-checkbox"
+                style="margin: 0 auto"
+              />
+            </td>
+            <td style="text-align: center">
+              <input
+                type="checkbox"
+                formControlName="can_delete"
+                class="form-checkbox"
+                style="margin: 0 auto"
+              />
+            </td>
+            <td style="text-align: center">
+              <input
+                type="checkbox"
+                formControlName="can_admin"
+                class="form-checkbox"
+                style="margin: 0 auto"
+              />
+            </td>
+          </tr>
+
+          <tr *ngIf="permissions.controls.length === 0">
+            <td
+              colspan="6"
+              style="text-align: center; color: var(--text-muted); font-style: italic"
+            >
+              No databases created in the system yet.
+            </td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="form-actions">
+    <button type="button" class="btn btn-secondary" (click)="cancelled.emit()">Cancel</button>
+    <button type="submit" class="btn btn-primary" [disabled]="formGroup.invalid || isSaving">
+      {{ isSaving ? 'Saving...' : 'Save User Settings' }}
+    </button>
+  </div>
+</form>

@@ -4553,7 +4553,7 @@ const docTemplate = `{
 
 // SwaggerInfo holds exported Swagger Info so clients can modify it
 var SwaggerInfo = &swag.Spec{
-	Version:          "3.2.0",
+	Version:          "3.3.0",
 	Title:            "SWCD MediaHub-API",
 	Description:      "This is a server for a image, audio and file storage with integrated web-ui.",
 	InfoInstanceName: "swagger",

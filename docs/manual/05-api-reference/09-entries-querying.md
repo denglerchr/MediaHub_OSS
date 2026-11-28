@@ -20,10 +20,12 @@ Queries a database for a paginated list of entry metadata with time-range filter
   * `limit` (integer, optional): Pagination limit.
   * `offset` (integer, optional): Pagination offset.
   * `order` (string, optional): Sort direction (`asc` or `desc`, default `desc`).
-  * `sort_by` (string, optional): Field to sort by (`timestamp`, `created_at`, `updated_at`, default `timestamp`).
+  * `sort_by` (string, optional): Field to sort by (`id`, `timestamp`, `created_at`, `updated_at`, default `timestamp`).
   * `time_field` (string, optional): Field to filter with `tstart`/`tend` (`timestamp`, `created_at`, `updated_at`, default `timestamp`).
   * `tstart` (integer/string, optional): Start timestamp in milliseconds or ISO8601 string.
   * `tend` (integer/string, optional): End timestamp in milliseconds or ISO8601 string.
+  * `idstart` (integer, optional): Inclusive minimum entry ID (`> 0`).
+  * `idend` (integer, optional): Inclusive maximum entry ID (`> 0`, must satisfy `idstart <= idend` when both are provided).
 * **Response (`200 OK`)**:
   ```json
   [

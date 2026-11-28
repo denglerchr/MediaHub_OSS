@@ -1,0 +1,20 @@
+<div class="global-keys-container page-container">
+  <app-page-header title="Global API Keys"></app-page-header>
+
+  <div class="scroll-content">
+    <div *ngIf="isLoading" class="loading-state">
+      <p>Loading global API keys...</p>
+    </div>
+
+    <div *ngIf="!isLoading" class="table-card">
+      <app-api-key-table
+        [keys]="apiKeys"
+        [showOwner]="true"
+        emptyMessage="No active API keys found in the system."
+        revokeTitle="Revoke API Key Globally"
+        (editKey)="openEditKeyModal($event)"
+        (revokeKey)="openRevokeConfirm($event)"
+      ></app-api-key-table>
+    </div>
+  </div>
+</div>

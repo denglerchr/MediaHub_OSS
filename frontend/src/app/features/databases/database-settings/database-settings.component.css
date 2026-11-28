@@ -1,0 +1,127 @@
+:host {
+  display: block;
+  height: 100%;
+}
+
+.settings-container {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+.settings-card {
+  /* Use CSS variables */
+  background: var(--content-bg);
+  padding: 1.5rem 2rem;
+  border-radius: 0.5rem;
+  border: 1px solid var(--border-color);
+  margin-bottom: 2rem;
+}
+
+.settings-card h3 {
+  border-bottom: 1px solid var(--border-color);
+  padding-bottom: 0.75rem;
+  margin-bottom: 1.5rem;
+}
+
+.sub-heading {
+  color: var(--text-muted);
+  margin-top: 2rem;
+  margin-bottom: 1rem;
+  font-weight: 600;
+}
+
+.settings-card h3 + .sub-heading {
+  margin-top: 0;
+}
+
+/* Stats Section */
+.stats-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 1.5rem;
+}
+
+.stat-item {
+  display: flex;
+  flex-direction: column;
+}
+
+.stat-label {
+  color: var(--text-muted);
+  font-size: 0.875rem;
+  margin-bottom: 0.25rem;
+}
+
+.stat-value {
+  color: var(--text-primary);
+  /* Use fluid scaling so huge numbers don't break mobile layouts */
+  font-size: var(--text-xl);
+  font-weight: 600;
+}
+
+/* Form Section */
+.form-group input:read-only {
+  /* Use CSS variables */
+  background-color: var(--input-bg);
+  opacity: 0.7;
+  cursor: not-allowed;
+}
+.text-muted {
+  color: var(--text-muted);
+  font-size: 0.875rem;
+}
+
+/* Form Actions Bar */
+.form-actions {
+  margin-top: 2.5rem;
+  padding-top: 1.5rem;
+  /* Use CSS variables */
+  border-top: 1px solid var(--border-color);
+  display: flex;
+  gap: 1rem;
+}
+
+/* Danger Zone */
+.danger-zone {
+  /* Use CSS variables */
+  border-color: var(--button-danger-bg);
+}
+
+.danger-zone h3 {
+  /* Use CSS variables */
+  color: var(--text-danger);
+}
+
+.danger-content {
+  display: flex;
+  flex-wrap: wrap; /* Allow wrapping on small screens */
+  justify-content: space-between;
+  align-items: center;
+  gap: 1.5rem;
+}
+
+.danger-content p {
+  margin: 0;
+  /* Use CSS variables */
+  color: var(--text-secondary);
+  flex-grow: 1;
+  min-width: 300px; /* Allow stacking */
+}
+
+/* Copied from image-list for the loading state */
+.state-message {
+  text-align: center;
+  padding: 4rem;
+  color: var(--text-muted);
+  font-size: 1.2rem;
+  background-color: var(--content-bg);
+  border-radius: 0.5rem;
+  border: 1px dashed var(--border-color-light);
+}
+
+@media (min-width: 1024px) {
+  .stat-value {
+    font-size: 1.35rem;
+  }
+}

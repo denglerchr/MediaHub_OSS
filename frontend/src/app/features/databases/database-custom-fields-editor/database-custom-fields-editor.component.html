@@ -1,0 +1,181 @@
+<div class="settings-card">
+  <h3>Custom Metadata Fields</h3>
+  <p class="text-muted" style="margin-bottom: 1.5rem">
+    Define custom fields to store extra metadata on your database entries. Columns will be
+    dynamically created or removed in the underlying table.
+  </p>
+
+  <!-- Custom Fields List Container with max-height and scrolling -->
+  <div
+    class="custom-fields-list-container"
+    *ngIf="database.custom_fields && database.custom_fields.length > 0; else noFields"
+  >
+    <div class="custom-fields-header-row">
+      <span class="field-col-id">ID</span>
+      <span class="field-col-name">Name</span>
+      <span class="field-col-type">Type</span>
+      <span class="field-col-indexed">Indexed</span>
+      <span class="field-col-actions" *ngIf="canAdmin">Actions</span>
+    </div>
+
+    <div class="custom-fields-scroll-area">
+      <div
+        class="custom-field-item-row"
+        *ngFor="let field of database.custom_fields; trackBy: trackByFieldId"
+      >
+        <!-- Read Mode -->
+        <ng-container *ngIf="editingFieldId !== field.id; else editMode">
+          <span class="field-col-id">#{{ field.id }}</span>
+          <span class="field-col-name">{{ field.name }}</span>
+          <span class="field-col-type"
+            ><span class="type-badge">{{ field.type }}</span></span
+          >
+          <span class="field-col-indexed">
+            <span class="indexed-badge" [class.indexed-true]="field.is_indexed">
+              {{ field.is_indexed ? 'Yes' : 'No' }}
+            </span>
+          </span>
+          <span class="field-col-actions" *ngIf="canAdmin">
+            <button
+              type="button"
+              class="field-action-btn"
+              (click)="onStartEditField(field)"
+              title="Edit field"
+              [disabled]="isMutatingField"
+            >
+              ✏️
+            </button>
+            <button
+              type="button"
+              class="field-action-btn btn-icon-danger"
+              (click)="onDeleteField(field)"
+              title="Delete field"
+              [disabled]="isMutatingField"
+            >
+              🗑️
+            </button>
+          </span>
+        </ng-container>
+
+        <!-- Edit Mode -->
+        <ng-template #editMode>
+          <span class="field-col-id">#{{ field.id }}</span>
+          <span class="field-col-name">
+            <input
+              type="text"
+              [(ngModel)]="editingFieldName"
+              [ngModelOptions]="{ standalone: true }"
+              class="form-control form-control-sm"
+              placeholder="Field name"
+            />
+          </span>
+          <span class="field-col-type"
+            ><span class="type-badge">{{ field.type }}</span></span
+          >
+          <span class="field-col-indexed">
+            <label
+              class="checkbox-container"
+              style="display: flex; align-items: center; cursor: pointer"
+            >
+              <input
+                type="checkbox"
+                [(ngModel)]="editingFieldIsIndexed"
+                [ngModelOptions]="{ standalone: true }"
+              />
+            </label>
+          </span>
+          <span class="field-col-actions" *ngIf="canAdmin">
+            <button
+              type="button"
+              class="field-action-btn btn-icon-success"
+              (click)="onSaveField(field.id!)"
+              title="Save changes"
+              [disabled]="isMutatingField || !editingFieldName"
+            >
+              ✔️
+            </button>
+            <button
+              type="button"
+              class="field-action-btn"
+              (click)="onCancelEditField()"
+              title="Cancel"
+            >
+              ❌
+            </button>
+          </span>
+        </ng-template>
+      </div>
+    </div>
+  </div>
+
+  <ng-template #noFields>
+    <p class="text-muted" style="font-style: italic; margin-bottom: 1.5rem">
+      No custom metadata fields have been added yet.
+    </p>
+  </ng-template>
+
+  <!-- Add New Custom Field Form (Only if canAdmin) -->
+  <div
+    class="add-field-form"
+    *ngIf="canAdmin"
+    style="margin-top: 1.5rem; padding-top: 1.5rem; border-top: 1px dashed var(--border-color)"
+  >
+    <h4>Add New Custom Field</h4>
+    <div class="add-field-row">
+      <div class="form-group" style="margin: 0">
+        <input
+          type="text"
+          [(ngModel)]="newFieldName"
+          [ngModelOptions]="{ standalone: true }"
+          placeholder="Field name (e.g. genre)"
+          class="form-control"
+        />
+      </div>
+      <div class="form-group" style="margin: 0">
+        <select
+          [(ngModel)]="newFieldType"
+          [ngModelOptions]="{ standalone: true }"
+          class="form-control"
+        >
+          <option value="TEXT">Text</option>
+          <option value="INTEGER">Integer</option>
+          <option value="REAL">Real (Decimal)</option>
+          <option value="BOOLEAN">Boolean</option>
+          <option value="COORDINATE">Coordinate</option>
+        </select>
+      </div>
+      <div
+        class="form-group"
+        style="
+          margin: 0;
+          display: flex;
+          align-items: center;
+          gap: 0.5rem;
+          white-space: nowrap;
+          color: var(--text-secondary);
+        "
+      >
+        <label
+          class="checkbox-container"
+          style="display: flex; align-items: center; gap: 0.5rem; cursor: pointer"
+        >
+          <input
+            type="checkbox"
+            [(ngModel)]="newFieldIsIndexed"
+            [ngModelOptions]="{ standalone: true }"
+          />
+          <span>Indexed</span>
+        </label>
+      </div>
+      <button
+        type="button"
+        class="btn btn-primary"
+        (click)="onAddField()"
+        [disabled]="isMutatingField || !newFieldName"
+        style="padding: 0.5rem 1.5rem"
+      >
+        Add
+      </button>
+    </div>
+  </div>
+</div>

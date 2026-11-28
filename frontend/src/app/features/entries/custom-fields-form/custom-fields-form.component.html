@@ -1,0 +1,111 @@
+<div *ngIf="fields.length > 0" class="custom-fields-section">
+  <h4>{{ heading }}</h4>
+  <div class="form-grid" [formGroup]="formGroup">
+    <div *ngFor="let field of fields; trackBy: trackByFieldId" class="form-group">
+      <ng-container [ngSwitch]="field.type">
+        <ng-container *ngSwitchCase="'BOOLEAN'">
+          <label [for]="idPrefix + field.name" class="form-label">{{ field.name }} (BOOLEAN)</label>
+          <app-toggle-switch
+            [inputId]="idPrefix + field.name"
+            [formControlName]="field.name"
+          ></app-toggle-switch>
+        </ng-container>
+
+        <ng-container *ngSwitchCase="'COORDINATE'">
+          <label [for]="idPrefix + field.name + '-lat'" class="form-label"
+            >{{ field.name }} (COORDINATE)</label
+          >
+          <div
+            [formGroupName]="field.name"
+            class="coordinate-input-group"
+            style="display: flex; gap: 0.5rem"
+          >
+            <input
+              [id]="idPrefix + field.name + '-lat'"
+              type="number"
+              step="any"
+              min="-90"
+              max="90"
+              formControlName="latitude"
+              placeholder="Latitude (-90 to 90)"
+              class="form-control"
+              style="flex: 1"
+            />
+            <input
+              type="number"
+              step="any"
+              min="-180"
+              max="180"
+              formControlName="longitude"
+              placeholder="Longitude (-180 to 180)"
+              class="form-control"
+              style="flex: 1"
+            />
+          </div>
+          <div
+            *ngIf="formGroup.get(field.name)?.hasError('incompleteCoordinate')"
+            class="form-error"
+          >
+            Enter both latitude and longitude.
+          </div>
+          <div
+            *ngIf="
+              formGroup.get([field.name, 'latitude'])?.hasError('min') ||
+              formGroup.get([field.name, 'latitude'])?.hasError('max')
+            "
+            class="form-error"
+          >
+            Latitude must be between -90 and 90.
+          </div>
+          <div
+            *ngIf="
+              formGroup.get([field.name, 'longitude'])?.hasError('min') ||
+              formGroup.get([field.name, 'longitude'])?.hasError('max')
+            "
+            class="form-error"
+          >
+            Longitude must be between -180 and 180.
+          </div>
+        </ng-container>
+
+        <ng-container *ngSwitchDefault>
+          <label [for]="idPrefix + field.name" class="form-label"
+            >{{ field.name }} ({{ field.type }})</label
+          >
+
+          <ng-container [ngSwitch]="field.type">
+            <input
+              *ngSwitchCase="'INTEGER'"
+              [id]="idPrefix + field.name"
+              type="number"
+              step="1"
+              [formControlName]="field.name"
+              class="form-control"
+            />
+            <input
+              *ngSwitchCase="'REAL'"
+              [id]="idPrefix + field.name"
+              type="number"
+              step="any"
+              [formControlName]="field.name"
+              class="form-control"
+            />
+            <input
+              *ngSwitchDefault
+              [id]="idPrefix + field.name"
+              type="text"
+              [formControlName]="field.name"
+              class="form-control"
+            />
+          </ng-container>
+          <div
+            *ngIf="field.type === 'INTEGER' && formGroup.get(field.name)?.invalid"
+            class="form-error"
+          >
+            Must be a whole number.
+          </div>
+        </ng-container>
+      </ng-container>
+    </div>
+  </div>
+</div>

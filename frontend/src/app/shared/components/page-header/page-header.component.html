@@ -1,0 +1,26 @@
+<div class="sticky-header" [class.sticky-header-transparent]="transparent">
+  <div class="page-header-left">
+    <a [routerLink]="backLink" class="back-btn" [title]="backTitle" [attr.aria-label]="backTitle">
+      <svg
+        xmlns="http://www.w3.org/2000/svg"
+        width="1.5em"
+        height="1.5em"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        stroke-width="2"
+        stroke-linecap="round"
+        stroke-linejoin="round"
+        aria-hidden="true"
+      >
+        <line x1="19" y1="12" x2="5" y2="12"></line>
+        <polyline points="12 19 5 12 12 5"></polyline>
+      </svg>
+    </a>
+    <div class="page-header-title-wrap">
+      <h2 class="shortened-title" [title]="titleTooltip ?? title">{{ title }}</h2>
+      <ng-content select="[pageHeaderSubtitle]"></ng-content>
+    </div>
+  </div>
+  <ng-content></ng-content>
+</div>

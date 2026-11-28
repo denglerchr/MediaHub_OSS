@@ -32,6 +32,7 @@ Uploads a single media file into a database using `multipart/form-data`.
      ```
      * **`COORDINATE` custom fields** *(New in v3.2)* are sent as an object: `{"location": {"latitude": 48.137154, "longitude": 11.576124}}` (aliases `lat` / `lon` / `lng` are accepted; latitude must be within `-90…90`, longitude within `-180…180`).
   2. `file` (binary file part): Raw binary content of the file.
+  3. `preview` (optional binary file part, `Content-Type: image/webp`): Custom WebP preview image (static or animated WebP allowed, max **128 KiB** / `131,072` bytes, max **200 × 200** pixels). When provided, automatic preview generation is skipped even if `create_preview` is enabled, and custom previews are accepted across all database `content_type`s (including `file`). Invalid or oversized previews fail with `400`, `413`, or `415`.
 
 ### Response Case 1: Synchronous Processing (`201 Created`)
 Returned for small, synchronous uploads.
@@ -154,7 +155,7 @@ When transformed, `filename`, `mime_type`, and `size` reflect the transformed ou
 
 ## `GET /api/database/{database_id}/entry/{id}/preview`
 
-Retrieves the generated preview thumbnail for an entry (e.g. `image/webp`). Supports **Content Negotiation**.
+Retrieves the generated or manually uploaded WebP preview thumbnail for an entry (`image/webp`). Supported across all database `content_type`s (including `file`). Supports **Content Negotiation**.
 
 * **Role Required**: `can_view` on database
 * **Path Parameters**:
@@ -164,7 +165,70 @@ Retrieves the generated preview thumbnail for an entry (e.g. `image/webp`). Supp
   * `Accept`: `*/*` (default binary image) or `application/json` (Base64 wrapper).
 
 ### Response (`200 OK`)
-Returns binary image payload (with `Cache-Control: no-cache`) or JSON Base64 string payload.
+Returns binary WebP payload (with `Cache-Control: no-cache`) or JSON Base64 string payload.
+
+---
+
+## `POST /api/database/{database_id}/entry/{id}/preview`
+
+Adds a custom WebP preview to an existing entry **only if it does not already have one** (`preview_filesize == 0`). Supported across all database `content_type`s (including `file`), regardless of `create_preview`. Designed for programmatic clients.
+
+* **Role Required**: `can_create` on database
+* **Path Parameters**:
+  * `database_id` (string, required): Database ULID.
+  * `id` (integer, required): Unique entry ID.
+* **Headers**:
+  * `Content-Type` (required): `image/webp` *(JSON and `multipart/form-data` are rejected with `415 Unsupported Media Type`)*.
+* **Request Body & Constraints**: Raw binary WebP image (static or animated WebP allowed), max **128 KiB** (`131,072` bytes), dimensions `1..200 × 1..200` pixels.
+* **Response (`201 Created`)**:
+  ```json
+  {
+    "database_id": "01HGFB9Z5W7ABCDEFGHJKMNPQR",
+    "id": 10232,
+    "preview_filesize": 9420,
+    "updated_at": 1790000010000
+  }
+  ```
+* **Error Responses**: `400 Bad Request` (empty/malformed WebP or invalid dimensions), `404 Not Found` (missing DB/entry), `409 Conflict` (preview already exists or entry is `processing`, `queued`, or `deleting`), `413 Payload Too Large` (`> 128 KiB`), `415 Unsupported Media Type`.
+
+---
+
+## `PUT /api/database/{database_id}/entry/{id}/preview`
+
+Creates or replaces the custom WebP preview for an existing entry (**upsert**). Uses the same `Content-Type: image/webp` raw binary request body and validation limits (`128 KiB`, `200 × 200` px, static or animated WebP allowed).
+
+* **Role Required**: `can_edit` on database
+* **Path Parameters**:
+  * `database_id` (string, required): Database ULID.
+  * `id` (integer, required): Unique entry ID.
+* **Response (`200 OK`)**:
+  ```json
+  {
+    "database_id": "01HGFB9Z5W7ABCDEFGHJKMNPQR",
+    "id": 10232,
+    "preview_filesize": 10240,
+    "updated_at": 1790000020000
+  }
+  ```
+* **Error Responses**: `400`, `404`, `409` (entry is `processing`, `queued`, or `deleting`), `413`, `415`.
+
+---
+
+## `DELETE /api/database/{database_id}/entry/{id}/preview`
+
+Deletes the entry's stored preview image, resets `preview_filesize` to `0`, and updates database disk space statistics.
+
+* **Role Required**: `can_delete` on database
+* **Path Parameters**:
+  * `database_id` (string, required): Database ULID.
+  * `id` (integer, required): Unique entry ID.
+* **Response (`200 OK`)**:
+  ```json
+  {
+    "message": "Preview for entry '10232' in database '01HGFB9Z5W7ABCDEFGHJKMNPQR' was successfully deleted."
+  }
+  ```
+* **Error Responses**: `404 Not Found` (missing DB, entry, or preview), `409 Conflict` (entry is `processing`, `queued`, or `deleting`).
 
 ---
 

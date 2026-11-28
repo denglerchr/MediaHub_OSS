@@ -569,7 +569,7 @@ info:
   description: This is a server for a image, audio and file storage with integrated
     web-ui.
   title: SWCD MediaHub-API
-  version: 3.2.0
+  version: 3.3.0
 openapi: 3.1.0
 paths:
   /audit:

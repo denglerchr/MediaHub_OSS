@@ -1,0 +1,53 @@
+<div class="groups-container" [class.selection-active]="selectedIds.size > 0">
+  <div
+    class="date-group"
+    *ngFor="let group of dateGroups; trackBy: trackByDateStr"
+    [class.large-group]="group.isLarge"
+    [style.flex-grow]="group.isLarge ? 1 : group.aspectRatio"
+    [style.flex-basis]="
+      group.isLarge ? '100%' : 'calc(var(--tile-height) * ' + group.aspectRatio + ')'
+    "
+  >
+    <div class="group-header">{{ group.dateStr }}</div>
+    <div class="group-items" [class.nowrap]="!group.isLarge">
+      <div
+        *ngFor="let entry of group.entries; trackBy: trackById"
+        class="grid-card"
+        [class.selected]="isSelected(entry)"
+        (click)="onEntryClick(entry, $event)"
+        [style.flex-grow]="getAspectRatio(entry)"
+        [style.flex-basis]="'calc(var(--tile-height) * ' + getAspectRatio(entry) + ')'"
+      >
+        <div class="selection-overlay" (click)="onCheckboxClick(entry, $event)">
+          <div class="checkbox-circle" [class.checked]="isSelected(entry)">
+            <svg
+              *ngIf="isSelected(entry)"
+              xmlns="http://www.w3.org/2000/svg"
+              viewBox="0 0 20 20"
+              fill="currentColor"
+            >
+              <path
+                fill-rule="evenodd"
+                d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z"
+                clip-rule="evenodd"
+              />
+            </svg>
+          </div>
+        </div>
+
+        <div class="grid-card-preview">
+          <app-entry-thumbnail
+            [entry]="entry"
+            [previewUrl]="getPreviewUrl(entry)"
+            variant="grid"
+            [failed]="failedImageIds.has(entry.id)"
+            (imageError)="onImageError(entry.id)"
+            (aspectLoaded)="onAspectLoaded(entry.id, $event)"
+          ></app-entry-thumbnail>
+        </div>
+      </div>
+      <div class="group-spacer"></div>
+    </div>
+  </div>
+  <div class="groups-spacer"></div>
+</div>

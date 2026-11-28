@@ -1,0 +1,162 @@
+<div class="user-management-container page-container">
+  <app-page-header title="User Management">
+    <button *ngIf="activeListTab !== 'oidc'" class="btn btn-primary" (click)="createNewUser()">
+      Create {{ activeListTab === 'service' ? 'Service Account' : 'User' }}
+    </button>
+  </app-page-header>
+
+  <div *ngIf="isLoading" class="loading-state">
+    <p>Loading user data...</p>
+  </div>
+
+  <div *ngIf="!isLoading" class="split-pane-container">
+    <!-- Left Pane: Sidebar List with Tabs -->
+    <div class="sidebar-pane">
+      <div class="list-tabs-container">
+        <button
+          class="tab-btn list-tab-btn"
+          [class.active]="activeListTab === 'standard'"
+          (click)="setListTab('standard')"
+        >
+          Standard Users
+        </button>
+        <button
+          class="tab-btn list-tab-btn"
+          [class.active]="activeListTab === 'service'"
+          (click)="setListTab('service')"
+        >
+          Service Accounts
+        </button>
+        <button
+          class="tab-btn list-tab-btn"
+          [class.active]="activeListTab === 'oidc'"
+          (click)="setListTab('oidc')"
+        >
+          SSO / OIDC
+        </button>
+      </div>
+
+      <ul class="user-list">
+        <li *ngIf="users.length === 0" class="empty-state">
+          No
+          {{
+            activeListTab === 'service'
+              ? 'service accounts'
+              : activeListTab === 'oidc'
+                ? 'SSO/OIDC users'
+                : 'users'
+          }}
+          found.
+        </li>
+
+        <li *ngIf="isNewUser" class="user-list-item draft-item" (click)="createNewUser()">
+          <div class="username-text" style="color: var(--text-accent)">
+            ✨ New {{ activeListTab === 'service' ? 'Service Account' : 'User' }} Draft
+          </div>
+          <div class="user-id">Unsaved</div>
+        </li>
+
+        <li
+          *ngFor="let user of users; trackBy: trackById"
+          (click)="selectUser(user)"
+          class="user-list-item"
+          [ngClass]="{ selected: selectedUser?.id === user.id }"
+        >
+          <div class="username-text">{{ user.username }}</div>
+
+          <div class="user-meta">
+            <span class="user-id">ID: {{ user.id | slice: 0 : 8 }}...</span>
+            <span *ngIf="user.is_admin" class="admin-badge">Admin</span>
+            <span *ngIf="user.account_type === 'service_account'" class="service-badge">SA</span>
+            <!-- Same style as the SA badge (blue accent text, no background). The previous
+                 inline `background: var(--color-primary, #3b82f6)` painted a solid blue box
+                 over the badge while the text stayed --text-accent blue — invisible text. -->
+            <span *ngIf="user.account_type === 'oidc'" class="service-badge">OIDC</span>
+          </div>
+        </li>
+      </ul>
+    </div>
+
+    <!-- Right Pane: Detail View -->
+    <div class="detail-pane">
+      <div *ngIf="!selectedUser && !isNewUser" class="empty-state-detail">
+        <p>Select a user to view or edit their settings.</p>
+      </div>
+
+      <div *ngIf="selectedUser || isNewUser">
+        <div class="detail-header-row">
+          <div class="detail-header">
+            <h3>
+              {{
+                isNewUser
+                  ? 'Create New ' + (activeListTab === 'service' ? 'Service Account' : 'User')
+                  : 'Edit User: ' + selectedUser?.username
+              }}
+            </h3>
+            <button
+              *ngIf="!isNewUser"
+              (click)="openDeleteConfirm()"
+              class="btn btn-danger"
+              [disabled]="isSaving || isDeleting || isSelectedCurrentUser"
+              [title]="isSelectedCurrentUser ? 'You cannot delete your own account.' : ''"
+            >
+              Delete {{ selectedUser?.account_type | accountTypeLabel: 'action' }}
+            </button>
+          </div>
+
+          <!-- Detail Tabs (Only when editing an existing user) -->
+          <div class="detail-tabs-container" *ngIf="selectedUser">
+            <button
+              class="tab-btn detail-tab-btn"
+              [class.active]="activeDetailTab === 'settings'"
+              (click)="setDetailTab('settings')"
+            >
+              Settings & Rights
+            </button>
+            <button
+              class="tab-btn detail-tab-btn"
+              [class.active]="activeDetailTab === 'keys'"
+              (click)="setDetailTab('keys')"
+            >
+              API Keys ({{ keysLoadedForUserId === selectedUser.id ? userKeys.length : '...' }})
+            </button>
+          </div>
+        </div>
+
+        <!-- Detail Tab 1: Settings Form -->
+        <app-user-detail-form
+          *ngIf="activeDetailTab === 'settings'"
+          [formGroup]="detailForm"
+          [isNewUser]="isNewUser"
+          [isSaving]="isSaving"
+          [submitted]="submitted"
+          (save)="onSaveUser()"
+          (toggleColumn)="toggleColumnAll($event)"
+          (cancelled)="clearSelection()"
+        ></app-user-detail-form>
+
+        <!-- Detail Tab 2: Delegated API Keys Pane -->
+        <div class="delegated-keys-section" *ngIf="activeDetailTab === 'keys' && selectedUser">
+          <div class="section-header-row">
+            <h4>API Keys for {{ selectedUser.username }}</h4>
+            <button type="button" class="btn btn-primary" (click)="openCreateKeyModal()">
+              Create API Key
+            </button>
+          </div>
+
+          <div *ngIf="isKeysLoading" class="loading-state">Loading keys...</div>
+
+          <app-api-key-table
+            *ngIf="!isKeysLoading"
+            style="margin-top: 1rem"
+            [keys]="userKeys"
+            emptyMessage="No API keys generated for this account yet."
+            revokeTitle="Revoke API Key"
+            (editKey)="openEditKeyModal($event)"
+            (revokeKey)="openRevokeKeyConfirm($event)"
+          ></app-api-key-table>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>

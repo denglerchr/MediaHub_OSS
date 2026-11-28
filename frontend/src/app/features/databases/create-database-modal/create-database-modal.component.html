@@ -1,0 +1,170 @@
+<app-modal [modalId]="'createDatabaseModal'" [modalTitle]="'Create New Database'">
+  <form [formGroup]="createDbForm" (ngSubmit)="onSubmit()">
+    <div class="form-section">
+      <h4>Basic Information</h4>
+      <div class="form-grid">
+        <div class="form-group" style="grid-column: 1 / -1">
+          <label for="name" class="form-label">Database Name</label>
+          <input
+            id="name"
+            type="text"
+            formControlName="name"
+            class="form-control"
+            placeholder="e.g. my_vacation_photos"
+          />
+
+          <div
+            *ngIf="createDbForm.get('name')?.invalid && createDbForm.get('name')?.touched"
+            class="form-error"
+          >
+            <span *ngIf="createDbForm.get('name')?.hasError('required')">Name is required.</span>
+            <span *ngIf="createDbForm.get('name')?.hasError('maxlength')"
+              >Name cannot exceed 64 characters.</span
+            >
+            <span *ngIf="createDbForm.get('name')?.hasError('pattern')"
+              >Name must start with a letter or underscore and contain only letters, digits, or
+              underscores.</span
+            >
+          </div>
+        </div>
+
+        <div class="form-group" style="grid-column: 1 / -1">
+          <label for="content_type" class="form-label">Content Type</label>
+          <select id="content_type" formControlName="content_type" class="form-control">
+            <option value="image">Image</option>
+            <option value="audio">Audio</option>
+            <option value="video">Video</option>
+            <option value="file">Generic File</option>
+          </select>
+        </div>
+
+        <div class="form-group" style="grid-column: 1 / -1">
+          <label for="n_max_queued" class="form-label">Max Queued Conversions</label>
+          <input
+            id="n_max_queued"
+            type="number"
+            formControlName="n_max_queued"
+            class="form-control"
+            min="0"
+          />
+          <small class="text-muted"
+            >Maximum number of entries that can be queued for processing at once. Set to 0 to
+            disable queuing.</small
+          >
+
+          <div
+            *ngIf="
+              createDbForm.get('n_max_queued')?.invalid && createDbForm.get('n_max_queued')?.touched
+            "
+            class="form-error"
+          >
+            <span *ngIf="createDbForm.get('n_max_queued')?.hasError('required')"
+              >Max queued conversions is required.</span
+            >
+            <span *ngIf="createDbForm.get('n_max_queued')?.hasError('min')"
+              >Max queued conversions cannot be negative.</span
+            >
+            <span *ngIf="createDbForm.get('n_max_queued')?.hasError('pattern')"
+              >Max queued conversions must be a whole number.</span
+            >
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="form-section">
+      <app-database-media-config
+        [formGroup]="createDbForm"
+        [contentType]="createDbForm.get('content_type')?.value"
+        layout="grid"
+        headingStyle="h4"
+        headingSuffix="Configuration"
+      ></app-database-media-config>
+    </div>
+
+    <div class="form-section">
+      <h4>Housekeeping Rules</h4>
+      <app-housekeeping-fields
+        [formGroup]="housekeepingGroup"
+        [showHelperIcons]="true"
+      ></app-housekeeping-fields>
+    </div>
+
+    <div class="form-section">
+      <div class="section-header">
+        <h4>Custom Metadata Fields</h4>
+        <button type="button" class="btn-link" (click)="addCustomField()">+ Add Field</button>
+      </div>
+      <div formArrayName="custom_fields">
+        <div
+          *ngFor="let field of customFields.controls; let i = index; trackBy: trackByIndex"
+          [formGroupName]="i"
+          class="custom-field-row"
+        >
+          <input type="text" formControlName="name" placeholder="Field Name" class="form-control" />
+          <select formControlName="type" class="form-control">
+            <option value="TEXT">Text</option>
+            <option value="INTEGER">Integer</option>
+            <option value="REAL">Real (Decimal)</option>
+            <option value="BOOLEAN">Boolean</option>
+            <option value="COORDINATE">Coordinate</option>
+          </select>
+          <label
+            class="checkbox-container"
+            style="
+              display: flex;
+              align-items: center;
+              gap: 0.5rem;
+              white-space: nowrap;
+              cursor: pointer;
+              color: var(--text-secondary);
+            "
+          >
+            <input type="checkbox" formControlName="is_indexed" />
+            <span>Indexed</span>
+          </label>
+          <button
+            type="button"
+            class="btn-remove"
+            (click)="removeCustomField(i)"
+            title="Remove Field"
+          >
+            🗑️
+          </button>
+          <!-- FE-053: specific validation text (the invalid name used to silently
+               disable Create with no explanation) -->
+          <div
+            *ngIf="
+              field.get('name')?.invalid && (field.get('name')?.touched || field.get('name')?.dirty)
+            "
+            class="form-error"
+          >
+            <span *ngIf="field.get('name')?.errors?.['required']">Field name is required.</span>
+            <span *ngIf="field.get('name')?.errors?.['maxlength']"
+              >Field name cannot exceed 64 characters.</span
+            >
+            <span *ngIf="field.get('name')?.errors?.['pattern']"
+              >Field name must start with a letter or underscore and contain only letters, digits or
+              underscores.</span
+            >
+            <span *ngIf="field.get('name')?.errors?.['reserved']"
+              >This name is reserved (standard/media field) — please choose another.</span
+            >
+            <span *ngIf="field.get('name')?.errors?.['duplicate']"
+              >Duplicate custom field name — field names must be unique.</span
+            >
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="modal-actions">
+      <button type="button" class="btn btn-secondary" (click)="closeModal()" [disabled]="isLoading">
+        Cancel
+      </button>
+      <button type="submit" class="btn btn-primary" [disabled]="createDbForm.invalid || isLoading">
+        {{ isLoading ? 'Creating...' : 'Create Database' }}
+      </button>
+    </div>
+  </form>
+</app-modal>

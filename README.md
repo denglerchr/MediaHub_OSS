@@ -337,7 +337,7 @@ custom_fields = [
 
 As mentioned you can just use prebuild binaries, but if you want to build the program yourself, you can will need the following.
 
-  * **Go:** Version 1.25 or later (as specified in `go.mod`).
+  * **Go:** Version 1.26 or later (as specified in `go.mod`).
   * **Node.js & npm:** Required for building the frontend.
   * **Angular CLI:** The command-line interface for Angular. Install globally with `npm install -g @angular/cli`.
   * **FFmpeg & FFprobe:** Required for transcoding, preview generation and metadata extraction.
@@ -350,17 +350,23 @@ The build process compiles the Go backend with the Angular frontend embedded dir
 
 ### 1\. (Optional) Generate API Documentation
 
-If you have made changes to the API handlers, regenerate the Swagger documentation *before* building the frontend.
+If you have made changes to the API handlers, regenerate the OpenAPI 3.1 documentation *before* building the backend (requires `swag` v2, not v1):
 
 ```bash
-# Ensure you have the swag CLI tool installed
-# go install github.com/swaggo/swag/cmd/swag@latest
+# Install the swag v2 CLI tool
+go install github.com/swaggo/swag/v2/cmd/swag@v2.0.0-rc6
 
-# From the project root, regenerate the docs
-swag init -g ./cmd/mediahub/main.go
+# From the project root, regenerate the OpenAPI 3.1 docs
+swag init -g ./cmd/mediahub/main.go --v3.1
 ```
 
-The generated documentation is served at the `/swagger/index.html` endpoint.
+Or without replacing a globally installed `swag` binary:
+
+```bash
+go run github.com/swaggo/swag/v2/cmd/swag@v2.0.0-rc6 init -g ./cmd/mediahub/main.go --v3.1
+```
+
+The generated OpenAPI 3.1 specification and Swagger UI v5 are served at `/swagger/` (and `/swagger/doc.json`).
 
 ### 2\. Build the Frontend (Angular UI)
 

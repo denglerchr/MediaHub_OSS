@@ -1,0 +1,125 @@
+<div [ngClass]="variant === 'grid' ? 'thumbnail-grid' : 'thumbnail-list'">
+  <ng-container [ngSwitch]="entry.status">
+    <div
+      *ngSwitchCase="EntryStatus.Queued"
+      [ngClass]="
+        variant === 'grid'
+          ? 'grid-card-placeholder status-queued'
+          : 'list-preview-placeholder status-queued'
+      "
+      [attr.title]="variant === 'list' ? 'Queued...' : null"
+    >
+      <svg
+        class="placeholder-icon"
+        xmlns="http://www.w3.org/2000/svg"
+        fill="none"
+        viewBox="0 0 24 24"
+        stroke="currentColor"
+      >
+        <circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="2"></circle>
+        <polyline
+          points="12 6 12 12 16 14"
+          stroke="currentColor"
+          stroke-width="2"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+        ></polyline>
+      </svg>
+      <span *ngIf="variant === 'grid'">QUEUED</span>
+    </div>
+
+    <div
+      *ngSwitchCase="EntryStatus.Processing"
+      [ngClass]="
+        variant === 'grid'
+          ? 'grid-card-placeholder status-processing'
+          : 'list-preview-placeholder status-processing'
+      "
+      [attr.title]="variant === 'list' ? 'Processing...' : null"
+    >
+      <svg
+        class="placeholder-icon processing-icon"
+        xmlns="http://www.w3.org/2000/svg"
+        fill="none"
+        viewBox="0 0 24 24"
+      >
+        <circle
+          class="opacity-25"
+          cx="12"
+          cy="12"
+          r="10"
+          stroke="currentColor"
+          stroke-width="4"
+        ></circle>
+        <path
+          class="opacity-75"
+          fill="currentColor"
+          d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
+        ></path>
+      </svg>
+      <span *ngIf="variant === 'grid'">PROCESSING</span>
+    </div>
+
+    <div
+      *ngSwitchCase="EntryStatus.Error"
+      [ngClass]="
+        variant === 'grid'
+          ? 'grid-card-placeholder status-error'
+          : 'list-preview-placeholder status-error'
+      "
+      [attr.title]="variant === 'list' ? 'Processing Error' : null"
+    >
+      <svg
+        class="placeholder-icon"
+        xmlns="http://www.w3.org/2000/svg"
+        viewBox="0 0 20 20"
+        fill="currentColor"
+      >
+        <path
+          fill-rule="evenodd"
+          d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 3.006-1.742 3.006H4.42c-1.53 0-2.493-1.672-1.743-3.006l5.58-9.92zM10 13a1 1 0 100-2 1 1 0 000 2zm-1-8a1 1 0 011 1v3a1 1 0 11-2 0V6a1 1 0 011-1z"
+          clip-rule="evenodd"
+        />
+      </svg>
+      <span *ngIf="variant === 'grid'">ERROR</span>
+    </div>
+
+    <ng-container *ngSwitchDefault>
+      <img
+        *ngIf="!failed"
+        [secureSrc]="previewUrl"
+        (imageError)="imageError.emit()"
+        (aspectLoaded)="aspectLoaded.emit($event)"
+        (click)="onImageClick()"
+        (keydown.enter)="onImageClick()"
+        [attr.tabindex]="variant === 'list' ? 0 : null"
+        [attr.role]="variant === 'list' ? 'button' : null"
+        [ngClass]="variant === 'grid' ? 'grid-card-img' : 'list-preview-img'"
+        [alt]="'Preview for ' + entry.id"
+      />
+
+      <div
+        *ngIf="failed"
+        [ngClass]="variant === 'grid' ? 'grid-card-placeholder' : 'list-preview-placeholder'"
+        [attr.title]="variant === 'list' ? 'No Preview Available' : null"
+      >
+        <svg
+          class="placeholder-icon"
+          xmlns="http://www.w3.org/2000/svg"
+          fill="none"
+          viewBox="0 0 24 24"
+          stroke="currentColor"
+        >
+          <path
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            stroke-width="2"
+            d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"
+          />
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 3l18 18" />
+        </svg>
+        <span *ngIf="variant === 'grid'">NO PREVIEW</span>
+      </div>
+    </ng-container>
+  </ng-container>
+</div>
